@@ -1,0 +1,89 @@
+[project]
+name = "ai-teacher"
+version = "0.1.0"
+description = "AI Teacher - Intelligent Learning Platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[all]>=0.115.12",
+    "uvicorn>=0.34.2",
+    "sqlmodel>=0.0.24",
+    "pydantic>=2.11.3",
+    "pydantic-settings>=2.9.1",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.20",
+    "loguru>=0.7.3",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-chroma>=0.2.3",
+    "chromadb>=0.6.3",
+    "openai>=1.0.0",
+    "sentence-transformers>=4.1.0",
+    "streamlit>=1.40.0",
+]
+
+[tool.ruff]
+# Same as Black.
+line-length = 88
+
+# Assume Python 3.12
+target-version = "py312"
+
+[tool.ruff.lint]
+# Enable all rules by default
+select = ["E", "F", "B", "I", "N", "UP", "PL", "RUF"]
+ignore = ["B008"]
+
+# Allow autofix for all enabled rules (when `--fix` is used)
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.mccabe]
+# Unlike Flake8, default to a complexity level of 10.
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+known-first-party = ["ai_teacher"]
+
+[tool.ruff.format]
+# Use double quotes for strings.
+quote-style = "double"
+
+# Indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, respect magic trailing commas.
+line-ending = "auto"
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+
