@@ -85,3 +85,4 @@ class RAGSystem:
         context = "\n\n".join([result["content"] for result in results])
         return context
 
+

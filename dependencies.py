@@ -5,11 +5,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlmodel import Session, select
 
-from auth.models import User, UserRole
-from settings import Settings
+from models.user import User, UserRole
+from settings import settings
 from utils.db import get_session
-
-settings = Settings()
 security = HTTPBearer()
 
 
@@ -103,14 +101,14 @@ class AuthDependency:
 # Common dependencies (remain the same)
 get_current_user = AuthDependency.get_current_user
 require_admin = AuthDependency.check_roles([UserRole.ADMIN])
-require_manager = AuthDependency.check_roles([UserRole.MANAGER, UserRole.ADMIN])
+require_teacher = AuthDependency.check_roles([UserRole.TEACHER, UserRole.ADMIN])
 require_user = AuthDependency.check_roles(
-    [UserRole.USER, UserRole.MANAGER, UserRole.ADMIN]
+    [UserRole.STUDENT, UserRole.TEACHER, UserRole.ADMIN]
 )
 
 # Type hints for dependency injection (remain the same)
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminUser = Annotated[User, Depends(require_admin)]
-ManagerUser = Annotated[User, Depends(require_manager)]
+TeacherUser = Annotated[User, Depends(require_teacher)]
 AnyUser = Annotated[User, Depends(require_user)]
 

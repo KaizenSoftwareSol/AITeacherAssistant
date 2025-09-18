@@ -72,3 +72,4 @@ class ContentGenerator:
         
         return response.content
 
+

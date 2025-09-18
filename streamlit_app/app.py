@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 # API base URL
-API_BASE_URL = "http://localhost:8000/api/v1"
+API_BASE_URL = "http://localhost:8001/api/v1"
 
 def main():
     st.title("🎓 AI Teacher - Learning Platform")
@@ -99,7 +99,7 @@ def show_register():
         email = st.text_input("Email")
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
-        role = st.selectbox("Role", ["student", "teacher", "admin"])
+        role = st.selectbox("Role", ["student", "user", "manager", "admin"])
         submit = st.form_submit_button("Register")
         
         if submit:
@@ -166,4 +166,5 @@ def show_courses():
 
 if __name__ == "__main__":
     main()
+
 

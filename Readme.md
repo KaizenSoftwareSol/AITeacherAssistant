@@ -17,7 +17,7 @@ An intelligent learning platform built with FastAPI, featuring AI-powered conten
 AI_Teacher/
 ├── ai/                    # AI-related modules
 │   ├── agent.py          # AI agent for chat and assistance
-│   ├── generation.py     # Content generation utilities
+│   ├── generation.py     # Content generation utilities 
 │   └── rag.py           # RAG system for knowledge retrieval
 ├── auth/                 # Authentication module
 │   ├── models.py        # User and auth models
@@ -108,4 +108,5 @@ The project uses:
 ## License
 
 This project is licensed under the MIT License.
+
 
