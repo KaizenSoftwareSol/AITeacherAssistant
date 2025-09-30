@@ -20,7 +20,7 @@ class UserCreate(BaseModel):
 
 class UserRead(BaseModel):
     """Model for reading user data (without sensitive info)."""
-    id: int
+    id: str  # UUID string from Supabase
     email: str
     username: str
     first_name: str
@@ -48,4 +48,4 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     """Token data model."""
-    user_id: Optional[int] = None
+    user_id: Optional[str] = None  # UUID string

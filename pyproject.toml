@@ -14,12 +14,13 @@ dependencies = [
     "passlib[bcrypt]>=1.7.4",
     "python-multipart>=0.0.20",
     "loguru>=0.7.3",
-    "langchain>=0.3.0",
-    "langchain-openai>=0.2.0",
-    "langchain-chroma>=0.2.3",
-    "chromadb>=0.6.3",
-    "openai>=1.0.0",
-    "sentence-transformers>=4.1.0",
+    # AI dependencies temporarily disabled - will be restored soon!
+    # "langchain>=0.3.0",
+    # "langchain-openai>=0.2.0",
+    # "langchain-chroma>=0.2.3",
+    # "chromadb>=0.6.3",
+    # "openai>=1.0.0",
+    # "sentence-transformers>=4.1.0",
     "streamlit>=1.40.0",
 ]
 

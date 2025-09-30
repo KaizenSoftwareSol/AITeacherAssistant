@@ -8,25 +8,25 @@ from enum import Enum
 
 class JobStatus(str, Enum):
     """Job status enumeration."""
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class JobType(str, Enum):
     """Job type enumeration."""
-    LECTURE_GENERATION = "lecture_generation"
-    CURRICULUM_PROCESSING = "curriculum_processing"
-    AUDIO_GENERATION = "audio_generation"
-    PPT_GENERATION = "ppt_generation"
-    RAG_INDEXING = "rag_indexing"
+    LECTURE_GENERATION = "LECTURE_GENERATION"
+    CURRICULUM_PROCESSING = "CURRICULUM_PROCESSING"
+    AUDIO_GENERATION = "AUDIO_GENERATION"
+    PPT_GENERATION = "PPT_GENERATION"
+    RAG_INDEXING = "RAG_INDEXING"
 
 
 class JobQueue(SQLModel, table=True):
     """Job queue for async processing."""
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
     job_type: JobType
     status: JobStatus = Field(default=JobStatus.PENDING)
     priority: int = Field(default=0)  # Higher number = higher priority

@@ -1,14 +1,17 @@
 # models/analytics.py
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, TYPE_CHECKING
 from sqlmodel import Field, SQLModel, Relationship
+
+if TYPE_CHECKING:
+    from models.lecture import Lecture
 
 
 class LectureAnalytics(SQLModel, table=True):
     """Analytics for lecture performance and engagement."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lecture_id: int = Field(foreign_key="lecture.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
     
     # Engagement metrics
     total_views: int = Field(default=0)
@@ -36,9 +39,9 @@ class LectureAnalytics(SQLModel, table=True):
 
 class StudentEngagement(SQLModel, table=True):
     """Student engagement tracking."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    student_id: int = Field(foreign_key="student.id")
-    lecture_id: int = Field(foreign_key="lecture.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    student_id: str = Field(foreign_key="student.id")  # UUID
+    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
     
     # Engagement data
     watch_time: float = Field(default=0.0)  # in minutes
@@ -54,8 +57,8 @@ class StudentEngagement(SQLModel, table=True):
 
 class AIProcessingLog(SQLModel, table=True):
     """Logs for AI processing operations."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    job_id: Optional[int] = Field(default=None, foreign_key="jobqueue.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    job_id: Optional[str] = Field(default=None, foreign_key="jobqueue.id")  # UUID
     operation_type: str  # e.g., "lecture_generation", "rag_indexing"
     
     # Processing details

@@ -1,16 +1,23 @@
 # models/user.py
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from sqlmodel import Field, SQLModel, Relationship
 from enum import Enum
+
+if TYPE_CHECKING:
+    from models.university import University
+    from models.ai_conversation import AIConversation
+    from models.lecture import Lecture
+    from models.document import Document
+    from models.enrollment import Enrollment
 
 
 class UserRole(str, Enum):
     """User roles in the system."""
-    STUDENT = "student"
-    TEACHER = "teacher"
-    ADMIN = "admin"
+    STUDENT = "STUDENT"  # Match database values
+    TEACHER = "TEACHER"
+    ADMIN = "ADMIN"
 
 
 class UserBase(SQLModel):
@@ -27,9 +34,9 @@ class UserBase(SQLModel):
 
 class User(UserBase, table=True):
     """User model for database."""
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID string
     hashed_password: str
-    university_id: Optional[int] = Field(default=None, foreign_key="university.id")
+    university_id: Optional[str] = Field(default=None, foreign_key="university.id")  # UUID string
     
     # Relationships
     university: Optional["University"] = Relationship(back_populates="users")
@@ -40,9 +47,9 @@ class User(UserBase, table=True):
 
 class Teacher(SQLModel, table=True):
     """Teacher profile with university association."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id", unique=True)
-    university_id: int = Field(foreign_key="university.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID string
+    user_id: str = Field(foreign_key="user.id", unique=True)  # UUID string
+    university_id: str = Field(foreign_key="university.id")  # UUID string
     department: Optional[str] = None
     specialization: Optional[str] = None
     voice_config: Optional[str] = None  # JSON config for ElevenLabs
@@ -53,13 +60,14 @@ class Teacher(SQLModel, table=True):
     user: Optional["User"] = Relationship(back_populates="teacher_profile")
     university: Optional["University"] = Relationship(back_populates="teachers")
     lectures: List["Lecture"] = Relationship(back_populates="teacher")
+    documents: List["Document"] = Relationship(back_populates="teacher")
 
 
 class Student(SQLModel, table=True):
     """Student profile with university association."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id", unique=True)
-    university_id: int = Field(foreign_key="university.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID string
+    user_id: str = Field(foreign_key="user.id", unique=True)  # UUID string
+    university_id: str = Field(foreign_key="university.id")  # UUID string
     student_id: str = Field(unique=True, index=True)  # University student ID
     year_of_study: Optional[int] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)

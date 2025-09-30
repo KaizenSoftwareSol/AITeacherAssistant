@@ -3,8 +3,6 @@
 import os
 from supabase import create_client, Client
 from settings import settings
-#PROJECT NAME: A-Rafay-Siddiqui's Project
-# DB PASSWORD: qxSZlmYMrpzXDnaT
 
 
 class SupabaseConfig:
@@ -37,26 +35,26 @@ class SupabaseConfig:
     
     def get_storage_bucket(self, bucket_name: str):
         """Get a specific storage bucket."""
-        return self.client.storage.from_(bucket_name)
+        return self.admin_client.storage.from_(bucket_name)  # Use admin client to bypass RLS
     
     def upload_file(self, bucket_name: str, file_path: str, file_data: bytes, file_options: dict = None):
         """Upload a file to Supabase storage."""
-        bucket = self.get_storage_bucket(bucket_name)
+        bucket = self.admin_client.storage.from_(bucket_name)  # Use admin client
         return bucket.upload(file_path, file_data, file_options)
     
     def download_file(self, bucket_name: str, file_path: str):
         """Download a file from Supabase storage."""
-        bucket = self.get_storage_bucket(bucket_name)
+        bucket = self.admin_client.storage.from_(bucket_name)  # Use admin client
         return bucket.download(file_path)
     
     def delete_file(self, bucket_name: str, file_path: str):
         """Delete a file from Supabase storage."""
-        bucket = self.get_storage_bucket(bucket_name)
+        bucket = self.admin_client.storage.from_(bucket_name)  # Use admin client
         return bucket.remove([file_path])
     
     def list_files(self, bucket_name: str, folder_path: str = ""):
         """List files in a bucket folder."""
-        bucket = self.get_storage_bucket(bucket_name)
+        bucket = self.admin_client.storage.from_(bucket_name)  # Use admin client
         return bucket.list(folder_path)
 
 
@@ -68,5 +66,5 @@ BUCKETS = {
     "LECTURE_MATERIALS": "lecture-materials",
     "CURRICULUM_DOCS": "curriculum-docs", 
     "GENERATED_CONTENT": "generated-content",
-    "USER_UPLOADS": "user-uploads"
+    "USER_UPLOADS": "USER_UPLOADS"
 }

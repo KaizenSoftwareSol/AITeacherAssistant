@@ -1,37 +1,42 @@
 # models/assessment.py
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from sqlmodel import Field, SQLModel, Relationship
 from enum import Enum
+
+if TYPE_CHECKING:
+    from models.course import Course
+    from models.lecture import Lecture
+    from models.user import Teacher, Student
 
 
 class AssessmentType(str, Enum):
     """Assessment type enumeration."""
-    QUIZ = "quiz"
-    ASSIGNMENT = "assignment"
-    EXAM = "exam"
-    PROJECT = "project"
+    QUIZ = "QUIZ"
+    ASSIGNMENT = "ASSIGNMENT"
+    EXAM = "EXAM"
+    PROJECT = "PROJECT"
 
 
 class QuestionType(str, Enum):
     """Question type enumeration."""
-    MULTIPLE_CHOICE = "multiple_choice"
-    TRUE_FALSE = "true_false"
-    SHORT_ANSWER = "short_answer"
-    ESSAY = "essay"
-    FILL_IN_BLANK = "fill_in_blank"
+    MULTIPLE_CHOICE = "MULTIPLE_CHOICE"
+    TRUE_FALSE = "TRUE_FALSE"
+    SHORT_ANSWER = "SHORT_ANSWER"
+    ESSAY = "ESSAY"
+    FILL_IN_BLANK = "FILL_IN_BLANK"
 
 
 class Assessment(SQLModel, table=True):
     """Assessment entity for quizzes, assignments, and exams."""
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
     title: str
     description: Optional[str] = None
     assessment_type: AssessmentType
-    course_id: int = Field(foreign_key="course.id")
-    lecture_id: Optional[int] = Field(default=None, foreign_key="lecture.id")
-    teacher_id: int = Field(foreign_key="teacher.id")
+    course_id: str = Field(foreign_key="course.id")  # UUID
+    lecture_id: Optional[str] = Field(default=None, foreign_key="lecture.id")  # UUID
+    teacher_id: str = Field(foreign_key="teacher.id")  # UUID
     
     # Assessment settings
     time_limit: Optional[int] = None  # in minutes
@@ -54,8 +59,8 @@ class Assessment(SQLModel, table=True):
 
 class Question(SQLModel, table=True):
     """Individual questions within assessments."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    assessment_id: int = Field(foreign_key="assessment.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    assessment_id: str = Field(foreign_key="assessment.id")  # UUID
     question_text: str
     question_type: QuestionType
     points: float = Field(default=1.0)
@@ -76,9 +81,9 @@ class Question(SQLModel, table=True):
 
 class AssessmentSubmission(SQLModel, table=True):
     """Student submissions for assessments."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    assessment_id: int = Field(foreign_key="assessment.id")
-    student_id: int = Field(foreign_key="student.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    assessment_id: str = Field(foreign_key="assessment.id")  # UUID
+    student_id: str = Field(foreign_key="student.id")  # UUID
     
     # Submission data
     answers: str  # JSON object with question_id -> answer mapping

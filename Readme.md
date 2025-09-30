@@ -1,112 +1,160 @@
-# AI Teacher
+# AI Teacher Assistant
 
-An intelligent learning platform built with FastAPI, featuring AI-powered content generation, personalized learning paths, and interactive educational tools.
+Intelligent Learning Platform with AI-powered document ingestion, lecture management, and comprehensive parsing capabilities.
 
-## Features
+## 🚀 Features
 
-- **User Authentication & Authorization**: JWT-based auth with role-based access control
-- **AI-Powered Content Generation**: Create lessons and explanations using OpenAI
-- **RAG System**: Knowledge base with ChromaDB for intelligent content retrieval
-- **User Progress Tracking**: Monitor learning progress and course completion
-- **Interactive Chat**: AI assistant for answering questions and providing guidance
-- **Course Management**: Create and manage educational courses and lessons
+- 📄 **Document Ingestion**: Parse PDF, PPTX, DOCX with comprehensive extraction
+- 🌐 **Website Parsing**: Extract clean content from web URLs
+- 🔐 **JWT Authentication**: Secure Bearer token authentication
+- 👨‍🏫 **Multi-University Support**: Teachers, students, courses
+- 📊 **Analytics**: Track engagement and performance
+- 🎓 **Course Management**: Lectures, assessments, enrollments
 
-## Project Structure
+## 🛠️ Tech Stack
 
-```
-AI_Teacher/
-├── ai/                    # AI-related modules
-│   ├── agent.py          # AI agent for chat and assistance
-│   ├── generation.py     # Content generation utilities 
-│   └── rag.py           # RAG system for knowledge retrieval
-├── auth/                 # Authentication module
-│   ├── models.py        # User and auth models
-│   ├── routes.py        # Auth endpoints
-│   └── service.py       # Auth business logic
-├── user/                # User management module
-│   ├── models.py        # User profile and progress models
-│   ├── routes.py        # User endpoints
-│   └── service.py       # User business logic
-├── utils/               # Utility modules
-│   ├── db.py           # Database utilities
-│   └── responses.py    # Standardized response helpers
-├── static/             # Static files
-├── logs/               # Application logs
-├── chroma_store/       # ChromaDB vector store
-├── main.py            # FastAPI application entry point
-├── settings.py        # Application settings
-├── dependencies.py    # FastAPI dependencies
-├── routes_config.py   # Router configuration
-├── logger.py          # Logging configuration
-├── requirements.txt   # Python dependencies
-├── pyproject.toml     # Project configuration
-└── Dockerfile         # Docker configuration
-```
+- **Backend**: FastAPI 0.117.1
+- **Database**: Supabase (PostgreSQL)
+- **Storage**: Supabase Storage
+- **Auth**: JWT with passlib/bcrypt
+- **Parsing**: PyPDF2, python-pptx, python-docx
+- **ORM**: SQLModel
 
-## Installation
+## 📦 Quick Start
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd AI_Teacher
-   ```
-
-2. **Create a virtual environment**:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Set up environment variables**:
-   ```bash
-   cp env.example .env
-   # Edit .env with your API keys and configuration
-   ```
-
-5. **Run the application**:
-   ```bash
-   uvicorn main:app --reload
-   ```
-
-## API Documentation
-
-Once the application is running, you can access:
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redocs
-
-## Environment Variables
-
-- `OPENAI_API_KEY`: Your OpenAI API key for AI features
-- `GROQ_API_KEY`: Your Groq API key (optional)
-- `SECRET_KEY`: JWT secret key (change in production)
-- `SQLITE_DATABASE_URL`: Database connection string
-
-## Docker
-
-To run with Docker:
+### 1. Install Dependencies
 
 ```bash
-docker build -t ai-teacher .
-docker run -p 8000:8000 ai-teacher
+pip install -r requirements.txt
 ```
 
-## Development
+### 2. Environment Setup
 
-The project uses:
-- **FastAPI** for the web framework
-- **SQLModel** for database models and ORM
-- **LangChain** for AI integration
-- **ChromaDB** for vector storage
-- **Pydantic** for data validation
-- **Loguru** for logging
+Create `.env` file:
 
-## License
+```env
+# Supabase
+SUPABASE_URL=your_project_url
+SUPABASE_ANON_KEY=your_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 
-This project is licensed under the MIT License.
+# Auth
+SECRET_KEY=your-secret-jwt-key
+
+# AI APIs (optional)
+OPENAI_API_KEY=your_key
+GROQ_API_KEY=your_key
+```
+
+### 3. Database Setup
+
+See **DEPLOYMENT_GUIDE.md** for:
+- Creating documents table
+- Setting up storage buckets
+- Configuring RLS policies
+
+### 4. Run Server
+
+```bash
+uvicorn main:app --reload
+```
+
+### 5. Access API
+
+- **Swagger UI**: http://localhost:8000/api/v1/docs
+- **ReDoc**: http://localhost:8000/api/v1/redocs
+
+## 🔐 Test Credentials
+
+```
+Email: sarah.johnson@harvard.edu
+Password: Password123!
+Role: ADMIN (with Teacher profile)
+```
+
+## 📄 API Endpoints
+
+### Authentication
+- `POST /api/v1/auth/login` - Get JWT token
+- `GET /api/v1/auth/me` - Get current user
+- `PUT /api/v1/auth/me` - Update user
+
+### Document Ingestion
+- `POST /api/v1/documents/upload/file` - Upload PDF/PPTX/DOCX
+- `POST /api/v1/documents/upload/website` - Upload website URL
+- `GET /api/v1/documents` - List all documents
+- `GET /api/v1/documents/{id}` - Get single document
+- `PUT /api/v1/documents/{id}` - Update document
+- `DELETE /api/v1/documents/{id}` - Delete document
+
+## 📊 Document Parsing
+
+### PDF Parser
+- ✅ Page-by-page extraction
+- ✅ Text, lines, word count
+- ✅ Page dimensions & rotation
+- ✅ Comprehensive metadata
+
+### PPTX Parser
+- ✅ Slide-by-slide content
+- ✅ Images, tables, notes
+- ✅ Shape positions & sizes
+- ✅ Text formatting
+
+### DOCX Parser
+- ✅ Heading-based organization
+- ✅ Paragraphs with formatting
+- ✅ Tables & images
+- ✅ Rich text styles
+
+### Website Parser
+- ✅ Clean content extraction
+- ✅ Metadata (title, author, keywords)
+- ✅ Word count
+
+## 📁 Storage Structure
+
+Documents are stored as parsed JSON only (original files NOT stored):
+
+```
+university_{id}/teacher_{id}/{type}/{year}/{month}/
+  └── {uuid}.json  (parsed content)
+```
+
+Example:
+```
+university_e4a21c44/teacher_6bf5fec8/PDF/2024/12/
+  └── abc-123-def.json
+```
+
+## 🗄️ Database Schema
+
+All tables use **UUID primary keys**:
+- `users` - User accounts with roles
+- `teacher` - Teacher profiles
+- `student` - Student profiles
+- `university` - Universities
+- `course` - Courses
+- `semester` - Academic periods
+- `lecture` - Lectures
+- `documents` - Uploaded documents
+- `enrollment` - Student enrollments
+- `assessment` - Quizzes/exams
+- `ai_conversation` - Chat history
+- `job_queue` - Async job processing
 
 
+## 🔧 Development
+
+```bash
+# Run with auto-reload
+uvicorn main:app --reload
+
+# Check logs
+tail -f logs/app.log
+```
+
+
+## 📝 License
+
+MIT License

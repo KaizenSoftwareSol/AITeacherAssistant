@@ -128,6 +128,8 @@ def show_ai_chat():
         st.warning("Please login first to access the AI chat.")
         return
     
+    st.info("🚧 AI Chat functionality is currently being upgraded. Full AI capabilities will be restored soon!")
+    
     # Initialize chat history
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -146,11 +148,10 @@ def show_ai_chat():
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Get AI response (placeholder)
+        # Placeholder response while AI is being upgraded
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                # This would call your AI API endpoint
-                response = "I'm here to help you learn! This is a placeholder response."
+            with st.spinner("AI features are being upgraded..."):
+                response = "🚧 AI Teacher is currently being upgraded with new capabilities! The full AI chat experience will be available soon. Thank you for your patience!"
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
 

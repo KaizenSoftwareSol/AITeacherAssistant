@@ -4,10 +4,9 @@ import json
 import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any
-from sqlmodel import Session, select
 
 from models.job_queue import JobQueue, JobStatus, JobType
-from utils.db import get_session
+from utils.db import get_db
 
 
 class JobQueueService:
@@ -15,7 +14,7 @@ class JobQueueService:
     
     @staticmethod
     async def create_job(
-        session: Session,
+        db,
         job_type: JobType,
         payload: Dict[str, Any],
         priority: int = 0,
@@ -29,60 +28,60 @@ class JobQueueService:
             max_retries=max_retries,
             status=JobStatus.PENDING
         )
-        session.add(job)
-        session.commit()
-        session.refresh(job)
+        # Create job in Supabase
+        job_result = db.create_record("job_queue", job.dict())
+        return JobQueue(**job_result)
         return job
     
     @staticmethod
-    async def get_next_job(session: Session) -> Optional[JobQueue]:
+    async def get_next_job(db) -> Optional[JobQueue]:
         """Get the next pending job with highest priority."""
-        statement = select(JobQueue).where(
-            JobQueue.status == JobStatus.PENDING
+        job_data = db.get_record_by_id("job_queue", {"status": JobStatus.PENDING}, order_by="priority DESC, created_at ASC")
+        return JobQueue(**job_data) if job_data else None
         ).order_by(JobQueue.priority.desc(), JobQueue.created_at.asc())
         
-        return session.exec(statement).first()
+        return JobQueue(**job_data) if job_data else None
     
     @staticmethod
     async def update_job_status(
-        session: Session,
+        db,
         job_id: int,
         status: JobStatus,
         result: Optional[Dict[str, Any]] = None,
         error_message: Optional[str] = None
     ) -> bool:
         """Update job status and result."""
-        job = session.get(JobQueue, job_id)
+        job_data = db.get_record_by_id("job_queue", job_id)
         if not job:
             return False
         
-        job.status = status
+        job_data["status"] = status
         job.updated_at = datetime.utcnow()
         
         if status == JobStatus.PROCESSING:
-            job.started_at = datetime.utcnow()
+            job_data["started_at"] = datetime.utcnow()
         elif status == JobStatus.COMPLETED:
-            job.completed_at = datetime.utcnow()
+            job_data["completed_at"] = datetime.utcnow()
             if result:
-                job.result = json.dumps(result)
+                job_data["result"] = json.dumps(result)
         elif status == JobStatus.FAILED:
-            job.error_message = error_message
+            job_data["error_message"] = error_message
             job.retry_count += 1
             
             # Retry if under max retries
-            if job.retry_count < job.max_retries:
-                job.status = JobStatus.PENDING
-                job.updated_at = datetime.utcnow()
+            if job_data["retry_count"] < job_data["max_retries"]:
+                job_data["status"] = JobStatus.PENDING
+                job_data["updated_at"] = datetime.utcnow()
         
-        session.add(job)
-        session.commit()
+        updated_job = db.update_record("job_queue", job_id, job_data)
+        return JobQueue(**updated_job) if updated_job else None
         return True
     
     @staticmethod
-    async def process_lecture_generation_job(session: Session, job: JobQueue) -> Dict[str, Any]:
+    async def process_lecture_generation_job(db, job: JobQueue) -> Dict[str, Any]:
         """Process a lecture generation job."""
         try:
-            payload = json.loads(job.payload)
+            payload = json.loads(job_data["payload"])
             
             # Extract job parameters
             course_id = payload.get("course_id")
@@ -102,22 +101,22 @@ class JobQueueService:
             }
             
             await JobQueueService.update_job_status(
-                session, job.id, JobStatus.COMPLETED, result
+                db, job_id, JobStatus.COMPLETED, result
             )
             
             return result
             
         except Exception as e:
             await JobQueueService.update_job_status(
-                session, job.id, JobStatus.FAILED, error_message=str(e)
+                db, job_id, JobStatus.FAILED, error_message=str(e)
             )
             raise e
     
     @staticmethod
-    async def process_curriculum_processing_job(session: Session, job: JobQueue) -> Dict[str, Any]:
+    async def process_curriculum_processing_job(db, job: JobQueue) -> Dict[str, Any]:
         """Process a curriculum processing job."""
         try:
-            payload = json.loads(job.payload)
+            payload = json.loads(job_data["payload"])
             
             # Extract job parameters
             course_id = payload.get("course_id")
@@ -134,14 +133,14 @@ class JobQueueService:
             }
             
             await JobQueueService.update_job_status(
-                session, job.id, JobStatus.COMPLETED, result
+                db, job_id, JobStatus.COMPLETED, result
             )
             
             return result
             
         except Exception as e:
             await JobQueueService.update_job_status(
-                session, job.id, JobStatus.FAILED, error_message=str(e)
+                db, job_id, JobStatus.FAILED, error_message=str(e)
             )
             raise e
 
@@ -157,34 +156,33 @@ class JobProcessor:
         self.running = True
         while self.running:
             try:
-                with Session(get_session().__next__()) as session:
-                    job = await JobQueueService.get_next_job(session)
-                    if job:
-                        await self._process_job(session, job)
+                job = await JobQueueService.get_next_job(db)
+                if job:
+                    await self._process_job(db, job)
                     else:
                         await asyncio.sleep(5)  # Wait 5 seconds before checking again
             except Exception as e:
                 print(f"Job processing error: {e}")
                 await asyncio.sleep(10)
     
-    async def _process_job(self, session: Session, job: JobQueue):
+    async def _process_job(self, db, job: JobQueue):
         """Process a single job."""
         try:
             await JobQueueService.update_job_status(
-                session, job.id, JobStatus.PROCESSING
+                db, job_id, JobStatus.PROCESSING
             )
             
             if job.job_type == JobType.LECTURE_GENERATION:
-                await JobQueueService.process_lecture_generation_job(session, job)
+                await JobQueueService.process_lecture_generation_job(db, job)
             elif job.job_type == JobType.CURRICULUM_PROCESSING:
-                await JobQueueService.process_curriculum_processing_job(session, job)
+                await JobQueueService.process_curriculum_processing_job(db, job)
             else:
                 raise ValueError(f"Unknown job type: {job.job_type}")
                 
         except Exception as e:
             print(f"Error processing job {job.id}: {e}")
             await JobQueueService.update_job_status(
-                session, job.id, JobStatus.FAILED, error_message=str(e)
+                db, job_id, JobStatus.FAILED, error_message=str(e)
             )
     
     def stop_processing(self):

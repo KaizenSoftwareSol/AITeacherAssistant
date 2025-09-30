@@ -5,7 +5,6 @@ from typing import Optional
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlmodel import Session, select
 
 from models.user import User, UserRole
 from auth.models import UserCreate
@@ -42,83 +41,90 @@ class AuthService:
         return encoded_jwt
     
     @staticmethod
-    async def create_user(session: Session, user_create: UserCreate) -> User:
+    async def create_user(db, user_create: UserCreate) -> User:
         """Create a new user."""
         # Check if user already exists
-        existing_user = session.exec(
-            select(User).where(User.email == user_create.email)
-        ).first()
+        existing_user = db.get_user_by_email(user_create.email)
         if existing_user:
             raise ValueError("User with this email already exists")
         
-        existing_username = session.exec(
-            select(User).where(User.username == user_create.username)
-        ).first()
-        if existing_username:
+        # Check if username already exists
+        users = db.get_records("users", {"username": user_create.username})
+        if users:
             raise ValueError("User with this username already exists")
         
-        # Create new user
+        # Create new user data
         hashed_password = AuthService.get_password_hash(user_create.password)
-        user = User(
-            email=user_create.email,
-            username=user_create.username,
-            hashed_password=hashed_password,
-            role=user_create.role,
-            is_active=True
-        )
+        user_data = {
+            "email": user_create.email,
+            "username": user_create.username,
+            "hashed_password": hashed_password,
+            "role": user_create.role.value,
+            "is_active": True,
+            "first_name": getattr(user_create, 'first_name', ''),
+            "last_name": getattr(user_create, 'last_name', ''),
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
         
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-        return user
+        # Create user in Supabase
+        user_result = db.create_user(user_data)
+        return User(**user_result)
     
     @staticmethod
-    def authenticate_user(session: Session, email: str, password: str) -> Optional[User]:
+    def authenticate_user(db, email: str, password: str) -> Optional[User]:
         """Authenticate a user with email and password."""
-        user = session.exec(select(User).where(User.email == email)).first()
-        if not user:
+        user_data = db.get_user_by_email(email)
+        if not user_data:
             return None
-        if not AuthService.verify_password(password, user.hashed_password):
+        
+        if not AuthService.verify_password(password, user_data.get("hashed_password", "")):
             return None
-        return user
+        
+        return User(**user_data)
     
     @staticmethod
-    def get_user_by_id(session: Session, user_id: int) -> Optional[User]:
+    def get_user_by_id(db, user_id: int) -> Optional[User]:
         """Get a user by ID."""
-        return session.exec(select(User).where(User.id == user_id)).first()
+        user_data = db.get_user_by_id(user_id)
+        if not user_data:
+            return None
+        return User(**user_data)
     
     @staticmethod
-    def get_user_by_email(session: Session, email: str) -> Optional[User]:
+    def get_user_by_email(db, email: str) -> Optional[User]:
         """Get a user by email."""
-        return session.exec(select(User).where(User.email == email)).first()
+        user_data = db.get_user_by_email(email)
+        if not user_data:
+            return None
+        return User(**user_data)
     
     @staticmethod
-    def update_user(session: Session, user_id: int, user_update: dict) -> Optional[User]:
+    def update_user(db, user_id: int, user_update: dict) -> Optional[User]:
         """Update a user."""
-        user = session.exec(select(User).where(User.id == user_id)).first()
-        if not user:
+        user_data = db.get_user_by_id(user_id)
+        if not user_data:
             return None
         
+        # Prepare update data
+        update_data = {}
         for field, value in user_update.items():
-            if hasattr(user, field) and value is not None:
+            if value is not None:
                 if field == "password":
-                    setattr(user, "hashed_password", AuthService.get_password_hash(value))
+                    update_data["hashed_password"] = AuthService.get_password_hash(value)
                 else:
-                    setattr(user, field, value)
+                    update_data[field] = value
         
-        user.updated_at = datetime.utcnow()
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-        return user
+        update_data["updated_at"] = datetime.utcnow().isoformat()
+        
+        # Update user in Supabase
+        updated_user = db.update_user(user_id, update_data)
+        if not updated_user:
+            return None
+        
+        return User(**updated_user)
     
     @staticmethod
-    def delete_user(session: Session, user_id: int) -> bool:
+    def delete_user(db, user_id: int) -> bool:
         """Delete a user."""
-        user = session.exec(select(User).where(User.id == user_id)).first()
-        if not user:
-            return False
-        
-        session.delete(user)
-        session.commit()
-        return True
+        return db.delete_user(user_id)

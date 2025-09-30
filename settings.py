@@ -6,13 +6,10 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Supabase Database Configuration
+    # Supabase Configuration (Required for all operations)
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
     SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    
-    # Database URL for SQLModel (using Supabase PostgreSQL)
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     
     # Authentication
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
@@ -21,11 +18,12 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"  # Ignore extra environment variables
 
 
 settings = Settings()
 
-# AI API Keys
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# AI API Keys - Temporarily disabled, will be restored soon!
+# GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 

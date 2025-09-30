@@ -1,29 +1,37 @@
 # models/lecture.py
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from sqlmodel import Field, SQLModel, Relationship
 from enum import Enum
+
+if TYPE_CHECKING:
+    from models.course import Course, Semester
+    from models.user import Teacher
+    from models.ai_conversation import AIConversation
+    from models.analytics import LectureAnalytics
 
 
 class LectureStatus(str, Enum):
     """Lecture status enumeration."""
-    DRAFT = "draft"
-    GENERATED = "generated"
-    REVIEWED = "reviewed"
-    APPROVED = "approved"
-    DELIVERED = "delivered"
+    DRAFT = "DRAFT"
+    GENERATED = "GENERATED"
+    REVIEWED = "REVIEWED"
+    APPROVED = "APPROVED"
+    DELIVERED = "DELIVERED"
+    PUBLISHED = "PUBLISHED"  # Match actual database
 
 
 class LectureType(str, Enum):
     """Lecture type enumeration."""
-    AI_GENERATED = "ai_generated"
-    TEACHER_RECORDED = "teacher_recorded"
+    AI_GENERATED = "AI_GENERATED"
+    TEACHER_RECORDED = "TEACHER_RECORDED"
+    LECTURE = "LECTURE"  # Match actual database
 
 
 class Lecture(SQLModel, table=True):
     """Lecture entity for both AI-generated and teacher-recorded lectures."""
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
     title: str
     description: Optional[str] = None
     content: str  # Main lecture content/text
@@ -34,9 +42,9 @@ class Lecture(SQLModel, table=True):
     version: int = Field(default=1)  # Version control
     
     # Foreign keys
-    course_id: int = Field(foreign_key="course.id")
-    semester_id: int = Field(foreign_key="semester.id")
-    teacher_id: int = Field(foreign_key="teacher.id")
+    course_id: str = Field(foreign_key="course.id")  # UUID
+    semester_id: str = Field(foreign_key="semester.id")  # UUID
+    teacher_id: str = Field(foreign_key="teacher.id")  # UUID
     
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -54,8 +62,8 @@ class Lecture(SQLModel, table=True):
 
 class LectureContent(SQLModel, table=True):
     """File metadata for lecture materials stored in Supabase."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lecture_id: int = Field(foreign_key="lecture.id")
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
     file_name: str
     file_type: str  # pdf, pptx, docx, txt, etc.
     file_size: int  # in bytes

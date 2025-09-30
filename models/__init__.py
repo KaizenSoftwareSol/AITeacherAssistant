@@ -10,6 +10,7 @@ from .ai_conversation import AIConversation, ChatMessage, ConversationType, Mess
 from .job_queue import JobQueue, JobStatus, JobType
 from .analytics import LectureAnalytics, StudentEngagement, AIProcessingLog
 from .assessment import Assessment, Question, AssessmentSubmission, AssessmentType, QuestionType
+from .document import Document, DocumentType, DocumentStatus, DocumentCreate, DocumentRead, DocumentUpdate, WebsiteContent
 
 # Export all models
 __all__ = [
@@ -51,4 +52,13 @@ __all__ = [
     "AssessmentSubmission",
     "AssessmentType",
     "QuestionType",
+    
+    # Document management
+    "Document",
+    "DocumentType",
+    "DocumentStatus",
+    "DocumentCreate",
+    "DocumentRead",
+    "DocumentUpdate",
+    "WebsiteContent",
 ]
