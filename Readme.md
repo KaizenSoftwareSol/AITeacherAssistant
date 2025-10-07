@@ -26,13 +26,33 @@ Intelligent Learning Platform with AI-powered document ingestion, lecture manage
 
 ## 📦 Quick Start
 
-### 1. Install Dependencies
+### 1. Create Virtual Environment
+
+**Windows:**
+```bash
+# Create virtual environment
+python -m venv venv
+
+# Activate virtual environment
+venv\Scripts\activate
+```
+
+**macOS/Linux:**
+```bash
+# Create virtual environment
+python3 -m venv venv
+
+# Activate virtual environment
+source venv/bin/activate
+```
+
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Environment Setup
+### 3. Environment Setup
 
 Create `.env` file:
 
@@ -49,20 +69,24 @@ SECRET_KEY=your-secret-jwt-key
 OPENAI_API_KEY=your_openai_key  # Required for lecture generation
 ```
 
-### 3. Database Setup
+### 4. Database Setup
 
 See **DEPLOYMENT_GUIDE.md** for:
 - Creating documents table
 - Setting up storage buckets
 - Configuring RLS policies
 
-### 4. Run Server
+### 5. Run Server
 
 ```bash
+# Using uvicorn directly
 uvicorn main:app --reload
+
+# Or using the run script
+python run.py
 ```
 
-### 5. Access API
+### 6. Access API
 
 - **Swagger UI**: http://localhost:8000/api/v1/docs
 - **ReDoc**: http://localhost:8000/api/v1/redocs
@@ -208,6 +232,20 @@ All tables use **UUID primary keys**:
 
 ## 🔧 Development
 
+### Activate Virtual Environment
+
+**Always activate your virtual environment before running:**
+
+```bash
+# Windows
+venv\Scripts\activate
+
+# macOS/Linux
+source venv/bin/activate
+```
+
+### Run Server
+
 ```bash
 # Run with auto-reload
 uvicorn main:app --reload
@@ -217,6 +255,22 @@ python run.py
 
 # Check logs
 tail -f logs/app.log
+```
+
+### Deactivate Virtual Environment
+
+```bash
+deactivate
+```
+
+### Install New Packages
+
+```bash
+# Make sure venv is activated first
+pip install package-name
+
+# Update requirements.txt
+pip freeze > requirements.txt
 ```
 
 ## 🔒 Security Notes
