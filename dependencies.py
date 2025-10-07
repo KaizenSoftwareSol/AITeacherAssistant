@@ -7,6 +7,7 @@ from jose import JWTError, jwt
 from models.user import User, UserRole
 from settings import settings
 from utils.db import get_db
+
 security = HTTPBearer()
 
 
@@ -15,7 +16,7 @@ class AuthDependency:
     async def get_current_user(
         request: Request,
         credentials: HTTPAuthorizationCredentials = Depends(security),
-        db = Depends(get_db),
+        db=Depends(get_db),
     ) -> User:
         """
         Dependency to get the current authenticated user from the JWT token
@@ -60,7 +61,7 @@ class AuthDependency:
             # Don't try to create full User object with relationships
             # Just create a basic user dict that we can work with
             from models.user import Teacher
-            
+
             # Create basic user object
             user_dict = {
                 "id": user_data.get("id"),
@@ -73,18 +74,23 @@ class AuthDependency:
                 "created_at": user_data.get("created_at"),
                 "updated_at": user_data.get("updated_at"),
                 "university_id": user_data.get("university_id"),
-                "hashed_password": user_data.get("hashed_password", "")
+                "hashed_password": user_data.get("hashed_password", ""),
             }
-            
+
             # Create user object without relationships initially
             user = User(**user_dict)
-            
+
             # Load teacher profile if user is a teacher or admin
             if user.role in [UserRole.TEACHER, UserRole.ADMIN]:
                 try:
                     # Query teacher profile by user_id
-                    teacher_result = db.admin_client.table("teacher").select("*").eq("user_id", str(user.id)).execute()
-                    
+                    teacher_result = (
+                        db.admin_client.table("teacher")
+                        .select("*")
+                        .eq("user_id", str(user.id))
+                        .execute()
+                    )
+
                     if teacher_result.data and len(teacher_result.data) > 0:
                         teacher_data = teacher_result.data[0]
                         # Create a simple teacher object (not full model with relationships)
@@ -96,7 +102,7 @@ class AuthDependency:
                             "specialization": teacher_data.get("specialization"),
                             "voice_config": teacher_data.get("voice_config"),
                             "created_at": teacher_data.get("created_at"),
-                            "updated_at": teacher_data.get("updated_at")
+                            "updated_at": teacher_data.get("updated_at"),
                         }
                         user.teacher_profile = Teacher(**teacher_dict)
                     else:
@@ -104,11 +110,12 @@ class AuthDependency:
                 except Exception as e:
                     print(f"Warning: Could not load teacher profile: {e}")
                     import traceback
+
                     traceback.print_exc()
                     user.teacher_profile = None
             else:
                 user.teacher_profile = None
-            
+
             # Add user object to request state
             request.state.user = user
             return user
@@ -162,4 +169,3 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminUser = Annotated[User, Depends(require_admin)]
 TeacherUser = Annotated[User, Depends(require_teacher)]
 AnyUser = Annotated[User, Depends(require_user)]
-

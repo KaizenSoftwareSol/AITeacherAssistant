@@ -1,58 +1,62 @@
 # models/__init__.py
 
 # Import all models for easy access
-from .university import University
+from .ai_conversation import (AIConversation, ChatMessage, ConversationType,
+                              MessageRole)
+from .analytics import AIProcessingLog, LectureAnalytics, StudentEngagement
+from .assessment import (Assessment, AssessmentSubmission, AssessmentType,
+                         Question, QuestionType)
 from .course import Course, Semester
-from .user import User, Teacher, Student, UserRole
+from .document import (Document, DocumentCreate, DocumentRead, DocumentStatus,
+                       DocumentType, DocumentUpdate, WebsiteContent)
 from .enrollment import Enrollment
-from .lecture import Lecture, LectureContent, LectureStatus, LectureType
-from .ai_conversation import AIConversation, ChatMessage, ConversationType, MessageRole
 from .job_queue import JobQueue, JobStatus, JobType
-from .analytics import LectureAnalytics, StudentEngagement, AIProcessingLog
-from .assessment import Assessment, Question, AssessmentSubmission, AssessmentType, QuestionType
-from .document import Document, DocumentType, DocumentStatus, DocumentCreate, DocumentRead, DocumentUpdate, WebsiteContent
+from .lecture import (Lecture, LectureContent, LectureDownloadResponse,
+                      LectureGenerationRequest, LectureGenerationResponse,
+                      LectureRead, LectureStatus, LectureType, LectureUpdate)
+from .university import University
+from .user import Student, Teacher, User, UserRole
 
 # Export all models
 __all__ = [
     # Core entities
     "University",
-    "Course", 
+    "Course",
     "Semester",
     "User",
-    "Teacher", 
+    "Teacher",
     "Student",
     "UserRole",
     "Enrollment",
-    
     # Lecture system
     "Lecture",
-    "LectureContent", 
+    "LectureContent",
     "LectureStatus",
     "LectureType",
-    
+    "LectureGenerationRequest",
+    "LectureGenerationResponse",
+    "LectureRead",
+    "LectureUpdate",
+    "LectureDownloadResponse",
     # AI & Chat
     "AIConversation",
     "ChatMessage",
-    "ConversationType", 
+    "ConversationType",
     "MessageRole",
-    
     # Job processing
     "JobQueue",
     "JobStatus",
     "JobType",
-    
     # Analytics
     "LectureAnalytics",
-    "StudentEngagement", 
+    "StudentEngagement",
     "AIProcessingLog",
-    
     # Assessment
     "Assessment",
     "Question",
     "AssessmentSubmission",
     "AssessmentType",
     "QuestionType",
-    
     # Document management
     "Document",
     "DocumentType",

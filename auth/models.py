@@ -12,6 +12,7 @@ from models.user import User, UserRole
 
 class UserCreate(BaseModel):
     """Model for creating a new user."""
+
     email: str
     username: str
     password: str
@@ -20,6 +21,7 @@ class UserCreate(BaseModel):
 
 class UserRead(BaseModel):
     """Model for reading user data (without sensitive info)."""
+
     id: str  # UUID string from Supabase
     email: str
     username: str
@@ -33,6 +35,7 @@ class UserRead(BaseModel):
 
 class UserUpdate(BaseModel):
     """Model for updating user data."""
+
     email: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
@@ -42,10 +45,12 @@ class UserUpdate(BaseModel):
 
 class Token(BaseModel):
     """Token response model."""
+
     access_token: str
     token_type: str
 
 
 class TokenData(BaseModel):
     """Token data model."""
+
     user_id: Optional[str] = None  # UUID string
