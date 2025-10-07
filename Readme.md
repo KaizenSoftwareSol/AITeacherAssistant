@@ -6,6 +6,8 @@ Intelligent Learning Platform with AI-powered document ingestion, lecture manage
 
 - 📄 **Document Ingestion**: Parse PDF, PPTX, DOCX with comprehensive extraction
 - 🌐 **Website Parsing**: Extract clean content from web URLs
+- 🤖 **AI-Powered Lecture Generation**: Generate lectures from documents using GPT-4o
+- 📑 **PDF Creation**: Automatically create formatted lecture PDFs
 - 🔐 **JWT Authentication**: Secure Bearer token authentication
 - 👨‍🏫 **Multi-University Support**: Teachers, students, courses
 - 📊 **Analytics**: Track engagement and performance
@@ -17,7 +19,9 @@ Intelligent Learning Platform with AI-powered document ingestion, lecture manage
 - **Database**: Supabase (PostgreSQL)
 - **Storage**: Supabase Storage
 - **Auth**: JWT with passlib/bcrypt
-- **Parsing**: PyPDF2, python-pptx, python-docx
+- **Parsing**: PyPDF2, python-pptx, python-docx, BeautifulSoup4
+- **AI**: OpenAI GPT-4o
+- **PDF Generation**: ReportLab
 - **ORM**: SQLModel
 
 ## 📦 Quick Start
@@ -41,9 +45,8 @@ SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 # Auth
 SECRET_KEY=your-secret-jwt-key
 
-# AI APIs (optional)
-OPENAI_API_KEY=your_key
-GROQ_API_KEY=your_key
+# AI APIs
+OPENAI_API_KEY=your_openai_key  # Required for lecture generation
 ```
 
 ### 3. Database Setup
@@ -79,13 +82,17 @@ Role: ADMIN (with Teacher profile)
 - `GET /api/v1/auth/me` - Get current user
 - `PUT /api/v1/auth/me` - Update user
 
-### Document Ingestion
+### Document Management
 - `POST /api/v1/documents/upload/file` - Upload PDF/PPTX/DOCX
 - `POST /api/v1/documents/upload/website` - Upload website URL
 - `GET /api/v1/documents` - List all documents
 - `GET /api/v1/documents/{id}` - Get single document
 - `PUT /api/v1/documents/{id}` - Update document
 - `DELETE /api/v1/documents/{id}` - Delete document
+
+### Lecture Generation (AI-Powered)
+- `POST /api/v1/lectures/generate` - Generate lecture from document
+- `GET /api/v1/lectures/{id}/download` - Get lecture PDF download link
 
 ## 📊 Document Parsing
 
@@ -114,6 +121,7 @@ Role: ADMIN (with Teacher profile)
 
 ## 📁 Storage Structure
 
+### Ingested Documents (USER_UPLOADS bucket)
 Documents are stored as parsed JSON only (original files NOT stored):
 
 ```
@@ -127,6 +135,20 @@ university_e4a21c44/teacher_6bf5fec8/PDF/2024/12/
   └── abc-123-def.json
 ```
 
+### Generated Lectures (GENERATED_CONTENT bucket)
+AI-generated lecture PDFs are stored with organized structure:
+
+```
+university_{id}/teacher_{id}/course_{id}/generated_lectures/
+  └── {uuid}.pdf  (generated lecture PDF)
+```
+
+Example:
+```
+university_e4a21c44/teacher_6bf5fec8/course_a1b2c3d4/generated_lectures/
+  └── lecture-xyz-789.pdf
+```
+
 ## 🗄️ Database Schema
 
 All tables use **UUID primary keys**:
@@ -136,13 +158,53 @@ All tables use **UUID primary keys**:
 - `university` - Universities
 - `course` - Courses
 - `semester` - Academic periods
-- `lecture` - Lectures
-- `documents` - Uploaded documents
+- `lecture` - Lecture records (AI-generated or teacher-recorded)
+- `lecture_content` - Lecture file metadata (PDFs, slides, etc.)
+- `documents` - Ingested document metadata
 - `enrollment` - Student enrollments
 - `assessment` - Quizzes/exams
 - `ai_conversation` - Chat history
 - `job_queue` - Async job processing
 
+
+## 🤖 AI Lecture Generation Workflow
+
+1. **Teacher uploads document** (PDF, PPTX, DOCX, or website)
+   - Document is parsed and stored as JSON in Supabase Storage
+
+2. **Teacher requests lecture generation**
+   ```json
+   POST /api/v1/lectures/generate
+   {
+     "document_id": "uuid-of-document",
+     "course_id": "uuid-of-course",
+     "semester_id": "uuid-of-semester",
+     "title": "Introduction to Machine Learning",
+     "description": "Focus on supervised learning algorithms with practical examples"
+   }
+   ```
+
+3. **System generates lecture**
+   - Fetches document JSON from storage
+   - Sends content + description to OpenAI GPT-4o
+   - AI generates comprehensive lecture content
+   - Creates formatted PDF with ReportLab
+   - Saves PDF to GENERATED_CONTENT bucket
+   - Creates lecture record in database
+
+4. **Teacher downloads lecture**
+   ```json
+   GET /api/v1/lectures/{lecture_id}/download
+   Response:
+   {
+     "lecture_id": "uuid",
+     "title": "Introduction to Machine Learning",
+     "download_url": "https://supabase.co/storage/...",
+     "file_name": "lecture.pdf",
+     "file_size": 245678,
+     "created_at": "2025-10-07T21:00:00Z"
+   }
+   ```
 
 ## 🔧 Development
 
@@ -150,10 +212,20 @@ All tables use **UUID primary keys**:
 # Run with auto-reload
 uvicorn main:app --reload
 
+# Or use the run script
+python run.py
+
 # Check logs
 tail -f logs/app.log
 ```
 
+## 🔒 Security Notes
+
+- All database operations use **admin client** (service role key) to bypass RLS
+- RLS policies should still be configured in Supabase for direct access
+- JWT tokens required for all authenticated endpoints
+- Documents are scoped to teachers - only owners can access their documents
+- Lectures are scoped to teachers - only creators can access their lectures
 
 ## 📝 License
 
