@@ -36,4 +36,3 @@ def error_response(
         "details": details,
     }
     return JSONResponse(content=response_data, status_code=status_code)
-

@@ -25,4 +25,3 @@ logger.add(
 # )  # Example: Log errors to a separate file
 
 # You can now import and use this logger in any other part of your FastAPI app
-

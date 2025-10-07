@@ -1,17 +1,19 @@
 # models/document.py
 
 from datetime import datetime
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
-from sqlmodel import Field, SQLModel, Relationship
 from enum import Enum
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
-    from models.user import Teacher
     from models.university import University
+    from models.user import Teacher
 
 
 class DocumentType(str, Enum):
     """Document types supported by the system."""
+
     PDF = "PDF"
     PPTX = "PPTX"
     DOCX = "DOCX"
@@ -20,6 +22,7 @@ class DocumentType(str, Enum):
 
 class DocumentStatus(str, Enum):
     """Document processing status."""
+
     UPLOADED = "UPLOADED"
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
@@ -28,6 +31,7 @@ class DocumentStatus(str, Enum):
 
 class DocumentBase(SQLModel):
     """Base document model with common fields."""
+
     title: str
     description: Optional[str] = None
     document_type: DocumentType
@@ -42,10 +46,11 @@ class DocumentBase(SQLModel):
 
 class Document(DocumentBase, table=True):
     """Document model for database."""
+
     id: Optional[str] = Field(default=None, primary_key=True)  # UUID string
     teacher_id: str = Field(foreign_key="teacher.id")  # UUID string
     university_id: str = Field(foreign_key="university.id")  # UUID string
-    
+
     # Relationships
     teacher: Optional["Teacher"] = Relationship(back_populates="documents")
     university: Optional["University"] = Relationship(back_populates="documents")
@@ -53,6 +58,7 @@ class Document(DocumentBase, table=True):
 
 class DocumentCreate(SQLModel):
     """Model for creating a new document."""
+
     title: str
     description: Optional[str] = None
     document_type: DocumentType
@@ -64,6 +70,7 @@ class DocumentCreate(SQLModel):
 
 class DocumentRead(SQLModel):
     """Model for reading document data."""
+
     id: str  # UUID string
     title: str
     description: Optional[str] = None
@@ -81,6 +88,7 @@ class DocumentRead(SQLModel):
 
 class DocumentUpdate(SQLModel):
     """Model for updating document data."""
+
     title: Optional[str] = None
     description: Optional[str] = None
     status: Optional[DocumentStatus] = None
@@ -89,6 +97,7 @@ class DocumentUpdate(SQLModel):
 
 class WebsiteContent(SQLModel):
     """Model for website content extraction."""
+
     url: str
     title: Optional[str] = None
     content: str

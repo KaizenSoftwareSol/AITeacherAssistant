@@ -1,13 +1,15 @@
 # models/job_queue.py
 
 from datetime import datetime
-from typing import Optional
-from sqlmodel import Field, SQLModel
 from enum import Enum
+from typing import Optional
+
+from sqlmodel import Field, SQLModel
 
 
 class JobStatus(str, Enum):
     """Job status enumeration."""
+
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
@@ -17,6 +19,7 @@ class JobStatus(str, Enum):
 
 class JobType(str, Enum):
     """Job type enumeration."""
+
     LECTURE_GENERATION = "LECTURE_GENERATION"
     CURRICULUM_PROCESSING = "CURRICULUM_PROCESSING"
     AUDIO_GENERATION = "AUDIO_GENERATION"
@@ -26,22 +29,23 @@ class JobType(str, Enum):
 
 class JobQueue(SQLModel, table=True):
     """Job queue for async processing."""
+
     id: Optional[str] = Field(default=None, primary_key=True)  # UUID
     job_type: JobType
     status: JobStatus = Field(default=JobStatus.PENDING)
     priority: int = Field(default=0)  # Higher number = higher priority
-    
+
     # Job data
     payload: str  # JSON payload with job parameters
     result: Optional[str] = None  # JSON result data
     error_message: Optional[str] = None
-    
+
     # Processing info
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=3)
-    
+
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
