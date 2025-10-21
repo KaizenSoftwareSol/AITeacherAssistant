@@ -147,7 +147,7 @@ async def get_teacher_documents(
             )
 
         logger.info(f"Fetching documents for teacher_id: {teacher.id}")
-        
+
         # Validate pagination parameters
         if skip < 0:
             skip = 0
@@ -168,6 +168,58 @@ async def get_teacher_documents(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error while fetching documents",
+        )
+
+
+@router.get("/{document_id}/chapters")
+async def get_document_chapters(
+    current_user: Annotated[User, Depends(require_teacher)],
+    document_id: str,
+    db=Depends(get_db),
+):
+    """
+    Get list of chapters from a parsed document.
+
+    This endpoint returns the chapter structure from a PDF document.
+    Only accessible to the teacher who owns the document.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching chapters for document {document_id}")
+
+        # Get document
+        document = DocumentService.get_document_by_id(
+            db=db, document_id=document_id, teacher_id=teacher.id
+        )
+
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found",
+            )
+
+        # Get chapters using DocumentService
+        chapters = await DocumentService.get_document_chapters(
+            document_json_path=document.content_json_path
+        )
+
+        logger.info(f"Found {len(chapters)} chapters in document {document_id}")
+        return {"chapters": chapters}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching chapters for document {document_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while fetching chapters",
         )
 
 
@@ -192,10 +244,8 @@ async def get_document(
                 detail="Teacher profile not found",
             )
 
-        logger.info(
-            f"Fetching document {document_id} for teacher_id: {teacher.id}"
-        )
-        
+        logger.info(f"Fetching document {document_id} for teacher_id: {teacher.id}")
+
         document = DocumentService.get_document_by_id(
             db=db, document_id=document_id, teacher_id=teacher.id
         )
@@ -326,7 +376,7 @@ async def debug_get_all_documents(
 ):
     """
     Debug endpoint to get ALL documents in the database (no filtering).
-    
+
     **WARNING: This should only be used for debugging and removed in production!**
     """
     try:
@@ -336,33 +386,39 @@ async def debug_get_all_documents(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Teacher profile not found",
             )
-        
+
         logger.info(f"DEBUG: Current teacher_id: {teacher.id}")
         logger.info(f"DEBUG: Current user_id: {current_user.id}")
-        
+
         # Try both possible table names
         all_documents_plural = []
         all_documents_singular = []
         error_plural = None
         error_singular = None
-        
+
         try:
             all_documents_plural = db.get_records("documents", {}, skip=0, limit=1000)
-            logger.info(f"DEBUG: Table 'documents' returned {len(all_documents_plural)} records")
+            logger.info(
+                f"DEBUG: Table 'documents' returned {len(all_documents_plural)} records"
+            )
         except Exception as e:
             error_plural = str(e)
             logger.warning(f"DEBUG: Error querying 'documents': {e}")
-        
+
         try:
             all_documents_singular = db.get_records("document", {}, skip=0, limit=1000)
-            logger.info(f"DEBUG: Table 'document' returned {len(all_documents_singular)} records")
+            logger.info(
+                f"DEBUG: Table 'document' returned {len(all_documents_singular)} records"
+            )
         except Exception as e:
             error_singular = str(e)
             logger.warning(f"DEBUG: Error querying 'document': {e}")
-        
+
         # Use whichever worked
-        all_documents = all_documents_plural if all_documents_plural else all_documents_singular
-        
+        all_documents = (
+            all_documents_plural if all_documents_plural else all_documents_singular
+        )
+
         # Return summary info
         result = {
             "current_teacher_id": teacher.id,
@@ -385,9 +441,9 @@ async def debug_get_all_documents(
                 for doc in all_documents
             ],
         }
-        
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Error in debug endpoint: {str(e)}")
         raise HTTPException(

@@ -1,10 +1,9 @@
 # services/lecture_service.py
 
 import json
-import uuid
+import re
 from datetime import datetime
 from io import BytesIO
-from typing import Optional
 
 from fastapi import HTTPException, status
 from openai import OpenAI
@@ -21,6 +20,34 @@ from supabase_config import BUCKETS, supabase
 
 class LectureService:
     """Service for generating lectures from documents using AI."""
+
+    @staticmethod
+    def sanitize_filename(filename: str, max_length: int = 100) -> str:
+        """
+        Sanitize a string to be used as a filename.
+
+        Args:
+            filename: The string to sanitize
+            max_length: Maximum length for the filename (default 100)
+
+        Returns:
+            Sanitized filename safe for filesystem use
+        """
+        # Remove or replace invalid characters
+        # Keep alphanumeric, spaces, hyphens, underscores
+        sanitized = re.sub(r"[^\w\s-]", "", filename)
+        # Replace spaces with underscores
+        sanitized = re.sub(r"\s+", "_", sanitized)
+        # Remove multiple consecutive underscores
+        sanitized = re.sub(r"_+", "_", sanitized)
+        # Trim to max length
+        sanitized = sanitized[:max_length]
+        # Remove leading/trailing underscores or hyphens
+        sanitized = sanitized.strip("_-")
+        # If empty after sanitization, use a default name
+        if not sanitized:
+            sanitized = "lecture"
+        return sanitized
 
     @staticmethod
     def get_openai_client() -> OpenAI:
@@ -65,8 +92,77 @@ class LectureService:
             )
 
     @staticmethod
+    def extract_chapters_content(
+        document_content: dict, selected_chapters: list = None
+    ) -> dict:
+        """
+        Extract content from specific chapters or all chapters.
+
+        Args:
+            document_content: Full document content
+            selected_chapters: List of chapter names to include (None = all chapters)
+
+        Returns:
+            Filtered document content with only selected chapters
+        """
+        try:
+            # If no chapters specified, return all content
+            if not selected_chapters:
+                logger.info("No chapters selected, using all content")
+                return document_content
+
+            # If content is not structured by chapters, return as is
+            if "content" not in document_content or not isinstance(
+                document_content["content"], dict
+            ):
+                logger.warning(
+                    "Document content is not structured by chapters, returning all content"
+                )
+                return document_content
+
+            # Filter content by selected chapters
+            filtered_content = {}
+            all_chapters = document_content["content"]
+
+            for chapter_name in selected_chapters:
+                if chapter_name in all_chapters:
+                    filtered_content[chapter_name] = all_chapters[chapter_name]
+                    logger.info(f"Included chapter: {chapter_name}")
+                else:
+                    logger.warning(f"Chapter not found: {chapter_name}")
+
+            if not filtered_content:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="None of the selected chapters were found in the document",
+                )
+
+            # Create filtered document structure
+            filtered_document = {
+                **document_content,
+                "content": filtered_content,
+            }
+
+            logger.info(
+                f"Filtered document to {len(filtered_content)} out of {len(all_chapters)} chapters"
+            )
+            return filtered_document
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error extracting chapters content: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to extract chapters: {str(e)}",
+            )
+
+    @staticmethod
     async def generate_lecture_content(
-        document_content: dict, description: str, title: str
+        document_content: dict,
+        description: str,
+        title: str,
+        learning_outcomes: str = None,
     ) -> str:
         """
         Generate lecture content using OpenAI GPT-4o.
@@ -75,6 +171,7 @@ class LectureService:
             document_content: Parsed document content
             description: Teacher's description and overview for the lecture
             title: Title for the lecture
+            learning_outcomes: Learning outcomes for students (optional)
 
         Returns:
             Generated lecture content as string
@@ -102,27 +199,57 @@ class LectureService:
 
             logger.info(f"Source text length: {len(source_text)} characters")
 
+            # Build learning outcomes section if provided
+            learning_outcomes_section = ""
+            if learning_outcomes:
+                learning_outcomes_section = f"""
+
+LEARNING OUTCOMES FOR STUDENTS:
+========================================
+{learning_outcomes}
+
+"""
+
             # Create prompt for lecture generation
-            prompt = f"""You are an expert educational content creator. Generate a comprehensive, well-structured lecture based on the provided source material and teacher's description.
+            prompt = f"""You are an expert educational content creator and lecturer. Generate a **comprehensive, engaging, and descriptive lecture script** based on the provided source material and teacher's overview.
 
-Title: {title}
+The lecture should be written **as if the teacher is speaking to the class**, guiding students through concepts, examples, and explanations in a natural, instructive tone.
 
-Teacher's Description/Overview:
+---
+
+**Title:** {title}
+
+**Teacher's Description / Overview:**
 {description}
-
-Source Material:
+{learning_outcomes_section}
+**Source Material:**
 {source_text}
 
-Instructions:
-1. Create a detailed lecture that covers the key concepts from the source material
-2. Align the lecture with the teacher's description and overview
-3. Structure the lecture with clear sections and subsections
-4. Include examples, explanations, and educational context where appropriate
-5. Make the content engaging and suitable for students
-6. Use proper academic language and formatting
-7. Ensure the lecture is comprehensive but focused
+---
 
-Generate a complete lecture that is ready to be presented to students."""
+### Instructions for the Lecture Script:
+
+1. **Write in a teacher’s spoken voice** — the tone should be clear, conversational, and engaging, as though the teacher is explaining concepts live in class.  
+2. **Be descriptive and vivid** — elaborate on key points, provide context, and help students visualize or deeply understand the topic.  
+3. **Structure clearly**:
+   - Introduction (set learning objectives, connect with prior knowledge)
+   - Main Sections (each with explanations, transitions, and subtopics)
+   - Examples and Illustrations (real-world or conceptual where appropriate)
+   - Summary / Conclusion (recap key ideas, ask reflective or guiding questions)
+4. **Align fully** with the teacher’s overview — reflect the intended focus, tone, and depth.
+5. **Integrate the source material naturally** — explain and expand on its content instead of simply restating it.  
+6. **Use educational techniques**:
+   - Analogies and storytelling to make abstract ideas concrete  
+   - Questions to prompt student thinking  
+   - Emphasis and pauses (use phrases like “Let’s think about this for a moment…” or “Now, this part is really important…”)
+7. Maintain **academic accuracy** and logical flow, but keep it accessible for students.
+8. The final output should be a **ready-to-deliver lecture script**, not just notes or bullet points.
+
+---
+
+Now, generate a **complete, engaging, teacher-style lecture script** that fulfills these requirements.
+CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
+"""
 
             # Call OpenAI API
             client = LectureService.get_openai_client()
@@ -136,7 +263,6 @@ Generate a complete lecture that is ready to be presented to students."""
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
-                max_tokens=4000,
             )
 
             generated_content = response.choices[0].message.content
@@ -283,6 +409,7 @@ Generate a complete lecture that is ready to be presented to students."""
     ) -> str:
         """
         Save generated lecture PDF to Supabase storage.
+        If file already exists, it will be overwritten.
 
         Args:
             pdf_bytes: PDF file as bytes
@@ -299,6 +426,16 @@ Generate a complete lecture that is ready to be presented to students."""
 
             # Create path: university/teacher/course/generated_lectures/filename.pdf
             storage_path = f"university_{university_id}/teacher_{teacher_id}/course_{course_id}/generated_lectures/{filename}"
+
+            # Try to delete existing file first (if it exists)
+            try:
+                supabase.delete_file(BUCKETS["GENERATED_CONTENT"], storage_path)
+                logger.info(f"Deleted existing PDF at: {storage_path}")
+            except Exception as delete_error:
+                # File might not exist, which is fine
+                logger.debug(
+                    f"No existing file to delete (or delete failed): {delete_error}"
+                )
 
             # Upload to GENERATED_CONTENT bucket
             supabase.upload_file(
@@ -327,6 +464,8 @@ Generate a complete lecture that is ready to be presented to students."""
         semester_id: str,
         lecture_title: str,
         lecture_description: str,
+        learning_outcomes: str = None,
+        selected_chapters: list = None,
     ) -> dict:
         """
         Complete workflow: generate lecture from document and save to storage.
@@ -339,6 +478,8 @@ Generate a complete lecture that is ready to be presented to students."""
             semester_id: Semester ID
             lecture_title: Title for the lecture
             lecture_description: Description/overview from teacher
+            learning_outcomes: Learning outcomes for students (optional)
+            selected_chapters: List of chapter names to include (None = all chapters)
 
         Returns:
             Dictionary with lecture information and storage path
@@ -368,16 +509,25 @@ Generate a complete lecture that is ready to be presented to students."""
                 document_data["content_json_path"]
             )
 
-            # 3. Generate lecture content using AI
+            # 3. Filter content by selected chapters (if specified)
+            if selected_chapters:
+                logger.info(f"Filtering content to {len(selected_chapters)} chapters")
+                document_content = LectureService.extract_chapters_content(
+                    document_content, selected_chapters
+                )
+
+            # 4. Generate lecture content using AI
             generated_content = await LectureService.generate_lecture_content(
-                document_content, lecture_description, lecture_title
+                document_content, lecture_description, lecture_title, learning_outcomes
             )
 
             # 4. Create PDF from generated content
             pdf_bytes = LectureService.create_pdf(lecture_title, generated_content)
 
             # 5. Save PDF to Supabase storage
-            pdf_filename = f"{uuid.uuid4()}.pdf"
+            # Use sanitized lecture title as filename
+            sanitized_title = LectureService.sanitize_filename(lecture_title)
+            pdf_filename = f"{sanitized_title}.pdf"
             storage_path = await LectureService.save_lecture_pdf(
                 pdf_bytes,
                 document_data["university_id"],
@@ -390,6 +540,7 @@ Generate a complete lecture that is ready to be presented to students."""
             lecture_data = {
                 "title": lecture_title,
                 "description": lecture_description,
+                "learning_outcomes": learning_outcomes,
                 "content": generated_content,
                 "lecture_type": "AI_GENERATED",
                 "status": "GENERATED",
@@ -443,6 +594,135 @@ Generate a complete lecture that is ready to be presented to students."""
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate lecture: {str(e)}",
+            )
+
+    @staticmethod
+    def check_for_duplicate_lecture(
+        db,
+        teacher_id: str,
+        course_id: str,
+        semester_id: str,
+        title: str,
+        learning_outcomes: str = None,
+        selected_chapters: list = None,
+    ) -> dict:
+        """
+        Check if a lecture with the same storage path already exists.
+        This prevents storage conflicts by checking if the file path is already used.
+
+        Storage path format: university_{univ_id}/teacher_{teacher_id}/course_{course_id}/generated_lectures/{sanitized_title}.pdf
+
+        Args:
+            db: Database instance
+            teacher_id: Teacher ID
+            course_id: Course ID
+            semester_id: Semester ID
+            title: Lecture title
+            learning_outcomes: Learning outcomes (optional)
+            selected_chapters: List of chapter names (optional)
+
+        Returns:
+            Dictionary with duplicate status and information
+        """
+        try:
+            logger.info(f"Checking for duplicate lecture by storage path: {title}")
+
+            # Get teacher's university_id
+            teacher_data = db.get_record_by_id("teacher", teacher_id)
+            if not teacher_data:
+                logger.warning(f"Teacher not found: {teacher_id}")
+                return {
+                    "has_duplicate": False,
+                    "duplicate_lecture": None,
+                    "message": "No duplicate found",
+                }
+
+            university_id = teacher_data.get("university_id")
+            if not university_id:
+                logger.warning(f"Teacher has no university_id: {teacher_id}")
+                return {
+                    "has_duplicate": False,
+                    "duplicate_lecture": None,
+                    "message": "No duplicate found",
+                }
+
+            # Generate the expected storage path
+            sanitized_title = LectureService.sanitize_filename(title)
+            pdf_filename = f"{sanitized_title}.pdf"
+            expected_storage_path = f"university_{university_id}/teacher_{teacher_id}/course_{course_id}/generated_lectures/{pdf_filename}"
+
+            logger.info(f"Expected storage path: {expected_storage_path}")
+
+            # Check if a lecture_content record exists with this storage path
+            lecture_contents = db.get_records(
+                "lecture_content", {"storage_path": expected_storage_path}
+            )
+
+            if not lecture_contents:
+                logger.info("No duplicate found - storage path is available")
+                return {
+                    "has_duplicate": False,
+                    "duplicate_lecture": None,
+                    "message": "No duplicate found",
+                }
+
+            # Found a duplicate! Get the lecture details
+            pdf_content = lecture_contents[0]
+            lecture_id = pdf_content["lecture_id"]
+
+            logger.info(
+                f"Found duplicate lecture content at storage path. Lecture ID: {lecture_id}"
+            )
+
+            # Get the full lecture record
+            lecture = db.get_record_by_id("lecture", lecture_id)
+
+            if not lecture:
+                logger.warning(f"Lecture record not found for ID: {lecture_id}")
+                # Orphaned lecture_content record - not a true duplicate
+                return {
+                    "has_duplicate": False,
+                    "duplicate_lecture": None,
+                    "message": "No duplicate found",
+                }
+
+            # Get download URL
+            storage_bucket = pdf_content["storage_bucket"]
+            storage_path = pdf_content["storage_path"]
+            try:
+                bucket = supabase.get_storage_bucket(storage_bucket)
+                download_url = bucket.get_public_url(storage_path)
+            except Exception as e:
+                logger.warning(f"Could not get download URL: {e}")
+                download_url = None
+
+            duplicate_info = {
+                "lecture_id": lecture["id"],
+                "title": lecture["title"],
+                "description": lecture.get("description"),
+                "learning_outcomes": lecture.get("learning_outcomes"),
+                "status": lecture["status"],
+                "created_at": lecture["created_at"],
+                "download_url": download_url,
+                "file_name": pdf_content["file_name"],
+                "file_size": pdf_content["file_size"],
+            }
+
+            logger.info(
+                f"Duplicate found: Lecture '{lecture['title']}' already exists at this storage path"
+            )
+
+            return {
+                "has_duplicate": True,
+                "duplicate_lecture": duplicate_info,
+                "message": "A lecture with the same title already exists for this course",
+            }
+
+        except Exception as e:
+            logger.error(f"Error checking for duplicate lecture: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check for duplicates: {str(e)}",
             )
 
     @staticmethod

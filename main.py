@@ -9,8 +9,8 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
 
 from logger import logger
-from routes_config import (auth_router, document_router, lecture_router,
-                           user_router)
+from routes_config import (auth_router, course_router, document_router,
+                           lecture_router, user_router)
 from utils.db import create_db_and_tables
 
 
@@ -68,5 +68,6 @@ def healthz(
 app.include_router(router)
 app.include_router(auth_router, prefix="/auth")
 app.include_router(user_router, prefix="/users")
+app.include_router(course_router, prefix="/courses")
 app.include_router(document_router, prefix="/documents")
 app.include_router(lecture_router, prefix="/lectures")

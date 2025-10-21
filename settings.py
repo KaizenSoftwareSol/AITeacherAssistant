@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-here")
     JWT_ALGORITHM: str = "HS256"  # HMAC with SHA-256
-    
+
     # AI API Keys
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     # GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")

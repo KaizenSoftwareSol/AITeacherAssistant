@@ -6,10 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from dependencies import require_teacher
 from logger import logger
-from models.lecture import (LectureDownloadResponse, LectureGenerationRequest,
+from models.lecture import (DuplicateCheckRequest, DuplicateCheckResponse,
+                            LectureDownloadResponse, LectureGenerationRequest,
                             LectureGenerationResponse)
 from models.user import User
 from services.lecture_service import LectureService
+from supabase_config import supabase
 from utils.db import get_db
 
 router = APIRouter()
@@ -63,6 +65,8 @@ async def generate_lecture(
             semester_id=request.semester_id,
             lecture_title=request.title,
             lecture_description=request.description,
+            learning_outcomes=request.learning_outcomes,
+            selected_chapters=request.selected_chapters,
         )
 
         logger.info(
@@ -79,6 +83,140 @@ async def generate_lecture(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error during lecture generation",
+        )
+
+
+@router.post(
+    "/check-duplicate",
+    response_model=DuplicateCheckResponse,
+)
+async def check_duplicate_lecture(
+    current_user: Annotated[User, Depends(require_teacher)],
+    request: DuplicateCheckRequest,
+    db=Depends(get_db),
+):
+    """
+    Check if a lecture with the same details already exists.
+
+    This endpoint checks for duplicate lectures based on:
+    - Title
+    - Course ID
+    - Semester ID
+    - Learning outcomes
+    - Selected chapters (optional)
+
+    Returns duplicate lecture information if found, including download link.
+    Only accessible to teachers.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Checking for duplicate lecture: {request.title}")
+
+        # Check for duplicates
+        result = LectureService.check_for_duplicate_lecture(
+            db=db,
+            teacher_id=teacher.id,
+            course_id=request.course_id,
+            semester_id=request.semester_id,
+            title=request.title,
+            learning_outcomes=request.learning_outcomes,
+            selected_chapters=request.selected_chapters,
+        )
+
+        logger.info(f"Duplicate check result: {result['has_duplicate']}")
+        return DuplicateCheckResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in check duplicate endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during duplicate check",
+        )
+
+
+@router.delete(
+    "/{lecture_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_lecture(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Delete a lecture and its associated files.
+
+    This endpoint deletes:
+    - The lecture record from the database
+    - Associated lecture content records
+    - The PDF file from Supabase storage
+
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Deleting lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Get lecture content records
+        lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+
+        # Delete files from storage
+        for content in lecture_contents:
+            try:
+                storage_bucket = content["storage_bucket"]
+                storage_path = content["storage_path"]
+                supabase.delete_file(storage_bucket, storage_path)
+                logger.info(f"Deleted file: {storage_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete file {storage_path}: {str(e)}")
+
+            # Delete lecture content record
+            db.delete_record("lecture_content", content["id"])
+
+        # Delete lecture record
+        db.delete_record("lecture", lecture_id)
+
+        logger.info(f"Successfully deleted lecture {lecture_id}")
+        return None
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete lecture endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during lecture deletion",
         )
 
 

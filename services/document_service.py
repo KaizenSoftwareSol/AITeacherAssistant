@@ -284,6 +284,63 @@ class DocumentService:
             )
 
     @staticmethod
+    async def get_document_chapters(document_json_path: str) -> List[Dict[str, Any]]:
+        """
+        Get chapters from a parsed document.
+
+        Args:
+            document_json_path: Path to the document JSON in Supabase storage
+
+        Returns:
+            List of chapter information dictionaries
+        """
+        try:
+            logger.info(f"Fetching document chapters from: {document_json_path}")
+
+            # Download JSON from Supabase
+            json_bytes = supabase.download_file(
+                BUCKETS["USER_UPLOADS"], document_json_path
+            )
+
+            # Parse JSON
+            document_data = json.loads(json_bytes.decode("utf-8"))
+
+            # Extract chapters from content
+            chapters = []
+            if "content" in document_data and isinstance(
+                document_data["content"], dict
+            ):
+                for chapter_name in document_data["content"].keys():
+                    # Get chapter metadata
+                    chapter_data = document_data["content"][chapter_name]
+
+                    # Calculate word count for this chapter
+                    word_count = 0
+                    if isinstance(chapter_data, dict):
+                        for section_content in chapter_data.values():
+                            if isinstance(section_content, str):
+                                word_count += len(section_content.split())
+                    elif isinstance(chapter_data, str):
+                        word_count = len(chapter_data.split())
+
+                    chapters.append(
+                        {
+                            "chapter_name": chapter_name,
+                            "word_count": word_count,
+                        }
+                    )
+
+            logger.info(f"Found {len(chapters)} chapters")
+            return chapters
+
+        except Exception as e:
+            logger.error(f"Error fetching document chapters: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch document chapters: {str(e)}",
+            )
+
+    @staticmethod
     def _get_document_type(filename: str) -> Optional[DocumentType]:
         """Determine document type from filename."""
         if not filename:
@@ -311,10 +368,12 @@ class DocumentService:
                 "documents", {"teacher_id": teacher_id}, skip=skip, limit=limit
             )
             logger.info(f"Query returned {len(documents_data)} documents")
-            
+
             if documents_data:
-                logger.debug(f"Sample document teacher_id: {documents_data[0].get('teacher_id')}")
-            
+                logger.debug(
+                    f"Sample document teacher_id: {documents_data[0].get('teacher_id')}"
+                )
+
             return [
                 DocumentRead.model_validate(Document(**doc_data))
                 for doc_data in documents_data
@@ -336,20 +395,20 @@ class DocumentService:
             if not document_data:
                 logger.warning(f"Document {document_id} not found in database")
                 return None
-            
+
             doc_teacher_id = document_data.get("teacher_id")
             logger.info(
                 f"Document {document_id}: stored teacher_id={doc_teacher_id}, "
                 f"requested teacher_id={teacher_id}"
             )
-            
+
             if doc_teacher_id != teacher_id:
                 logger.warning(
                     f"Teacher ID mismatch for document {document_id}: "
                     f"stored={doc_teacher_id}, requested={teacher_id}"
                 )
                 return None
-                
+
             return DocumentRead.model_validate(Document(**document_data))
         except Exception as e:
             logger.error(f"Error fetching document {document_id}: {str(e)}")

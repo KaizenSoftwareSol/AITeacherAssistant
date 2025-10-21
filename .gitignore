@@ -154,3 +154,4 @@ test.py
 chroma_store/
 logs/
 *.txt
+*.json

@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -35,21 +36,27 @@ class DocumentParser:
             Dictionary containing parsed content and metadata
         """
         try:
-            logger.info(f"📄 Parsing {document_type.value} document: {filename}")
+            # Handle both string and enum
+            if isinstance(document_type, str):
+                doc_type_str = document_type.lower()
+            else:
+                doc_type_str = document_type.value.lower()
 
-            if document_type == DocumentType.PDF:
+            logger.info(f"📄 Parsing {doc_type_str} document: {filename}")
+
+            if doc_type_str == "pdf" or document_type == DocumentType.PDF:
                 result = await DocumentParser._parse_pdf(file_content, filename)
                 logger.info(
                     f"✅ PDF parsed: {result.get('summary', {}).get('total_pages', 0)} pages"
                 )
                 return result
-            elif document_type == DocumentType.PPTX:
+            elif doc_type_str == "pptx" or document_type == DocumentType.PPTX:
                 result = await DocumentParser._parse_pptx(file_content, filename)
                 logger.info(
                     f"✅ PPTX parsed: {result.get('summary', {}).get('total_pages', 0)} slides"
                 )
                 return result
-            elif document_type == DocumentType.DOCX:
+            elif doc_type_str == "docx" or document_type == DocumentType.DOCX:
                 result = await DocumentParser._parse_docx(file_content, filename)
                 logger.info(
                     f"✅ DOCX parsed: {result.get('summary', {}).get('total_headings', 0)} headings"
@@ -64,7 +71,7 @@ class DocumentParser:
 
     @staticmethod
     async def _parse_pdf(file_content: bytes, filename: str) -> Dict[str, Any]:
-        """Parse PDF content with comprehensive extraction and page-based organization."""
+        """Parse PDF content with chapter and section-based organization."""
         try:
             pdf_file = io.BytesIO(file_content)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -111,100 +118,96 @@ class DocumentParser:
                 ),
             }
 
-            # Organize content by pages
-            pages_content = {}
+            # STEP 1: Extract text from all pages with metadata
+            logger.info("📄 Extracting text from all pages...")
+            pages_data = []  # Store page data with metadata
             total_words = 0
             pages_with_content = 0
             pages_with_errors = 0
 
             for page_num, page in enumerate(pdf_reader.pages, 1):
-                page_key = f"Page {page_num}"
-                page_content = {
-                    "page_number": page_num,
-                    "text": "",
-                    "word_count": 0,
-                    "char_count": 0,
-                    "lines": [],
-                    "has_content": False,
-                    "error": None,
-                }
-
                 try:
-                    # Extract text from page
                     text = page.extract_text()
-
                     if text and text.strip():
-                        # Split text into lines and clean
+                        # Clean text to remove surrogate and problematic characters
+                        text = text.encode("utf-8", errors="ignore").decode("utf-8")
                         lines = [
                             line.strip() for line in text.split("\n") if line.strip()
                         ]
 
-                        page_content["text"] = text.strip()
-                        page_content["word_count"] = len(text.split())
-                        page_content["char_count"] = len(text.strip())
-                        page_content["lines"] = lines
-                        page_content["line_count"] = len(lines)
-                        page_content["has_content"] = True
+                        # Check if page is from appendix or exercise solutions
+                        is_appendix = DocumentParser._is_appendix_page(lines, page_num)
 
-                        total_words += page_content["word_count"]
-                        pages_with_content += 1
-
-                    # Try to extract page metadata
-                    try:
-                        if hasattr(page, "mediabox"):
-                            page_content["dimensions"] = {
-                                "width": (
-                                    float(page.mediabox.width)
-                                    if page.mediabox.width
-                                    else 0
-                                ),
-                                "height": (
-                                    float(page.mediabox.height)
-                                    if page.mediabox.height
-                                    else 0
-                                ),
-                            }
-
-                        if hasattr(page, "rotate"):
-                            page_content["rotation"] = page.get("/Rotate", 0)
-                    except Exception as meta_error:
-                        logger.debug(
-                            f"Could not extract page {page_num} metadata: {str(meta_error)}"
+                        # Detect chapter from footer/header
+                        chapter_num = DocumentParser._detect_chapter_from_footer(
+                            lines, page_num
                         )
 
+                        pages_data.append(
+                            {
+                                "page_num": page_num,
+                                "lines": lines,
+                                "is_appendix": is_appendix,
+                                "chapter_num": chapter_num,
+                                "word_count": len(text.split()),
+                            }
+                        )
+
+                        if not is_appendix:
+                            total_words += len(text.split())
+                            pages_with_content += 1
                 except Exception as e:
                     logger.warning(
                         f"Error extracting text from page {page_num}: {str(e)}"
                     )
-                    page_content["error"] = str(e)
-                    page_content["has_content"] = False
                     pages_with_errors += 1
 
-                # Add page to content
-                pages_content[page_key] = page_content
+            logger.info(
+                f"✅ Extracted {len(pages_data)} pages, "
+                f"{sum(1 for p in pages_data if not p['is_appendix'])} valid pages"
+            )
+
+            # STEP 2: Parse Table of Contents WITH PAGE RANGES
+            logger.info("📋 Parsing Table of Contents...")
+            # Get all lines from first 50 pages for TOC
+            toc_lines = []
+            for page_data in pages_data[:50]:
+                if not page_data["is_appendix"]:
+                    toc_lines.extend(page_data["lines"])
+
+            toc_structure, chapter_ranges = DocumentParser._parse_toc(toc_lines)
+            logger.info(f"✅ TOC Method: Found {len(toc_structure)} chapters")
+
+            # FALLBACK: If TOC parsing failed, detect chapters from content
+            if not toc_structure:
+                logger.warning("TOC parsing failed, using content-based detection...")
+                toc_structure, chapter_ranges = (
+                    DocumentParser._detect_chapters_from_content(pages_data)
+                )
+                logger.info(f"✅ Content Method: Found {len(toc_structure)} chapters")
+
+            # STEP 3: Parse content using chapter ranges
+            logger.info("📖 Parsing chapter content by page ranges...")
+            content_by_chapters = DocumentParser._parse_content_by_pages(
+                pages_data, toc_structure, chapter_ranges
+            )
 
             # Compile final result
             result = {
                 "type": "pdf",
                 "metadata": metadata,
-                "content": pages_content,
+                "content": content_by_chapters,
                 "summary": {
                     "total_pages": len(pdf_reader.pages),
                     "pages_with_content": pages_with_content,
                     "pages_with_errors": pages_with_errors,
-                    "empty_pages": len(pdf_reader.pages)
-                    - pages_with_content
-                    - pages_with_errors,
-                    "total_lines": sum(
-                        p.get("line_count", 0) for p in pages_content.values()
+                    "empty_pages": (
+                        len(pdf_reader.pages) - pages_with_content - pages_with_errors
                     ),
-                    "total_characters": sum(
-                        p["char_count"] for p in pages_content.values()
-                    ),
-                    "average_words_per_page": (
-                        round(total_words / pages_with_content, 2)
-                        if pages_with_content > 0
-                        else 0
+                    "total_chapters": len(content_by_chapters),
+                    "total_sections": sum(
+                        len(sections) if isinstance(sections, dict) else 0
+                        for sections in content_by_chapters.values()
                     ),
                 },
                 "total_word_count": total_words,
@@ -215,6 +218,839 @@ class DocumentParser:
         except Exception as e:
             logger.error(f"Error parsing PDF {filename}: {str(e)}")
             raise Exception(f"Failed to parse PDF: {str(e)}")
+
+    @staticmethod
+    def _is_appendix_page(lines: list, page_num: int) -> bool:
+        """
+        Check if a page is from appendix, exercise solutions, or other back matter.
+        Looks at headers, footers, and page content.
+        """
+        # Check first 10 and last 10 lines
+        check_lines = []
+        if len(lines) >= 10:
+            check_lines.extend(lines[:10])
+            check_lines.extend(lines[-10:])
+        else:
+            check_lines = lines
+
+        # Patterns that indicate appendix/back matter
+        appendix_indicators = [
+            r"^\s*Appendix\s+[A-Z]",
+            r"^\s*APPENDIX\s+[A-Z]",
+            r"Exercise\s+Solutions",
+            r"EXERCISE\s+SOLUTIONS",
+            r"Solutions\s+to\s+Exercise",
+            r"Answers\s+to\s+Exercise",
+            r"^\s*Index\s*$",
+            r"^\s*Glossary\s*$",
+            r"^\s*Bibliography\s*$",
+            r"^\s*References\s*$",
+            r"Appendix\s+[A-Z]:\s+Exercise",
+        ]
+
+        for line in check_lines:
+            line_clean = line.strip()
+            for pattern in appendix_indicators:
+                if re.search(pattern, line_clean, re.IGNORECASE):
+                    logger.debug(f"Page {page_num} identified as appendix/back matter")
+                    return True
+
+        return False
+
+    @staticmethod
+    def _detect_chapter_from_footer(lines: list, page_num: int) -> int:
+        """
+        Detect which chapter a page belongs to by examining footer AND header.
+        Uses STRICT patterns to avoid false positives from content references.
+        Returns chapter number or None.
+        """
+        if len(lines) < 2:
+            return None
+
+        # ONLY check first 2 and last 2 lines (strict header/footer only)
+        header_lines = lines[:2]
+        footer_lines = lines[-2:]
+
+        # STRICT patterns - typical book footer/header formats
+        # Format: "Page# | Chapter X: Title" or "Chapter X: Title | Page#"
+        strict_patterns = [
+            r"^\d+\s*\|\s*Chapter\s+(\d+)[:\s]",  # "42 | Chapter 1: ..."
+            r"^Chapter\s+(\d+)[:\s].+\|\s*\d+\s*$",  # "Chapter 1: ... | 42"
+            r"^\d+\s+\|\s+Chapter\s+(\d+)[:\s]",  # "42  | Chapter 1: ..."
+        ]
+
+        # Check ONLY header and footer lines with strict patterns
+        for line in header_lines + footer_lines:
+            line_clean = line.strip()
+
+            # Must be short (actual footers/headers are concise)
+            if len(line_clean) > 120 or len(line_clean) < 10:
+                continue
+
+            # Try strict patterns only
+            for pattern in strict_patterns:
+                match = re.search(pattern, line_clean, re.IGNORECASE)
+                if match:
+                    chapter_num = int(match.group(1))
+                    logger.debug(
+                        f"Page {page_num} -> Chapter {chapter_num} "
+                        f"[{line_clean[:60]}]"
+                    )
+                    return chapter_num
+
+        return None
+
+    @staticmethod
+    def _parse_toc(lines: list) -> tuple:
+        """
+        Parse the Table of Contents to extract chapter structure WITH PAGE NUMBERS.
+        Returns (toc_dict, chapter_ranges) where:
+        - toc_dict: {chapter_num: title}
+        - chapter_ranges: {chapter_num: (start_page, end_page)}
+        """
+        toc_structure = {}
+        chapter_pages = {}  # Track start pages from TOC
+        in_toc = False
+
+        toc_start_patterns = ["table of contents", "contents"]
+        stop_markers = ["appendix", "index", "glossary", "references", "bibliography"]
+
+        # Multiple TOC patterns - MUST handle ALL edge cases
+        # Examples: "1 Law's roots 1", "4 Courts 85", "10 'Title' 311"
+        toc_patterns = [
+            # Explicit "Chapter": "Chapter 1: Title ... 25"
+            re.compile(r"^Chapter\s+(\d+)[:\s\-]+(.+?)[\.\s]{2,}.*?(\d+)\s*$"),
+            # With dots: "1. Title ... 25"
+            re.compile(r"^(\d+)\.\s*(.+?)[\.\s]{2,}.*?(\d+)\s*$"),
+            # Simple format with short titles: "1 Law's roots 1", "4 Courts 85"
+            # GREEDY match for title, stops at last space + digits
+            re.compile(r"^(\d{1,2})\s+(.+?)\s+(\d{1,4})\s*$"),
+            # Long spacing: "10     Title     311"
+            re.compile(r"^(\d{1,2})\s{2,}(.+?)\s{2,}(\d{1,})\s*$"),
+        ]
+
+        for i, line in enumerate(lines):
+            line_clean = line.strip()
+            line_lower = line_clean.lower()
+
+            # Detect TOC start
+            if not in_toc:
+                if any(marker in line_lower for marker in toc_start_patterns):
+                    if len(line_clean) < 50:
+                        in_toc = True
+                        logger.debug(f"TOC start at line {i}")
+                        continue
+
+            # Process TOC entries
+            if in_toc:
+                # Stop at appendices
+                if any(marker in line_lower for marker in stop_markers):
+                    logger.debug(f"TOC end at appendix, line {i}")
+                    break
+
+                # Stop at actual Chapter 1 content
+                if (
+                    line_clean.startswith("Chapter 1")
+                    and "..." not in line_clean
+                    and not re.search(r"\d+\s*$", line_clean)
+                ):
+                    logger.debug(f"TOC end at Chapter 1 start")
+                    break
+
+                # Try all TOC patterns
+                match = None
+                for pattern in toc_patterns:
+                    match = pattern.match(line_clean)
+                    if match:
+                        break
+
+                if match:
+                    chapter_num = int(match.group(1))
+                    chapter_title = match.group(2).strip()
+                    page_num = int(match.group(3))
+
+                    # Clean title - remove quotes, extra spaces
+                    chapter_title = chapter_title.strip("'\"")
+                    chapter_title = re.sub(r"\s{2,}", " ", chapter_title)
+                    chapter_title = re.sub(r"[\.\s]+$", "", chapter_title)
+
+                    # Validate chapter number (1-30 reasonable range)
+                    if chapter_num < 1 or chapter_num > 30:
+                        continue
+
+                    # Validate page number is reasonable (1-2000)
+                    if page_num < 1 or page_num > 2000:
+                        continue
+
+                    # Validate title - must start with capital and be meaningful
+                    if not chapter_title or len(chapter_title) < 2:
+                        continue
+
+                    if not chapter_title[0].isupper() and not chapter_title[0] == "'":
+                        continue
+
+                    # Skip appendix, exercise, references, etc.
+                    skip_words = [
+                        "appendix",
+                        "exercise",
+                        "answer",
+                        "reference",
+                        "further reading",
+                        "index",
+                    ]
+                    if any(word in chapter_title.lower() for word in skip_words):
+                        continue
+
+                    # Skip if already found (avoid duplicates)
+                    if chapter_num in toc_structure:
+                        continue
+
+                    toc_structure[chapter_num] = chapter_title
+                    chapter_pages[chapter_num] = page_num
+                    logger.debug(
+                        f"TOC: Chapter {chapter_num} '{chapter_title}' -> page {page_num}"
+                    )
+
+        # Build chapter ranges (start_page to next_chapter_start - 1)
+        chapter_ranges = {}
+        sorted_chapters = sorted(chapter_pages.items())
+
+        for i, (chapter_num, start_page) in enumerate(sorted_chapters):
+            # End page is start of next chapter - 1 (or max if last chapter)
+            if i + 1 < len(sorted_chapters):
+                end_page = sorted_chapters[i + 1][1] - 1
+            else:
+                end_page = 9999  # Will be capped by actual page count
+
+            chapter_ranges[chapter_num] = (start_page, end_page)
+            logger.debug(f"Chapter {chapter_num} range: pages {start_page}-{end_page}")
+
+        logger.info(f"Parsed {len(toc_structure)} chapters from TOC with page ranges")
+        return toc_structure, chapter_ranges
+
+    @staticmethod
+    def _detect_chapters_from_content(pages_data: list) -> tuple:
+        """
+        Fallback method: Detect chapters by scanning actual content pages.
+        STRICT validation to avoid false positives (like years: 1664, 1789).
+        Returns (toc_dict, chapter_ranges)
+        """
+        toc_structure = {}
+        chapter_starts = {}
+
+        # FLEXIBLE patterns for content-based detection
+        chapter_patterns = [
+            (
+                r"^Chapter\s+(\d+)[:\s\-]+(.+?)$",
+                "explicit_chapter",
+            ),  # "Chapter 1: Title"
+            (
+                r"^CHAPTER\s+(\d+)[:\s\-]+(.+?)$",
+                "explicit_chapter",
+            ),  # "CHAPTER 1: Title"
+            (
+                r"^(\d{1,2})\.1\s+(.+)$",
+                "first_section",
+            ),  # "1.1 Title" = Chapter 1 start
+            (
+                r"^(\d{1,2})\s*\n+([A-Z][A-Za-z\s]{5,})$",
+                "simple_number",
+            ),  # "5\nLaw and property"
+            (
+                r"^(\d{1,2})[\.\s]+([A-Z][^\.]{8,})$",
+                "numbered",
+            ),  # "5 Law and property" or "5. Title"
+            (r"^([IVX]{1,5})[\.\s]+([A-Z][A-Za-z\s]{8,})$", "roman"),  # Roman numerals
+        ]
+
+        for page_data in pages_data:
+            if page_data["is_appendix"]:
+                continue
+
+            page_num = page_data["page_num"]
+            lines = page_data["lines"]
+
+            # Skip very early pages (first 10) to avoid TOC
+            # But don't skip too much - some books start early
+            if page_num < 10:
+                continue
+
+            # Check first 10 lines (chapter headings at page top)
+            for idx, line in enumerate(lines[:10]):
+                line_clean = line.strip()
+
+                # Skip short lines
+                if len(line_clean) < 8:
+                    continue
+
+                for pattern, pattern_type in chapter_patterns:
+                    match = re.match(pattern, line_clean, re.IGNORECASE)
+                    if match:
+                        chapter_num_raw = match.group(1)
+                        chapter_title = (
+                            match.group(2).strip() if len(match.groups()) >= 2 else ""
+                        )
+
+                        # Convert to integer
+                        try:
+                            if pattern_type == "roman":
+                                # Extended Roman numeral support
+                                roman_map = {
+                                    "I": 1,
+                                    "II": 2,
+                                    "III": 3,
+                                    "IV": 4,
+                                    "V": 5,
+                                    "VI": 6,
+                                    "VII": 7,
+                                    "VIII": 8,
+                                    "IX": 9,
+                                    "X": 10,
+                                    "XI": 11,
+                                    "XII": 12,
+                                    "XIII": 13,
+                                    "XIV": 14,
+                                    "XV": 15,
+                                    "XVI": 16,
+                                    "XVII": 17,
+                                    "XVIII": 18,
+                                    "XIX": 19,
+                                    "XX": 20,
+                                }
+                                chapter_num = roman_map.get(chapter_num_raw.upper())
+                                if chapter_num is None:
+                                    continue
+                            else:
+                                chapter_num = int(chapter_num_raw)
+                        except (ValueError, KeyError):
+                            continue
+
+                        # **VALIDATION**: Reject unreasonable chapter numbers
+                        # Chapters should be 1-30 typically, NOT years like 1664!
+                        if chapter_num < 1 or chapter_num > 30:
+                            continue
+
+                        # Clean title
+                        chapter_title = re.sub(r"[\.\s]+\d+\s*$", "", chapter_title)
+                        chapter_title = re.sub(r"\s{2,}", " ", chapter_title).strip()
+
+                        # Validate title - must be meaningful
+                        if len(chapter_title) < 3:
+                            continue
+
+                        # Skip if already found this chapter
+                        if chapter_num in chapter_starts:
+                            continue
+
+                        # For first_section pattern, use generic chapter title
+                        # because "1.1 Title" will also be a section
+                        if pattern_type == "first_section":
+                            # Use just the topic from 1.1 as chapter title
+                            toc_structure[chapter_num] = chapter_title
+                        else:
+                            toc_structure[chapter_num] = chapter_title
+
+                        chapter_starts[chapter_num] = page_num
+                        logger.info(
+                            f"Detected Chapter {chapter_num}: '{chapter_title}' "
+                            f"at page {page_num} [{pattern_type}]"
+                        )
+                        break
+
+        # Build chapter ranges
+        chapter_ranges = {}
+        sorted_chapters = sorted(chapter_starts.items())
+
+        for i, (chapter_num, start_page) in enumerate(sorted_chapters):
+            if i + 1 < len(sorted_chapters):
+                end_page = sorted_chapters[i + 1][1] - 1
+            else:
+                # Last chapter goes to end of non-appendix pages
+                non_appendix_pages = [
+                    p["page_num"] for p in pages_data if not p["is_appendix"]
+                ]
+                end_page = (
+                    max(non_appendix_pages) if non_appendix_pages else start_page + 10
+                )
+
+            chapter_ranges[chapter_num] = (start_page, end_page)
+            logger.debug(f"Chapter {chapter_num} range: pages {start_page}-{end_page}")
+
+        return toc_structure, chapter_ranges
+
+    @staticmethod
+    def _parse_content_by_pages(
+        pages_data: list, toc_structure: dict, chapter_ranges: dict
+    ) -> dict:
+        """
+        Parse content using TOC page ranges - the most reliable method!
+        If TOC says "Chapter 1 ... page 35", we know Chapter 1 is on pages 35+
+        """
+        from collections import OrderedDict
+
+        content_by_chapters = OrderedDict()
+
+        # Sort chapters by number for chronological order
+        sorted_chapters = sorted(toc_structure.items())
+
+        # For each chapter, collect pages within its TOC page range
+        for chapter_num, chapter_title in sorted_chapters:
+            chapter_key = f"Chapter {chapter_num}: {chapter_title}"
+            chapter_content = []
+            chapter_sections = {}
+            current_section = None
+            section_buffer = []
+
+            # Get page range from TOC
+            start_page, end_page = chapter_ranges.get(chapter_num, (0, 0))
+
+            logger.info(
+                f"Parsing Chapter {chapter_num} (pages {start_page}-{end_page})..."
+            )
+
+            pages_found = 0
+
+            # Collect all pages in this chapter's range
+            for page_data in pages_data:
+                page_num = page_data["page_num"]
+
+                # CRITICAL: Skip if appendix page
+                if page_data["is_appendix"]:
+                    continue
+
+                # Include page if it's in the TOC page range for this chapter
+                if start_page <= page_num <= end_page:
+                    pages_found += 1
+                    # Process lines from this page
+                    for line in page_data["lines"]:
+                        line_clean = line.strip()
+
+                        # Skip empty lines
+                        if not line_clean:
+                            continue
+
+                        # Skip chapter heading line itself
+                        if re.match(
+                            rf"^Chapter\s+{chapter_num}[:\s\-]",
+                            line_clean,
+                            re.IGNORECASE,
+                        ):
+                            continue
+
+                        # Skip page numbers and very short lines
+                        if len(line_clean) <= 3 or line_clean.isdigit():
+                            continue
+
+                        # Skip lines that are just numbers/dots
+                        if re.match(r"^[\d\.\s]+$", line_clean):
+                            continue
+
+                        # Skip header/footer patterns (page numbers with separators)
+                        if re.match(r"^\d+\s*[\|\-]\s*Chapter", line_clean):
+                            continue
+
+                        # Skip non-section patterns that look like "X.Y"
+                        # FIGURE 1.8, TABLE 2.3, etc. are NOT sections!
+                        if re.match(
+                            r"^(FIGURE|TABLE|MAP|CHART|IMAGE|FIG\.)\s+\d+\.\d+",
+                            line_clean,
+                            re.IGNORECASE,
+                        ):
+                            continue
+
+                        # Check if it's a section heading (X.Y format)
+                        section_match = re.match(
+                            r"^(\d{1,2})\.(\d{1,2}(?:\.\d+)?)\s+(.+)$", line_clean
+                        )
+
+                        if section_match:
+                            sec_chapter_num = int(section_match.group(1))
+                            sec_num = section_match.group(2)
+                            section_title_raw = section_match.group(3).strip()
+
+                            # Validate it belongs to this chapter
+                            if sec_chapter_num == chapter_num:
+                                # Clean section title - remove bullets and page numbers
+                                section_title = re.sub(
+                                    r"^[•\-\*]\s*", "", section_title_raw
+                                )
+                                section_title = re.sub(
+                                    r"[\.\s]+\d+\s*$", "", section_title
+                                )
+                                section_title = re.sub(
+                                    r"\s{2,}", " ", section_title
+                                ).strip()
+
+                                # CRITICAL: Skip if title starts with common non-section keywords
+                                title_lower = section_title.lower()
+                                skip_keywords = [
+                                    "figure",
+                                    "table",
+                                    "map",
+                                    "chart",
+                                    "image",
+                                    "the ",
+                                    "a ",
+                                    "an ",
+                                    "this ",
+                                    "these ",
+                                ]
+                                if any(
+                                    title_lower.startswith(kw)
+                                    for kw in skip_keywords[:5]
+                                ):
+                                    # Starts with FIGURE, TABLE, etc.
+                                    continue
+
+                                # Additional validation - section title should be reasonable
+                                if (
+                                    len(section_title) > 3
+                                    and not section_title.endswith(":")
+                                    and "..." not in section_title
+                                ):
+                                    # Save previous section
+                                    if current_section and section_buffer:
+                                        chapter_sections[current_section] = " ".join(
+                                            section_buffer
+                                        ).strip()
+                                        section_buffer = []
+
+                                    # Use full section number: "11.3 Title"
+                                    full_section_num = f"{sec_chapter_num}.{sec_num}"
+                                    current_section = (
+                                        f"{full_section_num} {section_title}"
+                                    )
+                                    logger.debug(f"  Section: {current_section}")
+                                    continue
+
+                        # Filter out TOC-like content and noise
+                        # Skip lines that look like TOC entries
+                        if re.match(r"^\d{1,2}\s+[A-Z].{5,}\s+\d{1,4}\s*$", line_clean):
+                            # Looks like "5 Chapter Title 110" = TOC entry
+                            continue
+
+                        # Skip lines that are mostly dots (TOC leaders)
+                        if line_clean.count(".") > len(line_clean) / 3:
+                            continue
+
+                        # Skip very short lines (likely page numbers or headers)
+                        if len(line_clean) < 20:
+                            continue
+
+                        # Add to content buffer
+                        if current_section:
+                            section_buffer.append(line_clean)
+                        else:
+                            chapter_content.append(line_clean)
+
+            # Save last section
+            if current_section and section_buffer:
+                chapter_sections[current_section] = " ".join(section_buffer).strip()
+
+            logger.info(f"  Found {pages_found} pages for Chapter {chapter_num}")
+
+            # Sort sections by their number (e.g., 1.1, 1.2, 1.3)
+            if chapter_sections:
+
+                def get_section_num(sec_key):
+                    match = re.match(r"^(\d+)\.(\d+)", sec_key)
+                    if match:
+                        return (int(match.group(1)), int(match.group(2)))
+                    return (999, 999)  # Put non-numbered sections at end
+
+                chapter_sections = dict(
+                    sorted(
+                        chapter_sections.items(), key=lambda x: get_section_num(x[0])
+                    )
+                )
+
+            # Add chapter to result
+            if chapter_sections:
+                content_by_chapters[chapter_key] = chapter_sections
+            elif chapter_content:
+                content_by_chapters[chapter_key] = {
+                    "content": " ".join(chapter_content).strip()
+                }
+            else:
+                logger.warning(
+                    f"No content found for {chapter_key} "
+                    f"(found {pages_found} pages)"
+                )
+
+        # POST-PROCESSING: Remove duplicate sections
+        content_by_chapters = DocumentParser._remove_duplicate_sections(
+            content_by_chapters
+        )
+
+        return dict(content_by_chapters)
+
+    @staticmethod
+    def _remove_duplicate_sections(content_by_chapters: dict) -> dict:
+        """
+        Remove duplicate sections within each chapter.
+        Keeps version without bullet points (•, -, *) or the first one found.
+        """
+        cleaned_chapters = {}
+
+        for chapter_key, sections in content_by_chapters.items():
+            if not isinstance(sections, dict):
+                cleaned_chapters[chapter_key] = sections
+                continue
+
+            # Group sections by their number (e.g., "1.1")
+            section_groups = {}
+            for section_key, content in sections.items():
+                # Extract section number (e.g., "1.1" from "1.1 Title")
+                section_num_match = re.match(r"^(\d+\.\d+)", section_key)
+                if section_num_match:
+                    section_num = section_num_match.group(1)
+                    if section_num not in section_groups:
+                        section_groups[section_num] = []
+                    section_groups[section_num].append(
+                        {"key": section_key, "content": content}
+                    )
+                else:
+                    # No number found, keep as is
+                    if "other" not in section_groups:
+                        section_groups["other"] = []
+                    section_groups["other"].append(
+                        {"key": section_key, "content": content}
+                    )
+
+            # For each section number, pick the best version
+            cleaned_sections = {}
+            for section_num, duplicates in section_groups.items():
+                if len(duplicates) == 1:
+                    # No duplicates
+                    cleaned_sections[duplicates[0]["key"]] = duplicates[0]["content"]
+                else:
+                    # Multiple versions - prefer one without bullets
+                    best = duplicates[0]
+                    for dup in duplicates:
+                        # Prefer section without bullet points in the KEY
+                        if not re.search(r"[•\-\*]", dup["key"]):
+                            best = dup
+                            break
+
+                    logger.debug(
+                        f"Removed {len(duplicates)-1} duplicate(s) for "
+                        f"section {section_num}, kept: {best['key'][:50]}"
+                    )
+                    cleaned_sections[best["key"]] = best["content"]
+
+            cleaned_chapters[chapter_key] = cleaned_sections
+
+        return cleaned_chapters
+
+    @staticmethod
+    def _parse_content_with_toc(
+        lines: list,
+        toc_structure: dict,
+        page_to_line_map: dict,
+        page_to_chapter_map: dict,
+    ) -> dict:
+        """
+        Parse document content using TOC structure and footer info as guides.
+        Returns content organized by chapters in chronological order.
+        Uses page footers to validate chapter assignment.
+        """
+        from collections import OrderedDict
+
+        content_by_chapters = OrderedDict()
+
+        # Skip TOC and front matter - find where Chapter 1 actually starts
+        content_start_idx = 0
+        for i, line in enumerate(lines):
+            if re.match(r"^Chapter\s+1[:\s\-]", line, re.IGNORECASE):
+                # Make sure it's not a TOC entry
+                if "..." not in line and not re.search(r"\d{2,}\s*$", line):
+                    content_start_idx = i
+                    logger.debug(f"Content starts at line {i}")
+                    break
+
+        if content_start_idx == 0:
+            logger.warning("Could not find Chapter 1 start, using full text")
+
+        # Parse content after TOC
+        lines_to_parse = lines[content_start_idx:]
+
+        # Build chapter pattern from TOC
+        if toc_structure:
+            # Sort chapters by number
+            sorted_chapters = sorted(toc_structure.items())
+            logger.info(f"Parsing {len(sorted_chapters)} chapters from TOC")
+        else:
+            logger.warning("No TOC structure found, using pattern matching")
+            sorted_chapters = []
+
+        current_chapter = None
+        current_chapter_num = None
+        current_section = None
+        content_buffer = []
+
+        # Section pattern
+        section_pattern = re.compile(r"^(\d+\.\d+(?:\.\d+)?)\s+(.+)$")
+
+        # Stop markers for content parsing
+        appendix_markers = [
+            r"^Appendix\s+[A-Z]",
+            r"^APPENDIX\s+[A-Z]",
+            r"^Index\s*$",
+            r"^References\s*$",
+            r"^Bibliography\s*$",
+        ]
+
+        for line_idx, line in enumerate(lines_to_parse, start=content_start_idx):
+            line_clean = line.strip()
+
+            # Stop parsing at appendices or back matter
+            if any(
+                re.match(pattern, line_clean, re.IGNORECASE)
+                for pattern in appendix_markers
+            ):
+                logger.info(f"Stopping at appendix/back matter: {line_clean[:50]}")
+                break
+
+            # Skip empty or very short lines
+            if len(line_clean) <= 3 or line_clean.isdigit():
+                continue
+
+            is_chapter = False
+            is_section = False
+
+            # Check for chapter headings using TOC structure
+            for chapter_num, expected_title in sorted_chapters:
+                # Try exact match first
+                chapter_pattern = re.compile(
+                    rf"^Chapter\s+{chapter_num}[:\s\-]+(.+?)$", re.IGNORECASE
+                )
+                match = chapter_pattern.match(line_clean)
+
+                if match:
+                    found_title = match.group(1).strip()
+                    # Clean the found title
+                    found_title = re.sub(r"[\.\s]+\d+\s*$", "", found_title)
+                    found_title = re.sub(r"\s{2,}", " ", found_title)
+
+                    # Check if it matches TOC (at least partially)
+                    title_words = expected_title.lower().split()[:3]
+                    found_words = found_title.lower().split()[:3]
+
+                    # If first few words match, it's probably the right chapter
+                    if (
+                        any(word in found_words for word in title_words)
+                        or len(found_title) > 5
+                    ):
+                        # Save previous chapter content
+                        if current_chapter and content_buffer:
+                            if current_section:
+                                if current_chapter not in content_by_chapters:
+                                    content_by_chapters[current_chapter] = {}
+                                content_by_chapters[current_chapter][
+                                    current_section
+                                ] = " ".join(content_buffer).strip()
+                            else:
+                                if current_chapter not in content_by_chapters:
+                                    content_by_chapters[current_chapter] = {}
+                                content_by_chapters[current_chapter]["content"] = (
+                                    " ".join(content_buffer).strip()
+                                )
+                            content_buffer = []
+
+                        # Use TOC title (more reliable)
+                        current_chapter = f"Chapter {chapter_num}: {expected_title}"
+                        current_chapter_num = chapter_num
+                        current_section = None
+                        is_chapter = True
+                        logger.debug(f"Found chapter: {current_chapter}")
+                        break
+
+            # Check for section headings (only within a chapter)
+            if not is_chapter and current_chapter:
+                match = section_pattern.match(line_clean)
+                if match:
+                    section_num = match.group(1)
+                    section_title = match.group(2).strip()
+
+                    # Validate section belongs to current chapter
+                    section_chapter_num = int(section_num.split(".")[0])
+                    if section_chapter_num == current_chapter_num:
+                        # Clean section title
+                        section_title = re.sub(r"[\.\s]+\d+\s*$", "", section_title)
+                        section_title = re.sub(r"\s{2,}", " ", section_title)
+
+                        # Validate section
+                        if (
+                            len(section_title) > 3
+                            and not section_title.endswith(":")
+                            and "..." not in section_title
+                        ):
+                            # Save previous section
+                            if current_section and content_buffer:
+                                if current_chapter not in content_by_chapters:
+                                    content_by_chapters[current_chapter] = {}
+                                content_by_chapters[current_chapter][
+                                    current_section
+                                ] = " ".join(content_buffer).strip()
+                                content_buffer = []
+
+                            current_section = f"{section_num} {section_title}"
+                            is_section = True
+
+            # Add to content buffer with footer validation
+            if not is_chapter and not is_section and current_chapter:
+                # Get the page this line is on
+                page_num = page_to_line_map.get(line_idx)
+
+                # Check if page footer confirms we're in the right chapter
+                footer_chapter_num = page_to_chapter_map.get(page_num)
+
+                # Only add content if:
+                # 1. Line passes basic filters
+                # 2. Footer confirms current chapter OR no footer info available
+                if (
+                    len(line_clean) > 10
+                    and not line_clean.isdigit()
+                    and not re.match(r"^[\d\.\s]+$", line_clean)
+                ):
+                    # Validate with footer if available
+                    if footer_chapter_num is not None:
+                        if footer_chapter_num == current_chapter_num:
+                            content_buffer.append(line_clean)
+                        else:
+                            # Wrong chapter according to footer - skip
+                            logger.debug(
+                                f"Skipping line from page {page_num}: "
+                                f"footer says Ch{footer_chapter_num}, "
+                                f"currently parsing Ch{current_chapter_num}"
+                            )
+                    else:
+                        # No footer info, trust our pattern matching
+                        content_buffer.append(line_clean)
+
+        # Save final content
+        if current_chapter and content_buffer:
+            if current_section:
+                if current_chapter not in content_by_chapters:
+                    content_by_chapters[current_chapter] = {}
+                content_by_chapters[current_chapter][current_section] = " ".join(
+                    content_buffer
+                ).strip()
+            else:
+                if current_chapter not in content_by_chapters:
+                    content_by_chapters[current_chapter] = {}
+                content_by_chapters[current_chapter]["content"] = " ".join(
+                    content_buffer
+                ).strip()
+
+        # If no chapters found, fallback
+        if not content_by_chapters:
+            logger.warning("No chapters parsed, creating fallback structure")
+            content_by_chapters["Document Content"] = {
+                "Full Text": " ".join(lines_to_parse)
+            }
+
+        return dict(content_by_chapters)  # Convert OrderedDict to dict
 
     @staticmethod
     async def _parse_pptx(file_content: bytes, filename: str) -> Dict[str, Any]:

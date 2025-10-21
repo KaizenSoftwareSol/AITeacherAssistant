@@ -38,6 +38,7 @@ class Lecture(SQLModel, table=True):
     id: Optional[str] = Field(default=None, primary_key=True)  # UUID
     title: str
     description: Optional[str] = None
+    learning_outcomes: Optional[str] = None  # Learning outcomes for students
     content: str  # Main lecture content/text
     chapter: Optional[str] = None  # Book chapter reference
     book_reference: Optional[str] = None  # Book name/reference
@@ -92,6 +93,9 @@ class LectureGenerationRequest(SQLModel):
     semester_id: str  # UUID of the semester
     title: str  # Title for the lecture
     description: str  # Description/overview from teacher
+    learning_outcomes: Optional[str] = None  # Learning outcomes for students
+    # List of chapter names to include (None = all chapters)
+    selected_chapters: Optional[List[str]] = None
 
 
 class LectureGenerationResponse(SQLModel):
@@ -114,6 +118,7 @@ class LectureRead(SQLModel):
     id: str  # UUID
     title: str
     description: Optional[str] = None
+    learning_outcomes: Optional[str] = None
     content: str
     chapter: Optional[str] = None
     book_reference: Optional[str] = None
@@ -133,6 +138,7 @@ class LectureUpdate(SQLModel):
 
     title: Optional[str] = None
     description: Optional[str] = None
+    learning_outcomes: Optional[str] = None
     content: Optional[str] = None
     chapter: Optional[str] = None
     book_reference: Optional[str] = None
@@ -148,3 +154,35 @@ class LectureDownloadResponse(SQLModel):
     file_name: str
     file_size: int
     created_at: str
+
+
+class DuplicateLectureInfo(SQLModel):
+    """Information about a duplicate lecture."""
+
+    lecture_id: str
+    title: str
+    description: Optional[str] = None
+    learning_outcomes: Optional[str] = None
+    status: str
+    created_at: str
+    download_url: str
+    file_name: str
+    file_size: int
+
+
+class DuplicateCheckRequest(SQLModel):
+    """Request model for checking duplicate lectures."""
+
+    course_id: str
+    semester_id: str
+    title: str
+    learning_outcomes: Optional[str] = None
+    selected_chapters: Optional[List[str]] = None
+
+
+class DuplicateCheckResponse(SQLModel):
+    """Response model for duplicate check."""
+
+    has_duplicate: bool
+    duplicate_lecture: Optional[DuplicateLectureInfo] = None
+    message: str
