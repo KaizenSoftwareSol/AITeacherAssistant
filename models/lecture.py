@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from models.ai_conversation import AIConversation
     from models.analytics import LectureAnalytics
     from models.course import Course, Semester
+    from models.lecture_embedding import LectureChunk, LectureEmbedding
     from models.user import Teacher
 
 
@@ -40,11 +41,13 @@ class Lecture(SQLModel, table=True):
     description: Optional[str] = None
     learning_outcomes: Optional[str] = None  # Learning outcomes for students
     content: str  # Main lecture content/text
+    summary: Optional[str] = None  # AI-generated summary for quick overview
     chapter: Optional[str] = None  # Book chapter reference
     book_reference: Optional[str] = None  # Book name/reference
     lecture_type: LectureType
     status: LectureStatus = Field(default=LectureStatus.DRAFT)
     version: int = Field(default=1)  # Version control
+    has_embeddings: bool = Field(default=False)  # Whether embeddings exist for RAG
 
     # Foreign keys
     course_id: str = Field(foreign_key="course.id")  # UUID
@@ -63,6 +66,8 @@ class Lecture(SQLModel, table=True):
     contents: List["LectureContent"] = Relationship(back_populates="lecture")
     conversations: List["AIConversation"] = Relationship(back_populates="lecture")
     analytics: List["LectureAnalytics"] = Relationship(back_populates="lecture")
+    chunks: List["LectureChunk"] = Relationship(back_populates="lecture")
+    embeddings: List["LectureEmbedding"] = Relationship()
 
 
 class LectureContent(SQLModel, table=True):

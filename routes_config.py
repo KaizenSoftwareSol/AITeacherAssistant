@@ -7,10 +7,12 @@ user_router = APIRouter(tags=["User Routers"])
 document_router = APIRouter(tags=["Document Management"])
 lecture_router = APIRouter(tags=["Lecture Generation"])
 course_router = APIRouter(tags=["Course Management"])
+student_router = APIRouter(tags=["Student Portal"])
 
 
 import auth.routes
 import course.routes
 import document.routes
 import lecture.routes
+import student.routes
 import user.routes
