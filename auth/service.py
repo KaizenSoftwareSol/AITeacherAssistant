@@ -6,7 +6,7 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-from auth.models import UserCreate
+from auth.models import UserCreate, UserRead
 from models.user import User, UserRole
 from settings import settings
 
@@ -59,6 +59,38 @@ class AuthService:
         if users:
             raise ValueError("User with this username already exists")
 
+        # Determine university
+        university_id = None
+        if user_create.university_id:
+            university = db.get_record_by_id("university", user_create.university_id)
+            if not university:
+                raise ValueError("Selected university was not found")
+            university_id = university.get("id")
+        elif user_create.university_name:
+            university_name = user_create.university_name.strip()
+            if not university_name:
+                raise ValueError("University name cannot be empty")
+
+            existing_universities = db.get_records(
+                "university", {"name": university_name}
+            )
+            if existing_universities:
+                university_id = existing_universities[0]["id"]
+            else:
+                new_university = {
+                    "name": university_name,
+                }
+                if user_create.university_location:
+                    new_university["location"] = user_create.university_location.strip()
+
+                university_result = db.create_record("university", new_university)
+                university_id = university_result.get("id")
+        else:
+            raise ValueError("University selection is required")
+
+        if not university_id:
+            raise ValueError("Unable to resolve university for the new user")
+
         # Create new user data
         hashed_password = AuthService.get_password_hash(user_create.password)
         user_data = {
@@ -69,13 +101,132 @@ class AuthService:
             "is_active": True,
             "first_name": getattr(user_create, "first_name", ""),
             "last_name": getattr(user_create, "last_name", ""),
+            "university_id": university_id,
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
         }
 
         # Create user in Supabase
         user_result = db.create_user(user_data)
+        if not user_result:
+            raise ValueError("Failed to create user")
+
+        user_id = user_result.get("id")
+
+        # Create role-specific profiles
+        if user_create.role == UserRole.TEACHER:
+            teacher_payload = {
+                "user_id": user_id,
+                "university_id": university_id,
+            }
+            if user_create.department:
+                teacher_payload["department"] = user_create.department.strip()
+            if user_create.specialization:
+                teacher_payload["specialization"] = user_create.specialization.strip()
+
+            db.create_record("teacher", teacher_payload)
+
+        elif user_create.role == UserRole.STUDENT:
+            if not user_create.student_id:
+                raise ValueError("Student ID is required for student signup")
+
+            student_id = user_create.student_id.strip()
+            if not student_id:
+                raise ValueError("Student ID cannot be empty")
+
+            existing_student = db.get_records(
+                "student", {"student_id": student_id}
+            )
+            if existing_student:
+                raise ValueError("A student with this student ID already exists")
+
+            student_payload = {
+                "user_id": user_id,
+                "university_id": university_id,
+                "student_id": student_id,
+            }
+
+            if user_create.year_of_study is not None:
+                student_payload["year_of_study"] = user_create.year_of_study
+
+            db.create_record("student", student_payload)
+
         return User(**user_result)
+
+    @staticmethod
+    def to_user_read(db, user: User) -> UserRead:
+        """Convert a User model to UserRead with profile enrichment."""
+
+        user_dict = {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "is_active": user.is_active,
+            "role": user.role,
+            "university_id": getattr(user, "university_id", None),
+            "created_at": user.created_at,
+            "updated_at": user.updated_at,
+            "department": None,
+            "specialization": None,
+            "student_id": None,
+            "year_of_study": None,
+        }
+
+        # Teacher details
+        teacher_profile = getattr(user, "teacher_profile", None)
+        if teacher_profile:
+            user_dict["department"] = getattr(teacher_profile, "department", None)
+            user_dict["specialization"] = getattr(
+                teacher_profile, "specialization", None
+            )
+        elif user.role in [UserRole.TEACHER, UserRole.ADMIN]:
+            try:
+                admin_client = getattr(db, "admin_client", None)
+                if admin_client:
+                    result = (
+                        admin_client.table("teacher")
+                        .select("department, specialization")
+                        .eq("user_id", str(user.id))
+                        .limit(1)
+                        .execute()
+                    )
+                    if result.data:
+                        teacher_data = result.data[0]
+                        user_dict["department"] = teacher_data.get("department")
+                        user_dict["specialization"] = teacher_data.get(
+                            "specialization"
+                        )
+            except Exception:
+                pass
+
+        # Student details
+        student_profile = getattr(user, "student_profile", None)
+        if student_profile:
+            user_dict["student_id"] = getattr(student_profile, "student_id", None)
+            user_dict["year_of_study"] = getattr(
+                student_profile, "year_of_study", None
+            )
+        elif user.role == UserRole.STUDENT:
+            try:
+                admin_client = getattr(db, "admin_client", None)
+                if admin_client:
+                    result = (
+                        admin_client.table("student")
+                        .select("student_id, year_of_study")
+                        .eq("user_id", str(user.id))
+                        .limit(1)
+                        .execute()
+                    )
+                    if result.data:
+                        student_data = result.data[0]
+                        user_dict["student_id"] = student_data.get("student_id")
+                        user_dict["year_of_study"] = student_data.get("year_of_study")
+            except Exception:
+                pass
+
+        return UserRead.model_validate(user_dict)
 
     @staticmethod
     def authenticate_user(db, email: str, password: str) -> Optional[User]:

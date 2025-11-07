@@ -1,6 +1,6 @@
 # streamlit_app/app.py
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import requests
 import streamlit as st
@@ -20,6 +20,20 @@ def get_auth_headers():
     if "access_token" in st.session_state:
         return {"Authorization": f"Bearer {st.session_state.access_token}"}
     return {}
+
+
+@st.cache_data(ttl=300)
+def fetch_university_options():
+    """Fetch available universities for signup."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/auth/universities")
+        if response.status_code == 200:
+            universities = response.json()
+            universities.sort(key=lambda u: u.get("name", ""))
+            return universities
+    except requests.exceptions.RequestException:
+        pass
+    return []
 
 
 def check_authentication():
@@ -79,57 +93,234 @@ def show_login():
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-        st.header("Login")
-        st.markdown("Please login to access the AI Teacher Assistant platform.")
+        tab_login, tab_signup = st.tabs(["Login", "Sign Up"])
 
-        with st.form("login_form"):
-            email = st.text_input("Email", placeholder="teacher@example.com")
-            password = st.text_input("Password", type="password")
-            submit = st.form_submit_button("Login", use_container_width=True)
+        with tab_login:
+            st.header("Login")
+            st.markdown("Please login to access the AI Teacher Assistant platform.")
 
-            if submit:
-                if not email or not password:
-                    st.error("Please enter both email and password.")
-                else:
-                    with st.spinner("Logging in..."):
-                        try:
-                            response = requests.post(
-                                f"{API_BASE_URL}/auth/login",
-                                data={"username": email, "password": password},
-                            )
+            default_email = st.session_state.get("prefill_login_email", "")
 
-                            if response.status_code == 200:
-                                data = response.json()
-                                st.session_state.access_token = data["access_token"]
-                                st.session_state.token_type = data["token_type"]
+            with st.form("login_form"):
+                email = st.text_input(
+                    "Email",
+                    placeholder="teacher@example.com",
+                    value=default_email,
+                )
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Login", use_container_width=True)
 
-                                # Fetch user details
-                                user_response = requests.get(
-                                    f"{API_BASE_URL}/auth/me",
-                                    headers=get_auth_headers(),
+                if submit:
+                    if not email or not password:
+                        st.error("Please enter both email and password.")
+                    else:
+                        with st.spinner("Logging in..."):
+                            try:
+                                response = requests.post(
+                                    f"{API_BASE_URL}/auth/login",
+                                    data={"username": email, "password": password},
                                 )
 
-                                if user_response.status_code == 200:
-                                    st.session_state.user = user_response.json()
-                                    st.success("Login successful!")
-                                    st.rerun()
+                                if response.status_code == 200:
+                                    st.session_state.pop("prefill_login_email", None)
+                                    data = response.json()
+                                    st.session_state.access_token = data["access_token"]
+                                    st.session_state.token_type = data["token_type"]
+
+                                    # Fetch user details
+                                    user_response = requests.get(
+                                        f"{API_BASE_URL}/auth/me",
+                                        headers=get_auth_headers(),
+                                    )
+
+                                    if user_response.status_code == 200:
+                                        st.session_state.user = user_response.json()
+                                        st.success("Login successful!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to fetch user details.")
                                 else:
-                                    st.error("Failed to fetch user details.")
-                            else:
-                                error_detail = response.json().get(
-                                    "detail", "Login failed"
+                                    try:
+                                        error_payload = response.json()
+                                        error_detail = error_payload.get("detail", "Login failed")
+                                    except ValueError:
+                                        error_detail = "Login failed"
+                                    st.error(f"Login failed: {error_detail}")
+                            except requests.exceptions.ConnectionError:
+                                st.error(
+                                    "Cannot connect to the server. "
+                                    "Please make sure the API is running."
                                 )
-                                st.error(f"Login failed: {error_detail}")
-                        except requests.exceptions.ConnectionError:
-                            st.error(
-                                "Cannot connect to the server. "
-                                "Please make sure the API is running."
-                            )
-                        except Exception as e:
-                            st.error(f"Error: {str(e)}")
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
 
-        st.markdown("---")
-        st.info("💡 **Tip**: Use your teacher credentials to access the platform.")
+            st.markdown("---")
+            st.info("💡 **Tip**: Use your teacher credentials to access the platform.")
+
+        with tab_signup:
+            st.header("Create an Account")
+            st.markdown("Join as a teacher or student. You'll need your university details to get started.")
+
+            universities = fetch_university_options()
+            university_mode = st.radio(
+                "University",
+                ["Select existing", "Create new"],
+                key="university_mode",
+                horizontal=True,
+            )
+
+            with st.form("signup_form"):
+                first_name = st.text_input("First name")
+                last_name = st.text_input("Last name")
+                email = st.text_input("Email")
+                username = st.text_input("Username")
+                role = st.selectbox("Role", ["TEACHER", "STUDENT"], index=0)
+
+                selected_university = None
+                new_university_name = None
+                new_university_location = None
+
+                if university_mode == "Select existing":
+                    if universities:
+                        options = {
+                            f"{u.get('name', 'Unknown')}" + (f" ({u.get('location')})" if u.get('location') else ""): u
+                            for u in universities
+                        }
+                        selected_label = st.selectbox(
+                            "Choose your university",
+                            list(options.keys()),
+                            index=0 if options else None,
+                        )
+                        selected_university = options.get(selected_label)
+                    else:
+                        st.warning("No universities found yet. Please create one below.")
+                        university_mode = "Create new"
+
+                if university_mode == "Create new":
+                    new_university_name = st.text_input("University name")
+                    new_university_location = st.text_input(
+                        "University location (optional)",
+                        placeholder="City, Country",
+                    )
+
+                st.markdown("---")
+
+                if role == "TEACHER":
+                    department = st.text_input("Department", placeholder="e.g., Computer Science")
+                    specialization = st.text_input(
+                        "Specialization (optional)",
+                        placeholder="e.g., Machine Learning",
+                    )
+                    student_id = None
+                    year_of_study = None
+                else:
+                    department = None
+                    specialization = None
+                    student_id = st.text_input("Student ID")
+                    provide_year = st.checkbox("Specify year of study", value=False)
+                    year_of_study = None
+                    if provide_year:
+                        year_input = st.number_input(
+                            "Year of study",
+                            min_value=1,
+                            max_value=10,
+                            step=1,
+                            value=1,
+                        )
+                        year_of_study = int(year_input)
+
+                password = st.text_input("Password", type="password")
+                confirm_password = st.text_input("Confirm password", type="password")
+
+                agree_terms = st.checkbox(
+                    "I agree to the platform terms of use", value=False
+                )
+
+                submit_signup = st.form_submit_button("Sign Up", use_container_width=True)
+
+                if submit_signup:
+                    errors = []
+
+                    if not first_name.strip():
+                        errors.append("First name is required.")
+                    if not last_name.strip():
+                        errors.append("Last name is required.")
+                    if not email.strip():
+                        errors.append("Email is required.")
+                    if not username.strip():
+                        errors.append("Username is required.")
+                    if password != confirm_password:
+                        errors.append("Passwords do not match.")
+                    if len(password) < 6:
+                        errors.append("Password must be at least 6 characters long.")
+                    if not agree_terms:
+                        errors.append("You must agree to the terms to sign up.")
+
+                    if university_mode == "Select existing":
+                        if not selected_university:
+                            errors.append("Please select a university.")
+                    else:
+                        if not new_university_name or not new_university_name.strip():
+                            errors.append("Please provide a university name.")
+
+                    if role == "STUDENT":
+                        if not student_id or not student_id.strip():
+                            errors.append("Student ID is required for student accounts.")
+
+                    if errors:
+                        for err in errors:
+                            st.error(err)
+                    else:
+                        payload = {
+                            "first_name": first_name.strip(),
+                            "last_name": last_name.strip(),
+                            "email": email.strip(),
+                            "username": username.strip(),
+                            "password": password,
+                            "role": role,
+                        }
+
+                        if university_mode == "Select existing" and selected_university:
+                            payload["university_id"] = selected_university.get("id")
+                        else:
+                            payload["university_name"] = new_university_name.strip()
+                            if new_university_location and new_university_location.strip():
+                                payload["university_location"] = new_university_location.strip()
+
+                        if role == "TEACHER":
+                            if department and department.strip():
+                                payload["department"] = department.strip()
+                            if specialization and specialization.strip():
+                                payload["specialization"] = specialization.strip()
+                        else:
+                            payload["student_id"] = student_id.strip()
+                            if year_of_study is not None:
+                                payload["year_of_study"] = year_of_study
+
+                        with st.spinner("Creating your account..."):
+                            try:
+                                response = requests.post(
+                                    f"{API_BASE_URL}/auth/register",
+                                    json=payload,
+                                )
+
+                                if response.status_code == 200:
+                                    st.session_state["prefill_login_email"] = email.strip()
+                                    st.success("Account created! You can now sign in.")
+                                else:
+                                    try:
+                                        error_payload = response.json()
+                                        detail = error_payload.get("detail", "Signup failed")
+                                    except ValueError:
+                                        detail = "Signup failed"
+                                    st.error(f"Signup failed: {detail}")
+                            except requests.exceptions.ConnectionError:
+                                st.error(
+                                    "Cannot connect to the server. "
+                                    "Please make sure the API is running."
+                                )
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
 
 
 # ==================== Dashboard ====================
@@ -159,7 +350,14 @@ def show_dashboard():
         else:  # TEACHER or ADMIN
             page = st.radio(
                 "Navigation",
-                ["📄 Document Management", "🎯 Lecture Generation", "📚 Manage Lectures", "📋 Course Codes", "👥 Enrollments"],
+                [
+                    "📄 Document Management",
+                    "🎯 Lecture Generation",
+                    "📚 Manage Lectures",
+                    "📋 Course Codes",
+                    "+ Create Course",
+                    "👥 Enrollments",
+                ],
                 label_visibility="collapsed",
             )
 
@@ -184,6 +382,8 @@ def show_dashboard():
             show_manage_lectures()
         elif page == "📋 Course Codes":
             show_teacher_course_codes()
+        elif page == "+ Create Course":
+            show_create_course()
         elif page == "👥 Enrollments":
             show_teacher_enrollments()
 
@@ -212,6 +412,116 @@ def show_document_management():
         show_documents_list()
 
 
+def show_create_course():
+    """Display the course creation form for teachers."""
+    st.title("+ Create Course")
+    st.markdown("Set up a new course for your university. You'll automatically become the instructor for this course.")
+    st.markdown("---")
+
+    default_start = date.today()
+    default_end = default_start + timedelta(days=120)
+    default_semester_name = f"Semester {datetime.now().year}"
+
+    with st.form("create_course_form"):
+        name = st.text_input("Course name")
+        code = st.text_input(
+            "Course code (optional)",
+            placeholder="e.g., CS101",
+            help="4-10 characters, letters and numbers only. Leave blank to auto-generate.",
+        )
+        description = st.text_area("Course description (optional)")
+        curriculum_content = st.text_area(
+            "Curriculum outline (optional)",
+            help="Share the key topics or modules students should expect.",
+        )
+
+        add_semester = st.checkbox("Add an initial semester", value=True)
+        semester_name = None
+        semester_start = None
+        semester_end = None
+
+        if add_semester:
+            semester_name = st.text_input("Semester name", value=default_semester_name)
+            semester_start = st.date_input("Semester start date", value=default_start)
+            semester_end = st.date_input("Semester end date", value=default_end)
+
+        submit = st.form_submit_button("Create Course", use_container_width=True)
+
+        if submit:
+            errors = []
+
+            if not name.strip():
+                errors.append("Course name is required.")
+
+            if code:
+                normalized_code = code.strip().upper()
+                if not normalized_code.isalnum():
+                    errors.append("Course code must contain only letters and numbers.")
+                if not (4 <= len(normalized_code) <= 10):
+                    errors.append("Course code must be between 4 and 10 characters.")
+                code_to_send = normalized_code
+            else:
+                code_to_send = None
+
+            if add_semester:
+                if not semester_name or not semester_name.strip():
+                    errors.append("Semester name is required when adding a semester.")
+                if semester_start and semester_end and semester_end < semester_start:
+                    errors.append("Semester end date must be after the start date.")
+
+            if errors:
+                for err in errors:
+                    st.error(err)
+                return
+
+            payload = {
+                "name": name.strip(),
+            }
+
+            if code_to_send:
+                payload["code"] = code_to_send
+
+            if description and description.strip():
+                payload["description"] = description.strip()
+            if curriculum_content and curriculum_content.strip():
+                payload["curriculum_content"] = curriculum_content.strip()
+
+            if add_semester and semester_name and semester_name.strip():
+                payload["semester_name"] = semester_name.strip()
+                if semester_start:
+                    payload["semester_start_date"] = semester_start.isoformat()
+                if semester_end:
+                    payload["semester_end_date"] = semester_end.isoformat()
+
+            with st.spinner("Creating course..."):
+                try:
+                    response = requests.post(
+                        f"{API_BASE_URL}/courses/",
+                        json=payload,
+                        headers=get_auth_headers(),
+                    )
+
+                    if response.status_code == 201:
+                        data = response.json()
+                        course_info = data.get("course", {})
+                        course_code = course_info.get("code", code_to_send or "N/A")
+                        st.success(
+                            f"Course '{course_info.get('name', name.strip())}' created successfully! Course code: {course_code}"
+                        )
+                        st.toast("Course created. Share the code with students to enroll.")
+                    else:
+                        try:
+                            error_payload = response.json()
+                            detail = error_payload.get("detail", "Failed to create course")
+                        except ValueError:
+                            detail = "Failed to create course"
+                        st.error(detail)
+                except requests.exceptions.ConnectionError:
+                    st.error(
+                        "Cannot connect to the server. Please make sure the API is running."
+                    )
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
 def show_file_upload():
     """Show file upload form."""
     st.subheader("Upload Document File")
@@ -599,6 +909,68 @@ def show_lecture_generation():
                 if "lecture_params" not in st.session_state:
                     st.session_state.lecture_params = None
 
+                # Pre-suggested description templates (outside form for dynamic updates)
+                description_templates = {
+                    "Custom (Write Your Own)": "",
+                    "General Lecture Template": (
+                        "This lecture is designed for students in "
+                        "{enter_class} class who are studying "
+                        "{enter_lecture}. The content will cover "
+                        "fundamental concepts and practical applications "
+                        "relevant to the subject matter."
+                    ),
+                    "Comprehensive Overview": (
+                        "This comprehensive lecture is intended for "
+                        "{enter_class} grade students taking "
+                        "{enter_lecture}. It will provide an in-depth "
+                        "exploration of key topics, theories, and "
+                        "real-world applications to enhance understanding."
+                    ),
+                    "Introduction to Topic": (
+                        "This introductory lecture is prepared for "
+                        "{enter_class} level students enrolled in "
+                        "{enter_lecture}. The session will introduce "
+                        "foundational concepts, definitions, and essential "
+                        "principles that form the basis of this subject."
+                    ),
+                    "Advanced Topics": (
+                        "This lecture is tailored for {enter_class} "
+                        "students in {enter_lecture} who have mastered "
+                        "the basics. It will delve into advanced topics, "
+                        "complex problem-solving techniques, and "
+                        "higher-order thinking skills."
+                    ),
+                    "Practical Application Focus": (
+                        "This lecture is created for {enter_class} class "
+                        "students studying {enter_lecture}, with a strong "
+                        "emphasis on practical applications, case studies, "
+                        "and hands-on examples to reinforce theoretical "
+                        "knowledge."
+                    ),
+                    "Exam Preparation": (
+                        "This lecture is designed for {enter_class} "
+                        "students preparing for assessments in "
+                        "{enter_lecture}. It will review critical "
+                        "concepts, common question types, and effective "
+                        "strategies for exam success."
+                    )
+                }
+
+                # Template selector OUTSIDE form for dynamic updates
+                st.markdown("### 📝 Lecture Description")
+                template_choice = st.selectbox(
+                    "Choose a Description Template",
+                    options=list(description_templates.keys()),
+                    help=(
+                        "Select a pre-made template or choose 'Custom' "
+                        "to write your own"
+                    ),
+                    key="desc_template_selector"
+                )
+
+                # Get the selected template text
+                selected_template = description_templates[template_choice]
+
                 # Now the form with title, description, and learning outcomes
                 with st.form("lecture_generation_form"):
                     lecture_title = st.text_input(
@@ -609,10 +981,20 @@ def show_lecture_generation():
 
                     lecture_description = st.text_area(
                         "Lecture Description",
-                        placeholder="Provide context and details for the AI "
-                        "to generate the lecture",
-                        help="Describe what you want the lecture to cover",
+                        value=selected_template,
+                        placeholder=(
+                            "Provide context and details for the AI "
+                            "to generate the lecture. Use placeholders like "
+                            "{enter_class} and {enter_lecture} to customize "
+                            "templates."
+                        ),
+                        help=(
+                            "Describe what you want the lecture to cover. "
+                            "You can modify the template or write your own "
+                            "description."
+                        ),
                         height=150,
+                        key="lecture_desc_input"
                     )
 
                     learning_outcomes = st.text_area(
@@ -649,6 +1031,7 @@ def show_lecture_generation():
                             }
                             # Check for duplicates
                             check_for_duplicate(
+                                selected_doc_id,
                                 selected_course_id,
                                 selected_semester_id,
                                 lecture_title,
@@ -690,13 +1073,14 @@ def show_lecture_generation():
 
 
 def check_for_duplicate(
-    course_id, semester_id, title, learning_outcomes, selected_chapters=None
+    document_id, course_id, semester_id, title, learning_outcomes, selected_chapters=None
 ):
     """Check for duplicate lectures and store result in session state."""
     with st.spinner("🔍 Checking for duplicate lectures..."):
         try:
             # Check for duplicates
             duplicate_payload = {
+                "document_id": document_id,
                 "course_id": course_id,
                 "semester_id": semester_id,
                 "title": title,
@@ -718,6 +1102,9 @@ def check_for_duplicate(
                     st.session_state.duplicate_data = duplicate_data[
                         "duplicate_lecture"
                     ]
+                    st.session_state.duplicate_reason = duplicate_data.get(
+                        "message", "A duplicate lecture was found"
+                    )
                     st.session_state.just_checked = False
                     st.rerun()
                 else:
@@ -736,8 +1123,9 @@ def check_for_duplicate(
 def handle_duplicate_ui():
     """Display duplicate lecture information with action buttons (outside form)."""
     duplicate_lecture = st.session_state.duplicate_data
+    duplicate_reason = st.session_state.get("duplicate_reason", "A duplicate lecture was found")
 
-    st.warning("⚠️ A lecture with the same title already exists for this course!")
+    st.warning(f"⚠️ Duplicate lecture detected!\n\n{duplicate_reason}")
 
     # Display duplicate lecture information
     st.markdown("---")
@@ -941,6 +1329,9 @@ def generate_lecture(
                 # Get download link
                 show_lecture_download(lecture_data["lecture_id"])
 
+                # Show lecture plan
+                show_lecture_plan(lecture_data["lecture_id"])
+
             else:
                 error_detail = response.json().get(
                     "detail", "Lecture generation failed"
@@ -1000,6 +1391,208 @@ def show_lecture_download(lecture_id):
             st.error("Failed to get download link.")
     except Exception as e:
         st.error(f"Error fetching download link: {str(e)}")
+
+
+def show_lecture_plan(lecture_id):
+    """Show lecture teaching plan with activities, quizzes, etc."""
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/lectures/{lecture_id}/plan",
+            headers=get_auth_headers(),
+        )
+
+        if response.status_code == 200:
+            plan_data = response.json()
+            plan = plan_data.get("plan", {})
+
+            st.markdown("---")
+            st.subheader("📋 Teaching Plan")
+            st.info(
+                "✨ This comprehensive teaching plan was automatically "
+                "generated to help you deliver an engaging lecture!"
+            )
+
+            # Display plan in expandable sections
+            with st.expander("📖 Overview & Preparation", expanded=False):
+                if plan.get("overview"):
+                    st.markdown(f"**Overview:**\n{plan['overview']}")
+
+                duration = plan.get("estimated_duration_minutes", "N/A")
+                st.markdown(f"**Estimated Duration:** {duration} minutes")
+
+                if plan.get("preparation"):
+                    prep = plan["preparation"]
+                    st.markdown("---")
+                    st.markdown("**📚 Materials Needed:**")
+                    for item in prep.get("materials_needed", []):
+                        st.markdown(f"- {item}")
+
+                    st.markdown("**✅ Pre-Class Preparation:**")
+                    for item in prep.get("pre_class_preparation", []):
+                        st.markdown(f"- {item}")
+
+                    st.markdown("**📝 Student Prerequisites:**")
+                    for item in prep.get("student_prerequisites", []):
+                        st.markdown(f"- {item}")
+
+            with st.expander("🎯 Lesson Structure", expanded=True):
+                if plan.get("lesson_structure"):
+                    for idx, phase in enumerate(plan["lesson_structure"], 1):
+                        st.markdown(f"### Phase {idx}: {phase.get('phase', 'N/A')}")
+                        st.markdown(
+                            f"**Duration:** {phase.get('duration_minutes', 0)} min"
+                        )
+
+                        if phase.get("objectives"):
+                            st.markdown("**Objectives:**")
+                            for obj in phase["objectives"]:
+                                st.markdown(f"- {obj}")
+
+                        if phase.get("activities"):
+                            st.markdown("**Activities:**")
+                            for activity in phase["activities"]:
+                                st.markdown(f"**{activity.get('title', 'Activity')}**")
+                                st.markdown(f"{activity.get('description', '')}")
+                                if activity.get("instructions"):
+                                    st.markdown(
+                                        f"*Instructions:* {activity['instructions']}"
+                                    )
+
+                        if phase.get("teaching_notes"):
+                            st.markdown("**💡 Teaching Notes:**")
+                            for note in phase["teaching_notes"]:
+                                st.markdown(f"- {note}")
+
+                        st.markdown("---")
+
+            with st.expander("💬 Discussion Questions", expanded=False):
+                if plan.get("discussion_questions"):
+                    for idx, q in enumerate(plan["discussion_questions"], 1):
+                        st.markdown(f"**Q{idx}: {q.get('question', '')}**")
+                        st.markdown(f"*Purpose:* {q.get('purpose', '')}")
+                        st.markdown(
+                            f"*Depth:* {q.get('expected_depth', 'medium')}"
+                        )
+                        st.markdown("")
+
+            with st.expander("📝 Quiz Questions", expanded=False):
+                if plan.get("quiz_questions"):
+                    for idx, q in enumerate(plan["quiz_questions"], 1):
+                        st.markdown(f"**Q{idx}:** {q.get('question', '')}")
+                        st.markdown(f"*Type:* {q.get('type', 'N/A')}")
+
+                        if q.get("options"):
+                            st.markdown("**Options:**")
+                            for option in q["options"]:
+                                st.markdown(f"- {option}")
+
+                        st.markdown(
+                            f"**Answer:** {q.get('correct_answer', 'N/A')}"
+                        )
+                        if q.get("explanation"):
+                            st.markdown(f"*Explanation:* {q['explanation']}")
+                        st.markdown(f"*Difficulty:* {q.get('difficulty', 'medium')}")
+                        st.markdown("---")
+
+            with st.expander("🎨 Suggested Activities", expanded=False):
+                if plan.get("suggested_activities"):
+                    for activity in plan["suggested_activities"]:
+                        st.markdown(f"### {activity.get('activity_name', 'Activity')}")
+                        st.markdown(f"**Type:** {activity.get('activity_type', 'N/A')}")
+                        st.markdown(f"**Duration:** {activity.get('duration', 'N/A')}")
+                        st.markdown(f"{activity.get('description', '')}")
+                        st.markdown(
+                            f"**Objective:** {activity.get('learning_objective', '')}"
+                        )
+
+                        if activity.get("materials"):
+                            st.markdown("**Materials:**")
+                            for mat in activity["materials"]:
+                                st.markdown(f"- {mat}")
+
+                        if activity.get("instructions"):
+                            st.markdown(f"**Instructions:** {activity['instructions']}")
+                        st.markdown("---")
+
+            with st.expander("📊 Formative Assessments", expanded=False):
+                if plan.get("formative_assessments"):
+                    for assessment in plan["formative_assessments"]:
+                        st.markdown(f"**{assessment.get('type', 'Assessment')}**")
+                        st.markdown(f"{assessment.get('description', '')}")
+                        st.markdown(f"*Timing:* {assessment.get('timing', '')}")
+
+                        if assessment.get("questions"):
+                            st.markdown("**Questions:**")
+                            for q in assessment["questions"]:
+                                st.markdown(f"- {q}")
+                        st.markdown("---")
+
+            with st.expander("🎓 Differentiation Strategies", expanded=False):
+                if plan.get("differentiation_strategies"):
+                    for strategy in plan["differentiation_strategies"]:
+                        if strategy.get("for_struggling_students"):
+                            st.markdown("**For Struggling Students:**")
+                            for item in strategy["for_struggling_students"]:
+                                st.markdown(f"- {item}")
+
+                        if strategy.get("for_advanced_students"):
+                            st.markdown("**For Advanced Students:**")
+                            for item in strategy["for_advanced_students"]:
+                                st.markdown(f"- {item}")
+
+                        if strategy.get("for_diverse_learners"):
+                            st.markdown("**For Diverse Learners:**")
+                            for item in strategy["for_diverse_learners"]:
+                                st.markdown(f"- {item}")
+
+            with st.expander("📚 Homework & Resources", expanded=False):
+                if plan.get("homework_suggestions"):
+                    st.markdown("### Homework Suggestions")
+                    for hw in plan["homework_suggestions"]:
+                        st.markdown(f"**{hw.get('assignment', '')}**")
+                        st.markdown(f"*Purpose:* {hw.get('purpose', '')}")
+                        st.markdown(f"*Time:* {hw.get('estimated_time', '')}")
+                        st.markdown("---")
+
+                if plan.get("additional_resources"):
+                    st.markdown("### Additional Resources")
+                    for res in plan["additional_resources"]:
+                        st.markdown(f"**{res.get('title', '')}**")
+                        st.markdown(f"*Type:* {res.get('resource_type', '')}")
+                        st.markdown(f"{res.get('description', '')}")
+                        st.markdown(f"*Use:* {res.get('recommended_use', '')}")
+                        st.markdown("")
+
+            with st.expander(
+                "💡 Key Takeaways & Misconceptions",
+                expanded=False
+            ):
+                if plan.get("key_takeaways"):
+                    st.markdown("**Key Takeaways:**")
+                    for takeaway in plan["key_takeaways"]:
+                        st.markdown(f"- {takeaway}")
+
+                if plan.get("common_misconceptions"):
+                    st.markdown("\n**Common Misconceptions:**")
+                    for misc in plan["common_misconceptions"]:
+                        st.markdown(
+                            f"- **Misconception:** {misc.get('misconception', '')}"
+                        )
+                        st.markdown(f"  **Correction:** {misc.get('correction', '')}")
+
+            with st.expander("🤔 Reflection Prompts", expanded=False):
+                if plan.get("reflection_prompts"):
+                    st.markdown("**Questions to reflect on after teaching:**")
+                    for prompt in plan["reflection_prompts"]:
+                        st.markdown(f"- {prompt}")
+
+        elif response.status_code == 404:
+            st.info("📋 Lecture plan is being generated. Check back shortly!")
+        else:
+            st.warning("Could not load lecture plan at this time.")
+
+    except Exception as e:
+        st.warning(f"Lecture plan not available: {str(e)}")
 
 
 # ==================== Lecture Management ====================

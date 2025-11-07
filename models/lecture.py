@@ -53,6 +53,7 @@ class Lecture(SQLModel, table=True):
     course_id: str = Field(foreign_key="course.id")  # UUID
     semester_id: str = Field(foreign_key="semester.id")  # UUID
     teacher_id: str = Field(foreign_key="teacher.id")  # UUID
+    document_id: Optional[str] = Field(default=None, foreign_key="documents.id")  # UUID - source document
 
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -181,6 +182,7 @@ class DuplicateCheckRequest(SQLModel):
     course_id: str
     semester_id: str
     title: str
+    document_id: Optional[str] = None  # UUID of source document
     learning_outcomes: Optional[str] = None
     selected_chapters: Optional[List[str]] = None
 

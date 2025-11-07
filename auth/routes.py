@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
-from auth.models import Token, UserCreate, UserRead
+from auth.models import Token, UserCreate, UserRead, UniversityRead
 from auth.service import AuthService
 from dependencies import get_current_user
 from models.user import User
@@ -22,7 +22,7 @@ async def register(user_data: UserCreate, db=Depends(get_db)):
     """Register a new user."""
     try:
         user = await AuthService.create_user(db, user_data)
-        return UserRead.model_validate(user)
+        return AuthService.to_user_read(db, user)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -52,21 +52,12 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db=Depends(get
 
 
 @router.get("/me", response_model=UserRead)
-async def read_users_me(current_user: Annotated[User, Depends(get_current_user)]):
+async def read_users_me(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db=Depends(get_db),
+):
     """Get current user information."""
-    # Convert SQLModel User to dict for Pydantic validation
-    user_dict = {
-        "id": current_user.id,
-        "email": current_user.email,
-        "username": current_user.username,
-        "first_name": current_user.first_name,
-        "last_name": current_user.last_name,
-        "is_active": current_user.is_active,
-        "role": current_user.role,
-        "created_at": current_user.created_at,
-        "updated_at": current_user.updated_at,
-    }
-    return UserRead.model_validate(user_dict)
+    return AuthService.to_user_read(db, current_user)
 
 
 @router.put("/me", response_model=UserRead)
@@ -82,6 +73,23 @@ async def update_user_me(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
     return UserRead.model_validate(updated_user)
+
+
+@router.get("/universities", response_model=list[UniversityRead])
+async def list_universities(db=Depends(get_db), skip: int = 0, limit: int = 100):
+    """List available universities for signup."""
+    try:
+        universities = db.get_records(
+            "university",
+            skip=skip,
+            limit=min(limit, 500),
+        )
+        return universities
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load universities: {str(e)}",
+        ) from e
 
 
 # Include the router in the auth_router

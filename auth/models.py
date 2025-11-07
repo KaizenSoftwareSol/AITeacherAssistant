@@ -13,10 +13,19 @@ from models.user import User, UserRole
 class UserCreate(BaseModel):
     """Model for creating a new user."""
 
-    email: str
+    email: EmailStr
     username: str
     password: str
+    first_name: str
+    last_name: str
     role: UserRole = UserRole.STUDENT
+    university_id: Optional[str] = None
+    university_name: Optional[str] = None
+    university_location: Optional[str] = None
+    department: Optional[str] = None
+    specialization: Optional[str] = None
+    student_id: Optional[str] = None
+    year_of_study: Optional[int] = None
 
 
 class UserRead(BaseModel):
@@ -29,8 +38,13 @@ class UserRead(BaseModel):
     last_name: str
     is_active: bool
     role: UserRole
+    university_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    department: Optional[str] = None
+    specialization: Optional[str] = None
+    student_id: Optional[str] = None
+    year_of_study: Optional[int] = None
 
 
 class UserUpdate(BaseModel):
@@ -54,3 +68,13 @@ class TokenData(BaseModel):
     """Token data model."""
 
     user_id: Optional[str] = None  # UUID string
+
+
+class UniversityRead(BaseModel):
+    """Model for exposing university data."""
+
+    id: str
+    name: str
+    location: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None

@@ -1,19 +1,66 @@
 # course/routes.py
 
-from typing import Annotated, List
+from datetime import date, datetime
+import random
+import string
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field, field_validator
 
 from dependencies import require_teacher
 from logger import logger
-from models.course import Course, Semester
 from models.user import User
 from utils.db import get_db
 
 router = APIRouter()
 
 
-@router.get("/", response_model=List[dict])
+class CourseCreateRequest(BaseModel):
+    name: str = Field(..., min_length=3, max_length=120)
+    code: str | None = Field(default=None, min_length=4, max_length=10)
+    description: str | None = None
+    curriculum_content: str | None = None
+    semester_name: str | None = Field(
+        default=None,
+        description="Name of the initial semester (optional)",
+        max_length=80,
+    )
+    semester_start_date: date | None = Field(
+        default=None, description="Start date of the initial semester"
+    )
+    semester_end_date: date | None = Field(
+        default=None, description="End date of the initial semester"
+    )
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(cls, value: str | None):
+        if value:
+            value = value.strip().upper()
+        return value or None
+
+    @field_validator("semester_end_date")
+    @classmethod
+    def validate_semester_dates(cls, end_date: date | None, values):
+        start_date = values.get("semester_start_date")
+        if end_date and start_date and end_date < start_date:
+            raise ValueError("Semester end date must be after the start date")
+        return end_date
+
+
+def _generate_course_code(db, length: int = 6) -> str:
+    """Generate a unique alphanumeric course code."""
+    alphabet = string.ascii_uppercase + string.digits
+    for _ in range(20):
+        candidate = "".join(random.choices(alphabet, k=length))
+        existing = db.get_records("course", {"code": candidate})
+        if not existing:
+            return candidate
+    raise ValueError("Unable to generate unique course code. Please try again with a custom code.")
+
+
+@router.get("/", response_model=list[dict])
 async def get_teacher_courses(
     current_user: Annotated[User, Depends(require_teacher)],
     db=Depends(get_db),
@@ -59,7 +106,122 @@ async def get_teacher_courses(
         )
 
 
-@router.get("/{course_id}/semesters", response_model=List[dict])
+@router.post("/", status_code=status.HTTP_201_CREATED)
+async def create_course(
+    request: CourseCreateRequest,
+    current_user: Annotated[User, Depends(require_teacher)],
+    db=Depends(get_db),
+):
+    """Create a new course for the teacher's university."""
+
+    teacher = current_user.teacher_profile
+    if not teacher:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Teacher profile not found. Please complete your teacher profile before creating courses.",
+        )
+
+    try:
+        code = request.code
+        if code:
+            if not code.isalnum():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Course code must contain only letters and numbers.",
+                )
+
+            if not (4 <= len(code) <= 10):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Course code must be between 4 and 10 characters.",
+                )
+
+            existing = db.get_records("course", {"code": code})
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Course code already exists. Please choose a different code.",
+                )
+        else:
+            code = _generate_course_code(db)
+
+        course_payload = {
+            "name": request.name.strip(),
+            "code": code,
+            "description": request.description.strip() if request.description else None,
+            "curriculum_content": request.curriculum_content,
+            "university_id": teacher.university_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        course_result = (
+            db.admin_client.table("course").insert(course_payload).execute()
+        )
+
+        if not course_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create course",
+            )
+
+        course_data = course_result.data[0]
+        semester_data = None
+
+        if request.semester_name:
+            semester_payload = {
+                "name": request.semester_name.strip(),
+                "course_id": course_data["id"],
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+
+            if request.semester_start_date:
+                semester_payload["start_date"] = request.semester_start_date.isoformat()
+            if request.semester_end_date:
+                semester_payload["end_date"] = request.semester_end_date.isoformat()
+
+            semester_result = (
+                db.admin_client.table("semester").insert(semester_payload).execute()
+            )
+
+            if semester_result.data:
+                semester_data = semester_result.data[0]
+
+        logger.info(
+            "Course created",
+            extra={
+                "course_id": course_data.get("id"),
+                "teacher_id": teacher.id,
+                "university_id": teacher.university_id,
+            },
+        )
+
+        response = {
+            "message": "Course created successfully",
+            "course": course_data,
+        }
+        if semester_data:
+            response["semester"] = semester_data
+
+        return response
+
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        ) from ve
+    except Exception as e:
+        logger.error("Error creating course", exc_info=e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while creating course",
+        ) from e
+
+
+@router.get("/{course_id}/semesters", response_model=list[dict])
 async def get_course_semesters(
     current_user: Annotated[User, Depends(require_teacher)],
     course_id: str,

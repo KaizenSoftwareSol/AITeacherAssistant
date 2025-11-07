@@ -22,3 +22,4 @@ psycopg2-binary
 openai
 pgvector
 reportlab==4.0.9
+pydantic[email]

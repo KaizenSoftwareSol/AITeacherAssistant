@@ -536,7 +536,30 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 pdf_filename,
             )
 
-            # 6. Create lecture record in database
+            # 6. Generate lecture plan for teacher (activities, quizzes, etc.)
+            lecture_plan = None
+            try:
+                from services.lecture_planning_service import (
+                    LecturePlanningService,
+                )
+
+                logger.info("Generating lecture plan for teacher...")
+                plan_data = await LecturePlanningService.generate_lecture_plan(
+                    lecture_content=generated_content,
+                    lecture_title=lecture_title,
+                    lecture_description=lecture_description,
+                    learning_outcomes=learning_outcomes,
+                )
+                lecture_plan = json.dumps(plan_data)
+                logger.info("Lecture plan generated successfully")
+            except Exception as plan_error:
+                logger.warning(
+                    f"Failed to generate lecture plan: {str(plan_error)}"
+                )
+                # Don't fail the entire generation if planning fails
+                lecture_plan = None
+
+            # 7. Create lecture record in database
             lecture_data = {
                 "title": lecture_title,
                 "description": lecture_description,
@@ -547,6 +570,8 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 "course_id": course_id,
                 "semester_id": semester_id,
                 "teacher_id": teacher_id,
+                "document_id": document_id,  # Store source document for duplicate detection
+                "lecture_plan": lecture_plan,
                 "created_at": datetime.utcnow().isoformat(),
                 "updated_at": datetime.utcnow().isoformat(),
             }
@@ -554,7 +579,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             lecture_record = db.create_record("lecture", lecture_data)
             logger.info(f"Lecture record created: {lecture_record['id']}")
 
-            # 7. Create lecture content record (PDF metadata)
+            # 8. Create lecture content record (PDF metadata)
             lecture_content_data = {
                 "lecture_id": lecture_record["id"],
                 "file_name": pdf_filename,
@@ -569,7 +594,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             content_record = db.create_record("lecture_content", lecture_content_data)
             logger.info(f"Lecture content record created: {content_record['id']}")
 
-            # 8. Return lecture information
+            # 9. Return lecture information
             result = {
                 "lecture_id": lecture_record["id"],
                 "title": lecture_title,
@@ -603,13 +628,17 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
         course_id: str,
         semester_id: str,
         title: str,
+        document_id: str = None,
         learning_outcomes: str = None,
         selected_chapters: list = None,
     ) -> dict:
         """
-        Check if a lecture with the same storage path already exists.
-        This prevents storage conflicts by checking if the file path is already used.
-
+        Check if a lecture with the same details already exists.
+        
+        This method checks for duplicates using two strategies:
+        1. Title-based: Checks if a lecture with the same title exists for the same course (via storage path)
+        2. Document-based: Checks if the same document has been used for the same course and semester
+        
         Storage path format: university_{univ_id}/teacher_{teacher_id}/course_{course_id}/generated_lectures/{sanitized_title}.pdf
 
         Args:
@@ -618,6 +647,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             course_id: Course ID
             semester_id: Semester ID
             title: Lecture title
+            document_id: Source document ID (optional)
             learning_outcomes: Learning outcomes (optional)
             selected_chapters: List of chapter names (optional)
 
@@ -625,7 +655,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             Dictionary with duplicate status and information
         """
         try:
-            logger.info(f"Checking for duplicate lecture by storage path: {title}")
+            logger.info(f"Checking for duplicate lecture - Title: {title}, Document ID: {document_id}")
 
             # Get teacher's university_id
             teacher_data = db.get_record_by_id("teacher", teacher_id)
@@ -646,76 +676,108 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                     "message": "No duplicate found",
                 }
 
-            # Generate the expected storage path
+            # ========== Strategy 1: Check for title-based duplicates (storage path) ==========
             sanitized_title = LectureService.sanitize_filename(title)
             pdf_filename = f"{sanitized_title}.pdf"
             expected_storage_path = f"university_{university_id}/teacher_{teacher_id}/course_{course_id}/generated_lectures/{pdf_filename}"
 
-            logger.info(f"Expected storage path: {expected_storage_path}")
+            logger.info(f"Checking title-based duplicate - Expected storage path: {expected_storage_path}")
 
             # Check if a lecture_content record exists with this storage path
             lecture_contents = db.get_records(
                 "lecture_content", {"storage_path": expected_storage_path}
             )
 
-            if not lecture_contents:
-                logger.info("No duplicate found - storage path is available")
+            duplicate_lecture = None
+            duplicate_reason = None
+
+            if lecture_contents:
+                pdf_content = lecture_contents[0]
+                lecture_id = pdf_content["lecture_id"]
+                
+                logger.info(f"Found title-based duplicate. Lecture ID: {lecture_id}")
+                
+                # Get the full lecture record
+                lecture = db.get_record_by_id("lecture", lecture_id)
+                
+                if lecture:
+                    duplicate_lecture = lecture
+                    duplicate_reason = "A lecture with the same title already exists for this course"
+            
+            # ========== Strategy 2: Check for document-based duplicates ==========
+            if not duplicate_lecture and document_id:
+                logger.info(f"Checking document-based duplicate - Document ID: {document_id}, Course ID: {course_id}, Semester ID: {semester_id}")
+                
+                # Check if a lecture already exists with this document_id + course_id + semester_id combination
+                # Using admin_client to query with multiple filters
+                try:
+                    response = db.admin_client.table("lecture").select("*").eq(
+                        "document_id", document_id
+                    ).eq(
+                        "course_id", course_id
+                    ).eq(
+                        "semester_id", semester_id
+                    ).execute()
+                    
+                    if response.data and len(response.data) > 0:
+                        duplicate_lecture = response.data[0]
+                        duplicate_reason = "A lecture has already been generated from this document for this course and semester"
+                        logger.info(f"Found document-based duplicate. Lecture ID: {duplicate_lecture['id']}")
+                except Exception as query_error:
+                    logger.warning(f"Error querying for document-based duplicate: {query_error}")
+
+            # ========== If no duplicate found, return success ==========
+            if not duplicate_lecture:
+                logger.info("No duplicate found - lecture can be created")
                 return {
                     "has_duplicate": False,
                     "duplicate_lecture": None,
                     "message": "No duplicate found",
                 }
 
-            # Found a duplicate! Get the lecture details
-            pdf_content = lecture_contents[0]
-            lecture_id = pdf_content["lecture_id"]
-
-            logger.info(
-                f"Found duplicate lecture content at storage path. Lecture ID: {lecture_id}"
-            )
-
-            # Get the full lecture record
-            lecture = db.get_record_by_id("lecture", lecture_id)
-
-            if not lecture:
-                logger.warning(f"Lecture record not found for ID: {lecture_id}")
-                # Orphaned lecture_content record - not a true duplicate
-                return {
-                    "has_duplicate": False,
-                    "duplicate_lecture": None,
-                    "message": "No duplicate found",
-                }
-
-            # Get download URL
-            storage_bucket = pdf_content["storage_bucket"]
-            storage_path = pdf_content["storage_path"]
-            try:
-                bucket = supabase.get_storage_bucket(storage_bucket)
-                download_url = bucket.get_public_url(storage_path)
-            except Exception as e:
-                logger.warning(f"Could not get download URL: {e}")
-                download_url = None
+            # ========== Duplicate found! Build response with lecture details ==========
+            lecture_id = duplicate_lecture["id"]
+            
+            # Get lecture content for download URL
+            lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+            
+            download_url = None
+            file_name = "lecture.pdf"
+            file_size = 0
+            
+            if lecture_contents:
+                pdf_content = lecture_contents[0]
+                storage_bucket = pdf_content["storage_bucket"]
+                storage_path = pdf_content["storage_path"]
+                file_name = pdf_content["file_name"]
+                file_size = pdf_content["file_size"]
+                
+                try:
+                    bucket = supabase.get_storage_bucket(storage_bucket)
+                    download_url = bucket.get_public_url(storage_path)
+                except Exception as e:
+                    logger.warning(f"Could not get download URL: {e}")
 
             duplicate_info = {
-                "lecture_id": lecture["id"],
-                "title": lecture["title"],
-                "description": lecture.get("description"),
-                "learning_outcomes": lecture.get("learning_outcomes"),
-                "status": lecture["status"],
-                "created_at": lecture["created_at"],
+                "lecture_id": duplicate_lecture["id"],
+                "title": duplicate_lecture["title"],
+                "description": duplicate_lecture.get("description"),
+                "learning_outcomes": duplicate_lecture.get("learning_outcomes"),
+                "status": duplicate_lecture["status"],
+                "created_at": duplicate_lecture["created_at"],
                 "download_url": download_url,
-                "file_name": pdf_content["file_name"],
-                "file_size": pdf_content["file_size"],
+                "file_name": file_name,
+                "file_size": file_size,
             }
 
             logger.info(
-                f"Duplicate found: Lecture '{lecture['title']}' already exists at this storage path"
+                f"Duplicate found: Lecture '{duplicate_lecture['title']}' - Reason: {duplicate_reason}"
             )
 
             return {
                 "has_duplicate": True,
                 "duplicate_lecture": duplicate_info,
-                "message": "A lecture with the same title already exists for this course",
+                "message": duplicate_reason,
             }
 
         except Exception as e:

@@ -103,11 +103,16 @@ async def check_duplicate_lecture(
     """
     Check if a lecture with the same details already exists.
 
-    This endpoint checks for duplicate lectures based on:
-    - Title
-    - Course ID
-    - Semester ID
-    - Learning outcomes
+    This endpoint checks for duplicate lectures using two strategies:
+    1. Title-based: Same title for the same course (prevents storage path conflicts)
+    2. Document-based: Same source document + course + semester combination
+    
+    Checks based on:
+    - Title (required)
+    - Course ID (required)
+    - Semester ID (required)
+    - Document ID (optional - for document-based duplicate detection)
+    - Learning outcomes (optional)
     - Selected chapters (optional)
 
     Returns duplicate lecture information if found, including download link.
@@ -131,6 +136,7 @@ async def check_duplicate_lecture(
             course_id=request.course_id,
             semester_id=request.semester_id,
             title=request.title,
+            document_id=request.document_id,
             learning_outcomes=request.learning_outcomes,
             selected_chapters=request.selected_chapters,
         )
@@ -356,6 +362,95 @@ async def get_lecture_download_link(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error while fetching download link",
+        )
+
+
+@router.get(
+    "/{lecture_id}/plan",
+    status_code=status.HTTP_200_OK,
+)
+async def get_lecture_plan(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Get the lecture teaching plan for a generated lecture.
+
+    This endpoint returns the comprehensive teaching plan including:
+    - Activities and exercises
+    - Quiz questions
+    - Discussion questions
+    - Time allocations
+    - Differentiation strategies
+    - Teaching notes and tips
+
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching lecture plan for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Get lecture plan
+        lecture_plan_json = lecture_data.get("lecture_plan")
+
+        if not lecture_plan_json:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture plan not found. It may not have been generated yet.",
+            )
+
+        # Parse JSON
+        import json
+
+        try:
+            lecture_plan = json.loads(lecture_plan_json)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse lecture plan JSON for lecture {lecture_id}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to parse lecture plan",
+            )
+
+        logger.info(f"Successfully retrieved lecture plan for lecture {lecture_id}")
+
+        return {
+            "lecture_id": lecture_id,
+            "lecture_title": lecture_data["title"],
+            "plan": lecture_plan,
+            "created_at": lecture_data["created_at"],
+            "updated_at": lecture_data["updated_at"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching lecture plan: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while fetching lecture plan",
         )
 
 
