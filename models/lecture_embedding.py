@@ -171,13 +171,21 @@ class StudentLectureInfo(SQLModel):
     status: str
     created_at: datetime
     has_embeddings: bool = False  # Whether RAG is available for this lecture
+    topic: Optional[str] = None  # Topic name for grouping
+    lecture_number: Optional[int] = None  # Sequential number within topic
+    content: Optional[str] = None  # Full lecture content for reading
+    pdf_file_name: Optional[str] = None
+    pdf_file_size: Optional[int] = None
+    pdf_download_url: Optional[str] = None
 
 
 class StudentCourseLecturesResponse(SQLModel):
     """Response model for getting all lectures in a student's course."""
 
     course_info: StudentCourseInfo
-    lectures: list[StudentLectureInfo]
+    lectures: list[StudentLectureInfo]  # Flat list for backward compatibility
+    grouped_by_topic: Optional[dict[str, list[StudentLectureInfo]]] = None  # Lectures grouped by topic
+    lectures_without_topic: Optional[list[StudentLectureInfo]] = None  # Lectures without topic
     total_count: int
 
 

@@ -16,10 +16,279 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 from logger import logger
 from settings import settings
 from supabase_config import BUCKETS, supabase
+from models.document import DocumentType
+from services.document_parser import DocumentParser
 
 
 class LectureService:
     """Service for generating lectures from documents using AI."""
+
+    # ---------- Token-based context limits for GPT-4o (128k context window) ----------
+    # Reserve tokens for: system message (~2k), prompt template (~3k), response (~10k)
+    MAX_INPUT_TOKENS = 113_000  # Safe limit for input content
+    TOKENS_PER_CHAR = 0.25  # Approximate: 1 token ≈ 4 characters (conservative estimate)
+    MIN_TOKENS_PER_SOURCE = 1_000  # Minimum tokens to keep per source
+    
+    # Legacy char-based limits (kept for backward compatibility, but token-based is preferred)
+    MAX_SOURCE_CHARS = 80_000
+    MAX_ADDITIONAL_CHARS = 40_000
+    PER_PIECE_LIMIT = 15_000
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """
+        Estimate token count from text.
+        Uses conservative estimate: 1 token ≈ 4 characters.
+        For more accuracy, could use tiktoken library, but this is simpler.
+        """
+        if not text:
+            return 0
+        # Conservative estimate: 1 token per 4 characters
+        return int(len(text) * LectureService.TOKENS_PER_CHAR)
+
+    @staticmethod
+    def _chars_from_tokens(tokens: int) -> int:
+        """Convert token count to approximate character count."""
+        return int(tokens / LectureService.TOKENS_PER_CHAR)
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int) -> str:
+        """Truncate text to character limit."""
+        if not text or limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        suffix = "... [TRUNCATED]"
+        return text[: max(0, limit - len(suffix))] + suffix
+
+    @staticmethod
+    def _truncate_text_by_tokens(text: str, max_tokens: int) -> str:
+        """Truncate text to approximate token limit."""
+        if not text or max_tokens <= 0:
+            return ""
+        max_chars = LectureService._chars_from_tokens(max_tokens)
+        return LectureService._truncate_text(text, max_chars)
+
+    @staticmethod
+    def _manage_content_tokens(
+        primary_contents: list[dict],
+        additional_pieces: list[str],
+        selected_chapters: list = None,
+    ) -> tuple[str, dict]:
+        """
+        Intelligently manage content tokens with prioritization.
+        
+        Priority order:
+        1. Selected chapters from first document (if specified)
+        2. Remaining content from first document
+        3. Other primary documents
+        4. Additional sources (extra documents, texts, files)
+        
+        Args:
+            primary_contents: List of dicts with 'content', 'title', 'type', 'is_first'
+            additional_pieces: List of additional text pieces
+            selected_chapters: List of selected chapter names (applies to first doc)
+            
+        Returns:
+            Tuple of (combined_content, metadata_dict)
+        """
+        # Estimate tokens for all content
+        content_sources = []
+        total_tokens = 0
+        
+        # Process primary documents with priority
+        for idx, doc_content in enumerate(primary_contents):
+            content_text = doc_content.get("content", "")
+            tokens = LectureService._estimate_tokens(content_text)
+            priority = 1 if idx == 0 else 3  # First doc gets priority 1, others get 3
+            
+            content_sources.append({
+                "text": content_text,
+                "tokens": tokens,
+                "priority": priority,
+                "title": doc_content.get("title", f"Document {idx + 1}"),
+                "type": doc_content.get("type", "UNKNOWN"),
+                "is_first": idx == 0,
+            })
+            total_tokens += tokens
+        
+        # Process additional pieces (lowest priority)
+        for piece in additional_pieces:
+            tokens = LectureService._estimate_tokens(piece)
+            content_sources.append({
+                "text": piece,
+                "tokens": tokens,
+                "priority": 4,  # Lowest priority
+                "title": "Additional Source",
+                "type": "EXTRA",
+                "is_first": False,
+            })
+            total_tokens += tokens
+        
+        # Check if we need to truncate
+        if total_tokens <= LectureService.MAX_INPUT_TOKENS:
+            # No truncation needed - combine all content
+            combined_parts = []
+            for source in content_sources:
+                combined_parts.append(source["text"])
+            
+            return "\n\n".join(combined_parts), {
+                "total_tokens": total_tokens,
+                "truncated": False,
+                "sources_included": len(content_sources),
+            }
+        
+        # Need to truncate - prioritize intelligently
+        logger.warning(
+            f"Content exceeds token limit ({total_tokens} > {LectureService.MAX_INPUT_TOKENS}). "
+            f"Applying intelligent truncation with prioritization."
+        )
+        
+        # Sort by priority (lower number = higher priority)
+        content_sources.sort(key=lambda x: (x["priority"], -x["tokens"]))
+        
+        # Distribute tokens with priority
+        available_tokens = LectureService.MAX_INPUT_TOKENS
+        included_sources = []
+        truncated_sources = []
+        
+        # Reserve tokens for highest priority sources first
+        for source in content_sources:
+            source_tokens = source["tokens"]
+            
+            if source["priority"] == 1:  # Selected chapters - keep full content
+                if available_tokens >= source_tokens:
+                    included_sources.append(source)
+                    available_tokens -= source_tokens
+                else:
+                    # Truncate but keep as much as possible
+                    truncated_text = LectureService._truncate_text_by_tokens(
+                        source["text"], available_tokens
+                    )
+                    source["text"] = truncated_text
+                    source["tokens"] = LectureService._estimate_tokens(truncated_text)
+                    included_sources.append(source)
+                    available_tokens = 0
+                    break
+            elif source["priority"] <= 2:  # First document - keep significant portion
+                min_tokens = max(
+                    LectureService.MIN_TOKENS_PER_SOURCE,
+                    int(source_tokens * 0.5)  # Keep at least 50%
+                )
+                if available_tokens >= min_tokens:
+                    if available_tokens >= source_tokens:
+                        included_sources.append(source)
+                        available_tokens -= source_tokens
+                    else:
+                        # Truncate to available tokens
+                        truncated_text = LectureService._truncate_text_by_tokens(
+                            source["text"], available_tokens
+                        )
+                        source["text"] = truncated_text
+                        source["tokens"] = LectureService._estimate_tokens(truncated_text)
+                        included_sources.append(source)
+                        available_tokens = 0
+                        break
+                else:
+                    # Can't fit even minimum - skip or truncate heavily
+                    if available_tokens >= LectureService.MIN_TOKENS_PER_SOURCE:
+                        truncated_text = LectureService._truncate_text_by_tokens(
+                            source["text"], available_tokens
+                        )
+                        source["text"] = truncated_text
+                        source["tokens"] = LectureService._estimate_tokens(truncated_text)
+                        included_sources.append(source)
+                        available_tokens = 0
+                        break
+                    else:
+                        truncated_sources.append(source)
+            else:  # Lower priority - fit what we can
+                if available_tokens >= LectureService.MIN_TOKENS_PER_SOURCE:
+                    tokens_to_use = min(available_tokens, source_tokens)
+                    if tokens_to_use >= LectureService.MIN_TOKENS_PER_SOURCE:
+                        truncated_text = LectureService._truncate_text_by_tokens(
+                            source["text"], tokens_to_use
+                        )
+                        source["text"] = truncated_text
+                        source["tokens"] = LectureService._estimate_tokens(truncated_text)
+                        included_sources.append(source)
+                        available_tokens -= source["tokens"]
+                    else:
+                        truncated_sources.append(source)
+                else:
+                    truncated_sources.append(source)
+        
+        # Combine included sources
+        combined_parts = []
+        final_tokens = 0
+        for source in included_sources:
+            combined_parts.append(source["text"])
+            final_tokens += source["tokens"]
+        
+        metadata = {
+            "total_tokens": final_tokens,
+            "original_tokens": total_tokens,
+            "truncated": True,
+            "sources_included": len(included_sources),
+            "sources_truncated": len(truncated_sources),
+            "truncated_source_titles": [s["title"] for s in truncated_sources],
+        }
+        
+        logger.info(
+            f"Content management: {len(included_sources)} sources included, "
+            f"{len(truncated_sources)} truncated. "
+            f"Tokens: {final_tokens}/{total_tokens} ({final_tokens/total_tokens*100:.1f}%)"
+        )
+        
+        return "\n\n".join(combined_parts), metadata
+
+    @staticmethod
+    def _flatten_parsed_content(parsed: dict) -> str:
+        """
+        Convert parsed document JSON (from DocumentParser) into a flat text string.
+        Handles both chapter/section dicts (PDF) and heading-based dicts (DOCX).
+        """
+        try:
+            content = parsed.get("content")
+            if isinstance(content, dict):
+                parts = []
+                for key, value in content.items():
+                    parts.append(f"\n=== {key} ===\n")
+                    if isinstance(value, dict):
+                        for sub_key, sub_val in value.items():
+                            if isinstance(sub_val, (str, int, float)):
+                                parts.append(f"\n{sub_key}\n{sub_val}\n")
+                            elif isinstance(sub_val, list):
+                                parts.append("\n".join(str(v.get("text", v)) for v in sub_val))
+                            else:
+                                parts.append(str(sub_val))
+                    elif isinstance(value, list):
+                        parts.append("\n".join(str(v.get("text", v)) for v in value))
+                    else:
+                        parts.append(str(value))
+                return "\n".join(parts)
+            elif isinstance(content, (str, int, float)):
+                return str(content)
+            else:
+                # Fallback to full JSON if unknown shape
+                return json.dumps(parsed, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"Failed to flatten parsed content: {e}")
+            return json.dumps(parsed, ensure_ascii=False)
+
+    @staticmethod
+    async def _fetch_bytes(url: str, timeout: int = 30) -> bytes:
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}")
+                    return await resp.read()
+        except Exception as e:
+            logger.warning(f"Failed to download extra file url '{url}': {e}")
+            return b""
 
     @staticmethod
     def sanitize_filename(filename: str, max_length: int = 100) -> str:
@@ -163,6 +432,7 @@ class LectureService:
         description: str,
         title: str,
         learning_outcomes: str = None,
+        additional_text: str = None,
     ) -> str:
         """
         Generate lecture content using OpenAI GPT-4o.
@@ -197,7 +467,9 @@ class LectureService:
                 # Fallback: convert entire JSON to string
                 source_text = json.dumps(document_content, indent=2)
 
-            logger.info(f"Source text length: {len(source_text)} characters")
+            # Note: Token management is handled before this function is called
+            # No need to truncate here as content is already managed
+            logger.info(f"Source text length: {len(source_text)} characters ({LectureService._estimate_tokens(source_text)} tokens)")
 
             # Build learning outcomes section if provided
             learning_outcomes_section = ""
@@ -207,6 +479,20 @@ class LectureService:
 LEARNING OUTCOMES FOR STUDENTS:
 ========================================
 {learning_outcomes}
+
+"""
+
+            # Note: Additional sources are already included in document_content
+            # via token management, so additional_text should be None
+            additional_sources_section = ""
+            if additional_text:
+                # This should rarely happen now, but keep for backward compatibility
+                logger.warning("Additional text provided directly - should be included in managed content")
+                additional_sources_section = f"""
+
+ADDITIONAL TRANSIENT SOURCES (NOT SAVED):
+========================================
+{additional_text}
 
 """
 
@@ -224,6 +510,7 @@ The lecture should be written **as if the teacher is speaking to the class**, gu
 {learning_outcomes_section}
 **Source Material:**
 {source_text}
+{additional_sources_section}
 
 ---
 
@@ -456,87 +743,351 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             )
 
     @staticmethod
-    async def generate_and_save_lecture(
+    def get_next_lecture_number(
         db,
-        document_id: str,
-        teacher_id: str,
+        topic: str,
         course_id: str,
         semester_id: str,
-        lecture_title: str,
-        lecture_description: str,
+    ) -> int:
+        """
+        Get the next lecture number for a given topic within a course and semester.
+        
+        Args:
+            db: Database instance
+            topic: Topic name (e.g., "CLUSTERING", "PREDICTION", "REGRESSION")
+            course_id: Course ID
+            semester_id: Semester ID
+            
+        Returns:
+            Next lecture number (starts from 1)
+        """
+        try:
+            if not topic:
+                return None
+                
+            # Query existing lectures for this topic, course, and semester
+            response = (
+                db.admin_client.table("lecture")
+                .select("lecture_number")
+                .eq("topic", topic)
+                .eq("course_id", course_id)
+                .eq("semester_id", semester_id)
+                .not_.is_("lecture_number", "null")
+                .order("lecture_number", desc=True)
+                .limit(1)
+                .execute()
+            )
+            
+            if response.data and len(response.data) > 0:
+                max_number = response.data[0].get("lecture_number", 0)
+                return max_number + 1
+            else:
+                # First lecture for this topic
+                return 1
+                
+        except Exception as e:
+            logger.warning(f"Error calculating next lecture number: {str(e)}")
+            return None
+
+    @staticmethod
+    async def generate_and_save_lecture(
+        db,
+        document_id: str = None,
+        document_ids: list = None,
+        teacher_id: str = None,
+        course_id: str = None,
+        semester_id: str = None,
+        lecture_title: str = None,
+        lecture_description: str = None,
         learning_outcomes: str = None,
         selected_chapters: list = None,
+        topic: str = None,
+        extra_document_ids: list = None,
+        extra_texts: list = None,
+        extra_file_urls: list = None,
+        extra_uploads: list = None,
     ) -> dict:
         """
-        Complete workflow: generate lecture from document and save to storage.
+        Complete workflow: generate lecture from document(s) and save to storage.
 
         Args:
             db: Database instance
-            document_id: ID of the source document
+            document_id: ID of a single source document (deprecated, use document_ids)
+            document_ids: List of IDs of source documents (PDF/PPTX) - supports multiple documents
             teacher_id: Teacher ID
             course_id: Course ID
             semester_id: Semester ID
             lecture_title: Title for the lecture
             lecture_description: Description/overview from teacher
             learning_outcomes: Learning outcomes for students (optional)
-            selected_chapters: List of chapter names to include (None = all chapters)
+            selected_chapters: List of chapter names to include (None = all chapters) - applies to first document if multiple
 
         Returns:
             Dictionary with lecture information and storage path
         """
         try:
-            logger.info(f"Starting lecture generation for document: {document_id}")
-
-            # 1. Fetch document from database
-            document_data = db.get_record_by_id("documents", document_id)
-            if not document_data:
+            # Normalize document_ids: support both single document_id (backward compat) and document_ids list
+            if document_ids:
+                primary_document_ids = document_ids
+            elif document_id:
+                primary_document_ids = [document_id]
+            else:
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Document not found",
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Either document_id or document_ids must be provided",
                 )
 
-            # Verify document belongs to teacher
-            if document_data.get("teacher_id") != teacher_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied to this document",
+            logger.info(f"Starting lecture generation for {len(primary_document_ids)} document(s): {primary_document_ids}")
+
+            # 1. Fetch all documents from database and verify access
+            primary_document_contents = []
+            first_document_data = None
+            
+            for doc_id in primary_document_ids:
+                document_data = db.get_record_by_id("documents", doc_id)
+                if not document_data:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Document not found: {doc_id}",
+                    )
+
+                # Verify document belongs to teacher
+                if document_data.get("teacher_id") != teacher_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Access denied to document: {doc_id}",
+                    )
+
+                # Store first document for backward compatibility (lecture.document_id)
+                if first_document_data is None:
+                    first_document_data = document_data
+
+                logger.info(f"Document found: {document_data['title']} ({document_data.get('document_type', 'UNKNOWN')})")
+
+                # 2. Fetch document JSON content from Supabase
+                document_content = await LectureService.fetch_document_json(
+                    document_data["content_json_path"]
                 )
 
-            logger.info(f"Document found: {document_data['title']}")
+                # 3. Filter content by selected chapters (only for first document if multiple)
+                if selected_chapters and doc_id == primary_document_ids[0]:
+                    logger.info(f"Filtering content to {len(selected_chapters)} chapters for first document")
+                    document_content = LectureService.extract_chapters_content(
+                        document_content, selected_chapters
+                    )
 
-            # 2. Fetch document JSON content from Supabase
-            document_content = await LectureService.fetch_document_json(
-                document_data["content_json_path"]
+                # Flatten the content
+                flattened_content = LectureService._flatten_parsed_content(document_content)
+                
+                # Add document metadata
+                doc_title = document_data.get("title", "Untitled")
+                doc_type = document_data.get("document_type", "UNKNOWN")
+                combined_content = f"\n\n=== DOCUMENT: {doc_title} ({doc_type}) ===\n\n{flattened_content}"
+                
+                primary_document_contents.append({
+                    "content": combined_content,
+                    "title": doc_title,
+                    "type": doc_type,
+                    "is_first": doc_id == primary_document_ids[0],
+                })
+            
+            # Get document titles for metadata
+            document_titles = []
+            for doc_id in primary_document_ids:
+                doc = db.get_record_by_id("documents", doc_id)
+                if doc:
+                    document_titles.append(doc.get("title", "Untitled"))
+
+            # Build additional transient sources from extra documents and raw texts (not saved)
+            additional_pieces: list[str] = []
+
+            # Include extra documents (validate access)
+            try:
+                if extra_document_ids:
+                    for extra_doc_id in extra_document_ids:
+                        extra_doc = db.get_record_by_id("documents", extra_doc_id)
+                        if not extra_doc:
+                            logger.warning(f"Extra document not found: {extra_doc_id}")
+                            continue
+                        if extra_doc.get("teacher_id") != teacher_id:
+                            logger.warning(
+                                f"Access denied to extra document {extra_doc_id} for teacher {teacher_id}"
+                            )
+                            continue
+                        try:
+                            extra_json = await LectureService.fetch_document_json(
+                                extra_doc["content_json_path"]
+                            )
+                            # Extract text similar to main doc
+                            if "content" in extra_json:
+                                if isinstance(extra_json["content"], str):
+                                    extra_text = extra_json["content"]
+                                elif isinstance(extra_json["content"], list):
+                                    extra_text = "\n".join(
+                                        str(item) for item in extra_json["content"]
+                                    )
+                                else:
+                                    extra_text = str(extra_json["content"])
+                            elif "text" in extra_json:
+                                extra_text = extra_json["text"]
+                            else:
+                                extra_text = json.dumps(extra_json, indent=2)
+                            title = extra_doc.get("title") or "Untitled"
+                            additional_pieces.append(
+                                f"=== {title} ===\n{extra_text}"
+                            )
+                        except Exception as extra_fetch_err:
+                            logger.warning(
+                                f"Failed to fetch/parse extra document {extra_doc_id}: {extra_fetch_err}"
+                            )
+            except Exception as extras_err:
+                logger.warning(f"Error while processing extra documents: {extras_err}")
+
+            # Include any raw text snippets
+            try:
+                if extra_texts:
+                    for idx, txt in enumerate(extra_texts, start=1):
+                        if not txt:
+                            continue
+                        additional_pieces.append(f"=== EXTRA TEXT {idx} ===\n{str(txt)}")
+            except Exception as extra_txt_err:
+                logger.warning(f"Error while processing extra texts: {extra_txt_err}")
+
+            # Include extra remote files (txt, pdf, docx)
+            try:
+                if extra_file_urls:
+                    for url in extra_file_urls:
+                        if not url:
+                            continue
+                        url_lower = url.lower()
+                        file_bytes = await LectureService._fetch_bytes(url)
+                        if not file_bytes:
+                            continue
+                        piece_text = ""
+                        try:
+                            if url_lower.endswith(".txt"):
+                                piece_text = file_bytes.decode("utf-8", errors="ignore")
+                            elif url_lower.endswith(".pdf"):
+                                parsed = await DocumentParser.parse_document(
+                                    file_bytes, DocumentType.PDF, url.split("/")[-1]
+                                )
+                                piece_text = LectureService._flatten_parsed_content(parsed)
+                            elif url_lower.endswith(".docx"):
+                                parsed = await DocumentParser.parse_document(
+                                    file_bytes, DocumentType.DOCX, url.split("/")[-1]
+                                )
+                                piece_text = LectureService._flatten_parsed_content(parsed)
+                            else:
+                                # Unsupported extension - best effort: try text
+                                piece_text = file_bytes.decode("utf-8", errors="ignore")
+                        except Exception as parse_err:
+                            logger.warning(f"Failed to parse extra file url '{url}': {parse_err}")
+                            continue
+
+                        if piece_text:
+                            # Per-piece limit
+                            clipped = LectureService._truncate_text(
+                                piece_text, LectureService.PER_PIECE_LIMIT
+                            )
+                            additional_pieces.append(f"=== {url} ===\n{clipped}")
+            except Exception as extra_url_err:
+                logger.warning(f"Error while processing extra file urls: {extra_url_err}")
+
+            # Include uploaded files (txt, pdf, docx)
+            try:
+                if extra_uploads:
+                    for item in extra_uploads:
+                        try:
+                            filename = (item.get("filename") or "upload").lower()
+                            content_type = (item.get("content_type") or "").lower()
+                            file_bytes: bytes = item.get("bytes") or b""
+                            if not file_bytes:
+                                continue
+
+                            piece_text = ""
+                            if filename.endswith(".txt") or content_type.startswith("text/"):
+                                piece_text = file_bytes.decode("utf-8", errors="ignore")
+                            elif filename.endswith(".pdf") or "pdf" in content_type:
+                                parsed = await DocumentParser.parse_document(
+                                    file_bytes, DocumentType.PDF, filename
+                                )
+                                piece_text = LectureService._flatten_parsed_content(parsed)
+                            elif filename.endswith(".docx") or "wordprocessingml" in content_type:
+                                parsed = await DocumentParser.parse_document(
+                                    file_bytes, DocumentType.DOCX, filename
+                                )
+                                piece_text = LectureService._flatten_parsed_content(parsed)
+                            else:
+                                # Best-effort fallback
+                                piece_text = file_bytes.decode("utf-8", errors="ignore")
+
+                            if piece_text:
+                                clipped = LectureService._truncate_text(
+                                    piece_text, LectureService.PER_PIECE_LIMIT
+                                )
+                                additional_pieces.append(f"=== {filename} ===\n{clipped}")
+                        except Exception as upload_err:
+                            logger.warning(f"Failed to parse uploaded file: {upload_err}")
+            except Exception as extra_uploads_err:
+                logger.warning(f"Error while processing uploaded files: {extra_uploads_err}")
+
+            # 4. Use intelligent token management to combine all content
+            managed_content, content_metadata = LectureService._manage_content_tokens(
+                primary_contents=primary_document_contents,
+                additional_pieces=additional_pieces,
+                selected_chapters=selected_chapters,
             )
-
-            # 3. Filter content by selected chapters (if specified)
-            if selected_chapters:
-                logger.info(f"Filtering content to {len(selected_chapters)} chapters")
-                document_content = LectureService.extract_chapters_content(
-                    document_content, selected_chapters
+            
+            # Log token management results
+            if content_metadata.get("truncated"):
+                logger.warning(
+                    f"Content was truncated due to token limits. "
+                    f"Original: {content_metadata.get('original_tokens', 0)} tokens, "
+                    f"Final: {content_metadata.get('total_tokens', 0)} tokens. "
+                    f"Truncated sources: {content_metadata.get('truncated_source_titles', [])}"
                 )
+            else:
+                logger.info(
+                    f"All content fits within token limits: "
+                    f"{content_metadata.get('total_tokens', 0)} tokens from "
+                    f"{content_metadata.get('sources_included', 0)} sources"
+                )
+            
+            # Create unified document structure for AI prompt
+            document_content = {
+                "content": managed_content,
+                "metadata": {
+                    "total_documents": len(primary_document_ids),
+                    "document_titles": document_titles,
+                    "token_management": content_metadata,
+                }
+            }
 
-            # 4. Generate lecture content using AI
+            # 5. Generate lecture content using AI (with managed content)
             generated_content = await LectureService.generate_lecture_content(
-                document_content, lecture_description, lecture_title, learning_outcomes
+                document_content,
+                lecture_description,
+                lecture_title,
+                learning_outcomes,
+                additional_text=None,  # Already included in managed_content
             )
 
-            # 4. Create PDF from generated content
+            # 6. Create PDF from generated content
             pdf_bytes = LectureService.create_pdf(lecture_title, generated_content)
 
-            # 5. Save PDF to Supabase storage
+            # 7. Save PDF to Supabase storage
             # Use sanitized lecture title as filename
             sanitized_title = LectureService.sanitize_filename(lecture_title)
             pdf_filename = f"{sanitized_title}.pdf"
             storage_path = await LectureService.save_lecture_pdf(
                 pdf_bytes,
-                document_data["university_id"],
+                first_document_data["university_id"],
                 teacher_id,
                 course_id,
                 pdf_filename,
             )
 
-            # 6. Generate lecture plan for teacher (activities, quizzes, etc.)
+            # 8. Generate lecture plan for teacher (activities, quizzes, etc.)
             lecture_plan = None
             try:
                 from services.lecture_planning_service import (
@@ -559,7 +1110,18 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 # Don't fail the entire generation if planning fails
                 lecture_plan = None
 
-            # 7. Create lecture record in database
+            # 9. Calculate lecture number if topic is provided
+            lecture_number = None
+            if topic:
+                lecture_number = LectureService.get_next_lecture_number(
+                    db, topic, course_id, semester_id
+                )
+                logger.info(f"Assigned lecture number {lecture_number} for topic '{topic}'")
+
+            # 10. Create lecture record in database
+            # Store first document_id for backward compatibility and duplicate detection
+            primary_document_id = primary_document_ids[0] if primary_document_ids else None
+            
             lecture_data = {
                 "title": lecture_title,
                 "description": lecture_description,
@@ -570,8 +1132,10 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 "course_id": course_id,
                 "semester_id": semester_id,
                 "teacher_id": teacher_id,
-                "document_id": document_id,  # Store source document for duplicate detection
+                "document_id": primary_document_id,  # Store first document for backward compatibility
                 "lecture_plan": lecture_plan,
+                "topic": topic,
+                "lecture_number": lecture_number,
                 "created_at": datetime.utcnow().isoformat(),
                 "updated_at": datetime.utcnow().isoformat(),
             }
@@ -579,7 +1143,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             lecture_record = db.create_record("lecture", lecture_data)
             logger.info(f"Lecture record created: {lecture_record['id']}")
 
-            # 8. Create lecture content record (PDF metadata)
+            # 11. Create lecture content record (PDF metadata)
             lecture_content_data = {
                 "lecture_id": lecture_record["id"],
                 "file_name": pdf_filename,
@@ -594,7 +1158,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             content_record = db.create_record("lecture_content", lecture_content_data)
             logger.info(f"Lecture content record created: {content_record['id']}")
 
-            # 9. Return lecture information
+            # 12. Return lecture information (include token management metadata)
             result = {
                 "lecture_id": lecture_record["id"],
                 "title": lecture_title,
@@ -605,6 +1169,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 "content_length": len(generated_content),
                 "pdf_size": len(pdf_bytes),
                 "created_at": lecture_record["created_at"],
+                "token_management": content_metadata,  # Include token management info
             }
 
             logger.info(

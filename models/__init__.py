@@ -8,7 +8,7 @@ from .assessment import (Assessment, AssessmentSubmission, AssessmentType,
                          Question, QuestionType)
 from .course import Course, Semester
 from .document import (Document, DocumentCreate, DocumentRead, DocumentStatus,
-                       DocumentType, DocumentUpdate, WebsiteContent)
+                       DocumentType, DocumentUpdate)
 from .enrollment import Enrollment
 from .job_queue import JobQueue, JobStatus, JobType
 from .lecture import (Lecture, LectureContent, LectureDownloadResponse,
@@ -64,5 +64,4 @@ __all__ = [
     "DocumentCreate",
     "DocumentRead",
     "DocumentUpdate",
-    "WebsiteContent",
 ]

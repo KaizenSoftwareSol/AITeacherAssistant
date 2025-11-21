@@ -17,7 +17,6 @@ class DocumentType(str, Enum):
     PDF = "PDF"
     PPTX = "PPTX"
     DOCX = "DOCX"
-    WEBSITE = "WEBSITE"
 
 
 class DocumentStatus(str, Enum):
@@ -93,13 +92,3 @@ class DocumentUpdate(SQLModel):
     description: Optional[str] = None
     status: Optional[DocumentStatus] = None
     document_metadata: Optional[str] = None
-
-
-class WebsiteContent(SQLModel):
-    """Model for website content extraction."""
-
-    url: str
-    title: Optional[str] = None
-    content: str
-    document_metadata: Optional[str] = None
-    extracted_at: datetime = Field(default_factory=datetime.utcnow)

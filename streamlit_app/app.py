@@ -398,17 +398,14 @@ def show_document_management():
     st.markdown("---")
 
     # Create tabs for upload and view
-    tab1, tab2, tab3 = st.tabs(
-        ["📤 Upload File", "🌐 Upload Website", "📚 My Documents"]
+    tab1, tab2 = st.tabs(
+        ["📤 Upload File", "📚 My Documents"]
     )
 
     with tab1:
         show_file_upload()
 
     with tab2:
-        show_website_upload()
-
-    with tab3:
         show_documents_list()
 
 
@@ -567,50 +564,6 @@ def show_file_upload():
 
                         if response.status_code == 201:
                             st.success(f"✅ Document uploaded successfully!")
-                            doc_data = response.json()
-                            st.json(doc_data)
-                        else:
-                            error_detail = response.json().get(
-                                "detail", "Upload failed"
-                            )
-                            st.error(f"Upload failed: {error_detail}")
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-
-def show_website_upload():
-    """Show website URL upload form."""
-    st.subheader("Upload Website URL")
-    st.markdown("Extract content from a website URL.")
-
-    with st.form("website_upload_form", clear_on_submit=True):
-        url = st.text_input("Website URL", placeholder="https://example.com")
-        title = st.text_input("Title", placeholder="Enter document title")
-        description = st.text_area(
-            "Description (Optional)", placeholder="Enter document description"
-        )
-        submit = st.form_submit_button("Upload Website", use_container_width=True)
-
-        if submit:
-            if not url:
-                st.error("Please enter a website URL.")
-            elif not title:
-                st.error("Please enter a title for the document.")
-            else:
-                with st.spinner("Processing website..."):
-                    try:
-                        data = {"url": url, "title": title}
-                        if description:
-                            data["description"] = description
-
-                        response = requests.post(
-                            f"{API_BASE_URL}/documents/upload/website",
-                            headers=get_auth_headers(),
-                            data=data,
-                        )
-
-                        if response.status_code == 201:
-                            st.success(f"✅ Website content uploaded successfully!")
                             doc_data = response.json()
                             st.json(doc_data)
                         else:

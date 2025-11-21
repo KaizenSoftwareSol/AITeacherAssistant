@@ -71,60 +71,6 @@ async def upload_document_file(
         )
 
 
-@router.post(
-    "/upload/website", response_model=DocumentRead, status_code=status.HTTP_201_CREATED
-)
-async def upload_website_url(
-    current_user: Annotated[User, Depends(require_teacher)],
-    url: str = Form(...),
-    title: str = Form(...),
-    description: Optional[str] = Form(None),
-    db=Depends(get_db),
-):
-    """
-    Upload a website URL for content extraction and storage.
-
-    This endpoint is only accessible to teachers and admins.
-    """
-    try:
-        # Get teacher profile
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
-        # Validate URL
-        if not url or not url.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="URL is required"
-            )
-
-        # Process website upload
-        document = await DocumentService.process_website_upload(
-            db=db,
-            teacher=teacher,
-            url=url.strip(),
-            title=title,
-            description=description,
-        )
-
-        logger.info(
-            f"Website uploaded successfully by teacher {teacher.id}: {document.id}"
-        )
-        return document
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in website upload endpoint: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error during website upload",
-        )
-
-
 @router.get("/", response_model=List[DocumentRead])
 async def get_teacher_documents(
     current_user: Annotated[User, Depends(require_teacher)],

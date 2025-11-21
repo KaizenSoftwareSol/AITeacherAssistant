@@ -1,7 +1,7 @@
 """
-Document parsing service: PDF, PPTX, DOCX, Website.
+Document parsing service: PDF, PPTX, DOCX.
 - PDF: page-level extraction, heading detection, text cleaning, LLM-friendly fields
-- PPTX/DOCX/Website: structured extraction consistent with prior behavior
+- PPTX/DOCX: structured extraction consistent with prior behavior
 """
 
 import io
@@ -19,9 +19,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import aiohttp
 import PyPDF2
-from bs4 import BeautifulSoup
 from docx import Document as DocxDocument
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -57,7 +55,7 @@ except Exception:  # pragma: no cover - optional dependency
     Image = None
 
 from logger import logger
-from models.document import DocumentType, WebsiteContent
+from models.document import DocumentType
 
 # ========================= Helpers: headings (PDF) =========================
 HEADING_LEXICON = {
@@ -2847,63 +2845,6 @@ class DocumentParser:
         }
 
         return result
-
-    @staticmethod
-    async def parse_website(url: str) -> WebsiteContent:
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=30) as response:
-                if response.status != 200:
-                    raise Exception(f"Failed to fetch website: HTTP {response.status}")
-                html_content = await response.text()
-
-        soup = BeautifulSoup(html_content, "html.parser")
-        for script in soup(["script", "style"]):
-            script.decompose()
-        title = soup.find("title")
-        title_text = title.get_text().strip() if title else ""
-        main_content = ""
-        content_selectors = [
-            "main",
-            "article",
-            ".content",
-            "#content",
-            ".main-content",
-            "#main-content",
-            ".post-content",
-            ".entry-content",
-            ".article-content",
-        ]
-        for selector in content_selectors:
-            content_elem = soup.select_one(selector)
-            if content_elem:
-                main_content = content_elem.get_text(separator=" ", strip=True)
-                break
-        if not main_content:
-            main_content = soup.get_text(separator=" ", strip=True)
-        main_content = " ".join(main_content.split())
-        metadata = {
-            "url": url,
-            "title": title_text,
-            "description": "",
-            "keywords": "",
-            "author": "",
-            "word_count": len(main_content.split()),
-            "extracted_at": datetime.utcnow().isoformat(),
-        }
-        meta_desc = soup.find("meta", attrs={"name": "description"})
-        if meta_desc:
-            metadata["description"] = meta_desc.get("content", "")
-        meta_keywords = soup.find("meta", attrs={"name": "keywords"})
-        if meta_keywords:
-            metadata["keywords"] = meta_keywords.get("content", "")
-        meta_author = soup.find("meta", attrs={"name": "author"})
-        if meta_author:
-            metadata["author"] = meta_author.get("content", "")
-
-        return WebsiteContent(url=url, title=title_text, content=main_content, metadata=metadata)
 
     @staticmethod
     def _extract_shape_content(shape) -> Optional[Dict[str, Any]]:

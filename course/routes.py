@@ -6,7 +6,7 @@ import string
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ValidationInfo
 
 from dependencies import require_teacher
 from logger import logger
@@ -42,8 +42,8 @@ class CourseCreateRequest(BaseModel):
 
     @field_validator("semester_end_date")
     @classmethod
-    def validate_semester_dates(cls, end_date: date | None, values):
-        start_date = values.get("semester_start_date")
+    def validate_semester_dates(cls, end_date: date | None, info: ValidationInfo):
+        start_date = info.data.get("semester_start_date") if info.data else None
         if end_date and start_date and end_date < start_date:
             raise ValueError("Semester end date must be after the start date")
         return end_date

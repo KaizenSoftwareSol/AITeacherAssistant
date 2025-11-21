@@ -6,15 +6,13 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-import aiohttp
 import PyPDF2
-from bs4 import BeautifulSoup
 from docx import Document as DocxDocument
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from logger import logger
-from models.document import DocumentType, WebsiteContent
+from models.document import DocumentType
 
 
 class DocumentParser:
@@ -1349,106 +1347,6 @@ class DocumentParser:
         except Exception as e:
             logger.error(f"Error parsing DOCX {filename}: {str(e)}")
             raise Exception(f"Failed to parse DOCX: {str(e)}")
-
-    @staticmethod
-    async def parse_website(url: str) -> WebsiteContent:
-        """
-        Parse website content and extract text.
-
-        Args:
-            url: Website URL to parse
-
-        Returns:
-            WebsiteContent object with extracted data
-        """
-        try:
-            # Validate URL
-            if not url.startswith(("http://", "https://")):
-                url = "https://" + url
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=30) as response:
-                    if response.status != 200:
-                        raise Exception(
-                            f"Failed to fetch website: HTTP {response.status}"
-                        )
-
-                    html_content = await response.text()
-
-            # Parse HTML content
-            soup = BeautifulSoup(html_content, "html.parser")
-
-            # Remove script and style elements
-            for script in soup(["script", "style"]):
-                script.decompose()
-
-            # Extract title
-            title = soup.find("title")
-            title_text = title.get_text().strip() if title else ""
-
-            # Extract main content
-            # Try to find main content areas
-            main_content = ""
-
-            # Look for common content containers
-            content_selectors = [
-                "main",
-                "article",
-                ".content",
-                "#content",
-                ".main-content",
-                "#main-content",
-                ".post-content",
-                ".entry-content",
-                ".article-content",
-            ]
-
-            for selector in content_selectors:
-                content_elem = soup.select_one(selector)
-                if content_elem:
-                    main_content = content_elem.get_text(separator=" ", strip=True)
-                    break
-
-            # If no main content found, get all text
-            if not main_content:
-                main_content = soup.get_text(separator=" ", strip=True)
-
-            # Clean up text
-            main_content = " ".join(main_content.split())
-
-            # Extract metadata
-            metadata = {
-                "url": url,
-                "title": title_text,
-                "description": "",
-                "keywords": "",
-                "author": "",
-                "word_count": len(main_content.split()),
-                "extracted_at": datetime.utcnow().isoformat(),
-            }
-
-            # Try to extract meta description
-            meta_desc = soup.find("meta", attrs={"name": "description"})
-            if meta_desc:
-                metadata["description"] = meta_desc.get("content", "")
-
-            # Try to extract meta keywords
-            meta_keywords = soup.find("meta", attrs={"name": "keywords"})
-            if meta_keywords:
-                metadata["keywords"] = meta_keywords.get("content", "")
-
-            # Try to extract author
-            meta_author = soup.find("meta", attrs={"name": "author"})
-            if meta_author:
-                metadata["author"] = meta_author.get("content", "")
-
-            return WebsiteContent(
-                url=url, title=title_text, content=main_content, metadata=metadata
-            )
-
-        except Exception as e:
-            logger.error(f"Error parsing website {url}: {str(e)}")
-            raise Exception(f"Failed to parse website: {str(e)}")
 
     @staticmethod
     def _extract_shape_content(shape) -> Optional[Dict[str, Any]]:

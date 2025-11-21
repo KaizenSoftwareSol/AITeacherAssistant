@@ -36,6 +36,7 @@ from services.embedding_service import EmbeddingService
 from services.quiz_service import QuizService
 from services.rag_service import RAGService
 from utils.db import get_db
+from supabase_config import supabase
 
 router = APIRouter()
 
@@ -360,18 +361,51 @@ async def get_course_lectures(
                 user_data = teacher_data.get("users", {})
                 teacher_name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
         
-        # Get all published lectures for this course
+        # Get all lectures (including GENERATED) for this course
         lectures_result = (
             db.admin_client.table("lecture")
-            .select("id, title, description, summary, chapter, status, created_at, has_embeddings")
+            .select("id, title, description, summary, chapter, status, created_at, has_embeddings, topic, lecture_number, content")
             .eq("course_id", course_id)
             .in_("status", ["PUBLISHED", "DELIVERED"])
             .order("created_at", desc=False)
             .execute()
         )
         
+        # Batch fetch lecture_content for PDFs
+        lecture_id_list = [row["id"] for row in (lectures_result.data or [])]
+        content_by_lecture_id = {}
+        if lecture_id_list:
+            lc_result = (
+                db.admin_client.table("lecture_content")
+                .select("lecture_id, file_name, file_size, storage_bucket, storage_path")
+                .in_("lecture_id", lecture_id_list)
+                .execute()
+            )
+            for row in lc_result.data or []:
+                # keep the first record per lecture
+                lid = row.get("lecture_id")
+                if lid and lid not in content_by_lecture_id:
+                    content_by_lecture_id[lid] = row
+
+        # Build lecture list with content and pdf info
         lectures = []
         for lecture_data in lectures_result.data if lectures_result.data else []:
+            pdf_file_name = None
+            pdf_file_size = None
+            pdf_download_url = None
+            lc = content_by_lecture_id.get(lecture_data["id"])
+            if lc:
+                pdf_file_name = lc.get("file_name")
+                pdf_file_size = lc.get("file_size")
+                storage_bucket = lc.get("storage_bucket")
+                storage_path = lc.get("storage_path")
+                try:
+                    if storage_bucket and storage_path:
+                        bucket = supabase.get_storage_bucket(storage_bucket)
+                        pdf_download_url = bucket.get_public_url(storage_path)
+                except Exception as e:
+                    logger.warning(f"Could not get public URL for lecture {lecture_data['id']}: {e}")
+
             lecture_info = StudentLectureInfo(
                 lecture_id=lecture_data["id"],
                 title=lecture_data["title"],
@@ -381,8 +415,37 @@ async def get_course_lectures(
                 status=lecture_data["status"],
                 created_at=lecture_data["created_at"],
                 has_embeddings=lecture_data.get("has_embeddings", False),
+                topic=lecture_data.get("topic"),
+                lecture_number=lecture_data.get("lecture_number"),
+                content=lecture_data.get("content"),
+                pdf_file_name=pdf_file_name,
+                pdf_file_size=pdf_file_size,
+                pdf_download_url=pdf_download_url,
             )
             lectures.append(lecture_info)
+        
+        # Group lectures by topic for response
+        lectures_by_topic = {}
+        lectures_without_topic = []
+        
+        for lec in lectures:
+            topic = getattr(lec, "topic", None)
+            if topic:
+                if topic not in lectures_by_topic:
+                    lectures_by_topic[topic] = []
+                lectures_by_topic[topic].append(lec)
+            else:
+                lectures_without_topic.append(lec)
+        
+        # Sort lectures within each topic by lecture_number
+        for topic in lectures_by_topic:
+            lectures_by_topic[topic].sort(
+                key=lambda x: (getattr(x, "lecture_number", None) or 0, x.created_at or datetime.min)
+            )
+        
+        # Sort topics alphabetically
+        sorted_topics = sorted(lectures_by_topic.keys())
+        grouped_dict = {topic: lectures_by_topic[topic] for topic in sorted_topics}
         
         # Build response
         course_info = StudentCourseInfo(
@@ -399,7 +462,9 @@ async def get_course_lectures(
         
         response = StudentCourseLecturesResponse(
             course_info=course_info,
-            lectures=lectures,
+            lectures=lectures,  # Keep flat list for backward compatibility
+            grouped_by_topic=grouped_dict if grouped_dict else None,
+            lectures_without_topic=lectures_without_topic if lectures_without_topic else None,
             total_count=len(lectures),
         )
         

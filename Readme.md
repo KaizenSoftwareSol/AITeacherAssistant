@@ -5,7 +5,7 @@ Intelligent Learning Platform with AI-powered document ingestion, lecture genera
 ## 🚀 Features
 
 ### 📚 For Teachers
-- 📄 **Document Ingestion**: Parse PDF, PPTX, DOCX, and websites
+- 📄 **Document Ingestion**: Parse PDF, PPTX, and DOCX
 - 🤖 **AI Lecture Generation**: Generate comprehensive lectures from documents using GPT-4o
 - 📑 **PDF Creation**: Automatically create formatted lecture PDFs
 - 🎯 **Lecture Management**: Publish/unpublish/delete lectures with intuitive UI
@@ -155,7 +155,6 @@ Role: STUDENT
 
 ### Document Management
 - `POST /api/v1/documents/upload/file` - Upload PDF/PPTX/DOCX
-- `POST /api/v1/documents/upload/website` - Upload website URL
 - `GET /api/v1/documents` - List all documents
 - `GET /api/v1/documents/{id}` - Get single document
 - `PUT /api/v1/documents/{id}` - Update document
@@ -198,11 +197,6 @@ Role: STUDENT
 - ✅ Paragraphs with formatting
 - ✅ Tables & images
 - ✅ Rich text styles
-
-### Website Parser
-- ✅ Clean content extraction
-- ✅ Metadata (title, author, keywords)
-- ✅ Word count
 
 ## 📁 Storage Structure
 
@@ -262,7 +256,7 @@ All tables use **UUID primary keys**:
 
 ### Teacher Workflow
 
-1. **Upload Document** (PDF, PPTX, DOCX, or website)
+1. **Upload Document** (PDF, PPTX, or DOCX)
    - Document is parsed and stored as JSON in Supabase Storage
 
 2. **Generate Lecture**

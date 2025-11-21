@@ -42,7 +42,6 @@ A modern web interface for the AI Teacher Assistant platform that enables teache
 
 #### Upload Documents
 - **File Upload**: Support for PDF, PPTX, and DOCX files
-- **Website Upload**: Extract content from any public URL
 - **Metadata**: Add title and description for each document
 - **Real-time Processing**: Track document processing status
 
@@ -96,15 +95,6 @@ A modern web interface for the AI Teacher Assistant platform that enables teache
 5. Optionally add a **Description**
 6. Click **"Upload Document"**
 7. Wait for processing to complete
-
-#### Upload a Website
-1. Go to **"📄 Document Management"**
-2. Click **"🌐 Upload Website"** tab
-3. Enter the **Website URL**
-4. Enter a **Title**
-5. Optionally add a **Description**
-6. Click **"Upload Website"**
-7. Wait for content extraction
 
 ### 3. View Your Documents
 
@@ -221,7 +211,6 @@ API_BASE_URL = "http://localhost:8001/api/v1"
 - **PDF** (.pdf) - Best for text-heavy documents
 - **PowerPoint** (.pptx) - Presentations and slides
 - **Word** (.docx) - Documents and reports
-- **Websites** (URLs) - Any public webpage
 
 ## 🔧 Troubleshooting
 
@@ -314,7 +303,6 @@ API_BASE_URL = "http://localhost:8001/api/v1"
 - `POST /api/v1/auth/login` - User authentication
 - `GET /api/v1/auth/me` - Get user profile
 - `POST /api/v1/documents/upload/file` - Upload file
-- `POST /api/v1/documents/upload/website` - Upload website
 - `GET /api/v1/documents/` - List documents
 - `GET /api/v1/documents/{id}/chapters` - Get document chapters
 - `GET /api/v1/courses/` - List courses
@@ -334,7 +322,6 @@ API_BASE_URL = "http://localhost:8001/api/v1"
 - **Login**: < 1 second
 - **Document List**: < 2 seconds
 - **File Upload**: 5-30 seconds (depends on size)
-- **Website Upload**: 10-60 seconds (depends on content)
 - **Lecture Generation**: 1-3 minutes (AI processing)
 - **Download**: Instant (pre-signed URL)
 

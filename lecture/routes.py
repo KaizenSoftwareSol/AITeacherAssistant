@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import File, UploadFile, Form
 
 from dependencies import require_teacher
 from logger import logger
@@ -18,6 +19,7 @@ from models.user import User
 from services.lecture_service import LectureService
 from supabase_config import supabase
 from utils.db import get_db
+import json
 
 router = APIRouter()
 
@@ -56,15 +58,26 @@ async def generate_lecture(
                 detail="Teacher profile not found",
             )
 
+        # Normalize document IDs: support both single document_id (backward compat) and document_ids list
+        document_ids = request.document_ids
+        if not document_ids and request.document_id:
+            document_ids = [request.document_id]
+        
+        if not document_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either document_id or document_ids must be provided",
+            )
+
         logger.info(
-            f"Generating lecture from document {request.document_id} "
+            f"Generating lecture from {len(document_ids)} document(s) "
             f"for teacher {teacher.id}"
         )
 
         # Generate and save lecture
         result = await LectureService.generate_and_save_lecture(
             db=db,
-            document_id=request.document_id,
+            document_ids=document_ids,
             teacher_id=teacher.id,
             course_id=request.course_id,
             semester_id=request.semester_id,
@@ -72,6 +85,10 @@ async def generate_lecture(
             lecture_description=request.description,
             learning_outcomes=request.learning_outcomes,
             selected_chapters=request.selected_chapters,
+            topic=request.topic,
+            extra_document_ids=request.extra_document_ids or None,
+            extra_texts=request.extra_texts or None,
+            extra_file_urls=request.extra_file_urls or None,
         )
 
         logger.info(
@@ -90,6 +107,219 @@ async def generate_lecture(
             detail="Internal server error during lecture generation",
         )
 
+
+@router.post(
+    "/generate-with-files",
+    response_model=LectureGenerationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_lecture_with_files(
+    current_user: Annotated[User, Depends(require_teacher)],
+    document_id: str = Form(None),  # Single document (backward compatibility)
+    document_ids: str = Form(None),  # JSON array of document IDs (new way)
+    course_id: str = Form(...),
+    semester_id: str = Form(...),
+    title: str = Form(...),
+    description: str = Form(...),
+    learning_outcomes: str = Form(None),
+    selected_chapters: str = Form(None),  # JSON array or comma-separated
+    topic: str = Form(None),
+    extra_files: list[UploadFile] = File(None),
+    db=Depends(get_db),
+):
+    """
+    Generate a lecture from one or more ingested documents using AI with additional uploaded files.
+
+    Notes:
+    - Supports multiple documents via document_ids (JSON array) or single document via document_id (backward compat)
+    - extra_files are parsed transiently (txt/pdf/docx) and truncated for LLM context,
+      nothing is persisted from these uploads.
+    - selected_chapters can be a JSON array of strings or a comma-separated string.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        # Parse document_ids: support both JSON array string and single document_id
+        parsed_document_ids = None
+        if document_ids:
+            try:
+                parsed = json.loads(document_ids)
+                if isinstance(parsed, list):
+                    parsed_document_ids = parsed
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="document_ids must be a JSON array of document IDs",
+                    )
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="document_ids must be a valid JSON array",
+                )
+        elif document_id:
+            parsed_document_ids = [document_id]
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either document_id or document_ids must be provided",
+            )
+
+        # Parse selected_chapters
+        parsed_selected = None
+        if selected_chapters:
+            try:
+                parsed = json.loads(selected_chapters)
+                if isinstance(parsed, list):
+                    parsed_selected = parsed
+            except Exception:
+                # Fallback: comma-separated
+                parsed_selected = [s.strip() for s in selected_chapters.split(",") if s.strip()]
+
+        # Prepare uploaded files
+        uploads = []
+        if extra_files:
+            for f in extra_files:
+                try:
+                    content = await f.read()
+                    uploads.append(
+                        {
+                            "filename": f.filename,
+                            "content_type": f.content_type or "",
+                            "bytes": content or b"",
+                        }
+                    )
+                except Exception as read_err:
+                    logger.warning(f"Failed to read uploaded file {getattr(f, 'filename', '')}: {read_err}")
+
+        # Generate and save lecture
+        result = await LectureService.generate_and_save_lecture(
+            db=db,
+            document_ids=parsed_document_ids,
+            teacher_id=teacher.id,
+            course_id=course_id,
+            semester_id=semester_id,
+            lecture_title=title,
+            lecture_description=description,
+            learning_outcomes=learning_outcomes,
+            selected_chapters=parsed_selected,
+            topic=topic,
+            extra_uploads=uploads or None,
+        )
+
+        return LectureGenerationResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in generate-with-files endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during lecture generation with files",
+        )
+
+@router.get(
+    "/by-topic",
+    response_model=list,
+)
+async def get_lectures_by_topic(
+    current_user: Annotated[User, Depends(require_teacher)],
+    topic: str,
+    course_id: str = None,
+    semester_id: str = None,
+    status: str = None,
+    db=Depends(get_db),
+):
+    """
+    Get all lectures for the current teacher within a specific topic.
+
+    Validations and behavior:
+    - Requires an authenticated teacher profile
+    - Only returns lectures created by the current teacher
+    - Required filter: topic
+    - Optional filters: course_id, semester_id, status
+    - Sorted by lecture_number (asc) then created_at (asc)
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        if not topic or not str(topic).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Query parameter 'topic' is required",
+            )
+
+        logger.info(f"Fetching lectures for teacher {teacher.id} by topic '{topic}'")
+
+        # Build filters
+        filters = {"teacher_id": teacher.id, "topic": topic}
+        if course_id:
+            filters["course_id"] = course_id
+        if semester_id:
+            filters["semester_id"] = semester_id
+        if status:
+            filters["status"] = status
+
+        # Get lectures
+        lectures = db.get_records("lecture", filters=filters, skip=0, limit=1000)
+
+        # Enrich with course names (batch fetch to avoid N+1 queries)
+        try:
+            course_ids = list(
+                {lec.get("course_id") for lec in lectures if lec.get("course_id")}
+            )
+
+            course_name_by_id = {}
+            if course_ids:
+                response = (
+                    db.admin_client.table("course")
+                    .select("id,name")
+                    .in_("id", course_ids)
+                    .execute()
+                )
+                course_name_by_id = {row["id"]: row.get("name") for row in response.data}
+
+            for lec in lectures:
+                cid = lec.get("course_id")
+                lec["course_name"] = course_name_by_id.get(cid)
+        except Exception as enrich_error:
+            logger.warning(f"Failed to enrich lectures with course names: {enrich_error}")
+
+        # Sort by lecture_number (None -> 0) then created_at
+        try:
+            lectures.sort(
+                key=lambda x: (
+                    (x.get("lecture_number") or 0),
+                    x.get("created_at") or "",
+                )
+            )
+        except Exception as sort_error:
+            logger.warning(f"Failed to sort lectures by topic order: {sort_error}")
+
+        logger.info(
+            f"Found {len(lectures)} lectures for teacher {teacher.id} in topic '{topic}'"
+        )
+        return lectures
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching lectures by topic: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while fetching lectures by topic",
+        )
 
 @router.post(
     "/check-duplicate",
@@ -129,6 +359,11 @@ async def check_duplicate_lecture(
 
         logger.info(f"Checking for duplicate lecture: {request.title}")
 
+        # Normalize document ID: use first document from document_ids if provided, otherwise use document_id
+        document_id_for_check = request.document_id
+        if not document_id_for_check and request.document_ids:
+            document_id_for_check = request.document_ids[0] if request.document_ids else None
+
         # Check for duplicates
         result = LectureService.check_for_duplicate_lecture(
             db=db,
@@ -136,7 +371,7 @@ async def check_duplicate_lecture(
             course_id=request.course_id,
             semester_id=request.semester_id,
             title=request.title,
-            document_id=request.document_id,
+            document_id=document_id_for_check,
             learning_outcomes=request.learning_outcomes,
             selected_chapters=request.selected_chapters,
         )
@@ -495,6 +730,32 @@ async def get_teacher_lectures(
         # Get lectures
         lectures = db.get_records("lecture", filters=filters, skip=0, limit=1000)
 
+        # Enrich with course names (batch fetch to avoid N+1 queries)
+        try:
+            course_ids = list(
+                {lec.get("course_id") for lec in lectures if lec.get("course_id")}
+            )
+
+            course_name_by_id = {}
+            if course_ids:
+                # Use admin_client to fetch course names in a single query
+                response = (
+                    db.admin_client.table("course")
+                    .select("id,name")
+                    .in_("id", course_ids)
+                    .execute()
+                )
+                course_name_by_id = {row["id"]: row.get("name") for row in response.data}
+
+            # Attach course_name to each lecture
+            for lec in lectures:
+                cid = lec.get("course_id")
+                lec["course_name"] = course_name_by_id.get(cid)
+        except Exception as enrich_error:
+            # If enrichment fails, continue returning base lectures
+            logger.warning(f"Failed to enrich lectures with course names: {enrich_error}")
+
+        # Return flat list to match response_model=list
         logger.info(f"Found {len(lectures)} lectures for teacher {teacher.id}")
         return lectures
 

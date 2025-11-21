@@ -54,6 +54,10 @@ class Lecture(SQLModel, table=True):
     semester_id: str = Field(foreign_key="semester.id")  # UUID
     teacher_id: str = Field(foreign_key="teacher.id")  # UUID
     document_id: Optional[str] = Field(default=None, foreign_key="documents.id")  # UUID - source document
+    
+    # Topic and numbering
+    topic: Optional[str] = None  # Topic name for grouping (e.g., "CLUSTERING", "PREDICTION", "REGRESSION")
+    lecture_number: Optional[int] = None  # Sequential number within topic (starts from 1)
 
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -92,16 +96,23 @@ class LectureContent(SQLModel, table=True):
 
 
 class LectureGenerationRequest(SQLModel):
-    """Request model for lecture generation from document."""
+    """Request model for lecture generation from document(s)."""
 
-    document_id: str  # UUID of the source document
+    # Support both single document (backward compatibility) and multiple documents
+    document_id: Optional[str] = None  # UUID of a single source document (deprecated, use document_ids)
+    document_ids: Optional[List[str]] = None  # List of UUIDs of source documents (PDF/PPTX)
     course_id: str  # UUID of the course
     semester_id: str  # UUID of the semester
     title: str  # Title for the lecture
     description: str  # Description/overview from teacher
     learning_outcomes: Optional[str] = None  # Learning outcomes for students
-    # List of chapter names to include (None = all chapters)
+    # List of chapter names to include (None = all chapters) - applies to first document if multiple
     selected_chapters: Optional[List[str]] = None
+    topic: Optional[str] = None  # Topic name for grouping (e.g., "CLUSTERING", "PREDICTION", "REGRESSION")
+    # Optional extra sources to use transiently for generation (not persisted)
+    extra_document_ids: Optional[List[str]] = None  # Existing ingested document IDs (must belong to teacher)
+    extra_texts: Optional[List[str]] = None  # Raw text snippets to include transiently
+    extra_file_urls: Optional[List[str]] = None  # Remote files (txt, pdf, docx) to fetch & parse transiently
 
 
 class LectureGenerationResponse(SQLModel):
@@ -134,6 +145,8 @@ class LectureRead(SQLModel):
     course_id: str  # UUID
     semester_id: str  # UUID
     teacher_id: str  # UUID
+    topic: Optional[str] = None
+    lecture_number: Optional[int] = None
     created_at: datetime
     updated_at: datetime
     delivered_at: Optional[datetime] = None
@@ -149,6 +162,8 @@ class LectureUpdate(SQLModel):
     chapter: Optional[str] = None
     book_reference: Optional[str] = None
     status: Optional[LectureStatus] = None
+    topic: Optional[str] = None
+    lecture_number: Optional[int] = None
 
 
 class LectureDownloadResponse(SQLModel):
@@ -182,7 +197,8 @@ class DuplicateCheckRequest(SQLModel):
     course_id: str
     semester_id: str
     title: str
-    document_id: Optional[str] = None  # UUID of source document
+    document_id: Optional[str] = None  # UUID of source document (deprecated, use document_ids)
+    document_ids: Optional[List[str]] = None  # List of UUIDs of source documents (checks first document for duplicates)
     learning_outcomes: Optional[str] = None
     selected_chapters: Optional[List[str]] = None
 
