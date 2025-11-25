@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi import File, UploadFile, Form
 
-from dependencies import require_teacher
+from dependencies import get_current_user, require_teacher
 from logger import logger
 from models.lecture import (
     DuplicateCheckRequest,
@@ -15,7 +15,7 @@ from models.lecture import (
     LectureGenerationRequest,
     LectureGenerationResponse,
 )
-from models.user import User
+from models.user import User, UserRole
 from services.lecture_service import LectureService
 from supabase_config import supabase
 from utils.db import get_db
@@ -533,25 +533,18 @@ async def delete_lecture(
     response_model=LectureDownloadResponse,
 )
 async def get_lecture_download_link(
-    current_user: Annotated[User, Depends(require_teacher)],
+    current_user: Annotated[User, Depends(get_current_user)],
     lecture_id: str,  # UUID of the lecture
     db=Depends(get_db),
 ):
     """
     Get download link for a generated lecture PDF.
 
-    This endpoint returns a public download URL for the lecture PDF file.
-    Only accessible to the teacher who created the lecture.
+    This endpoint returns a public download URL and the lecture content.
+    Accessible to the teacher who created it (or admins) and to students
+    who are actively enrolled in the lecture's course.
     """
     try:
-        # Get teacher profile
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
         logger.info(f"Fetching download link for lecture {lecture_id}")
 
         # Get lecture details
@@ -562,8 +555,57 @@ async def get_lecture_download_link(
                 detail="Lecture not found",
             )
 
-        # Verify access
-        if lecture_data.get("teacher_id") != teacher.id:
+        user_role = current_user.role
+        teacher = current_user.teacher_profile
+        requester_teacher_id = None
+
+        if user_role in [UserRole.TEACHER, UserRole.ADMIN]:
+            if user_role == UserRole.TEACHER:
+                if not teacher:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Teacher profile not found",
+                    )
+                if lecture_data.get("teacher_id") != teacher.id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied to this lecture",
+                    )
+                requester_teacher_id = teacher.id
+            else:
+                # Admins bypass teacher ownership check
+                requester_teacher_id = None
+        elif user_role == UserRole.STUDENT:
+            # Verify student enrollment in the lecture's course
+            student_result = (
+                db.admin_client.table("student")
+                .select("id")
+                .eq("user_id", str(current_user.id))
+                .limit(1)
+                .execute()
+            )
+            if not student_result.data:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Student profile not found",
+                )
+            student_id = student_result.data[0]["id"]
+
+            enrollment_result = (
+                db.admin_client.table("enrollment")
+                .select("id")
+                .eq("student_id", student_id)
+                .eq("course_id", lecture_data.get("course_id"))
+                .eq("is_active", True)
+                .execute()
+            )
+            if not enrollment_result.data:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not enrolled in this course",
+                )
+            requester_teacher_id = None
+        else:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this lecture",
@@ -571,7 +613,7 @@ async def get_lecture_download_link(
 
         # Get download URL
         download_url = LectureService.get_lecture_download_url(
-            db=db, lecture_id=lecture_id, teacher_id=teacher.id
+            db=db, lecture_id=lecture_id, teacher_id=requester_teacher_id
         )
 
         # Get lecture content for file info
@@ -585,6 +627,7 @@ async def get_lecture_download_link(
             file_name=pdf_content["file_name"] if pdf_content else "lecture.pdf",
             file_size=pdf_content["file_size"] if pdf_content else 0,
             created_at=lecture_data["created_at"],
+            lecture_content=lecture_data.get("content"),
         )
 
         logger.info(f"Download link generated for lecture {lecture_id}")

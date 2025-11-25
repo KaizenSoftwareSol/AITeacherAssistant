@@ -25,7 +25,7 @@ class LectureService:
 
     # ---------- Token-based context limits for GPT-4o (128k context window) ----------
     # Reserve tokens for: system message (~2k), prompt template (~3k), response (~10k)
-    MAX_INPUT_TOKENS = 113_000  # Safe limit for input content
+    MAX_INPUT_TOKENS = 25_000  # Safe limit for input content (under 30k to avoid API errors)
     TOKENS_PER_CHAR = 0.25  # Approximate: 1 token ≈ 4 characters (conservative estimate)
     MIN_TOKENS_PER_SOURCE = 1_000  # Minimum tokens to keep per source
     
@@ -139,29 +139,40 @@ class LectureService:
             }
         
         # Need to truncate - prioritize intelligently
+        # Strategy: Truncate additional pieces (priority 4) first, then selected documents (priority 1) if needed
         logger.warning(
             f"Content exceeds token limit ({total_tokens} > {LectureService.MAX_INPUT_TOKENS}). "
-            f"Applying intelligent truncation with prioritization."
+            f"Applying intelligent truncation: truncating additional documents first, then selected chapters if needed."
         )
         
-        # Sort by priority (lower number = higher priority)
-        content_sources.sort(key=lambda x: (x["priority"], -x["tokens"]))
+        # Separate sources by priority
+        priority_1_sources = [s for s in content_sources if s["priority"] == 1]  # Selected chapters
+        priority_3_sources = [s for s in content_sources if s["priority"] == 3]  # Other primary documents
+        priority_4_sources = [s for s in content_sources if s["priority"] == 4]  # Additional pieces (truncate first)
         
-        # Distribute tokens with priority
         available_tokens = LectureService.MAX_INPUT_TOKENS
         included_sources = []
         truncated_sources = []
         
-        # Reserve tokens for highest priority sources first
-        for source in content_sources:
+        # Step 1: Process priority 1 sources (selected chapters) first - keep as much as possible
+        for source in priority_1_sources:
             source_tokens = source["tokens"]
-            
-            if source["priority"] == 1:  # Selected chapters - keep full content
-                if available_tokens >= source_tokens:
-                    included_sources.append(source)
-                    available_tokens -= source_tokens
-                else:
-                    # Truncate but keep as much as possible
+            if available_tokens >= source_tokens:
+                included_sources.append(source)
+                available_tokens -= source_tokens
+            elif available_tokens >= LectureService.MIN_TOKENS_PER_SOURCE:
+                # Truncate selected chapters if needed
+                truncated_text = LectureService._truncate_text_by_tokens(
+                    source["text"], available_tokens
+                )
+                source["text"] = truncated_text
+                source["tokens"] = LectureService._estimate_tokens(truncated_text)
+                included_sources.append(source)
+                available_tokens = 0
+                break
+            else:
+                # Can't fit even minimum - truncate heavily or skip
+                if available_tokens > 0:
                     truncated_text = LectureService._truncate_text_by_tokens(
                         source["text"], available_tokens
                     )
@@ -169,54 +180,47 @@ class LectureService:
                     source["tokens"] = LectureService._estimate_tokens(truncated_text)
                     included_sources.append(source)
                     available_tokens = 0
-                    break
-            elif source["priority"] <= 2:  # First document - keep significant portion
-                min_tokens = max(
-                    LectureService.MIN_TOKENS_PER_SOURCE,
-                    int(source_tokens * 0.5)  # Keep at least 50%
-                )
-                if available_tokens >= min_tokens:
-                    if available_tokens >= source_tokens:
-                        included_sources.append(source)
-                        available_tokens -= source_tokens
-                    else:
-                        # Truncate to available tokens
-                        truncated_text = LectureService._truncate_text_by_tokens(
-                            source["text"], available_tokens
-                        )
-                        source["text"] = truncated_text
-                        source["tokens"] = LectureService._estimate_tokens(truncated_text)
-                        included_sources.append(source)
-                        available_tokens = 0
-                        break
-                else:
-                    # Can't fit even minimum - skip or truncate heavily
-                    if available_tokens >= LectureService.MIN_TOKENS_PER_SOURCE:
-                        truncated_text = LectureService._truncate_text_by_tokens(
-                            source["text"], available_tokens
-                        )
-                        source["text"] = truncated_text
-                        source["tokens"] = LectureService._estimate_tokens(truncated_text)
-                        included_sources.append(source)
-                        available_tokens = 0
-                        break
-                    else:
-                        truncated_sources.append(source)
-            else:  # Lower priority - fit what we can
-                if available_tokens >= LectureService.MIN_TOKENS_PER_SOURCE:
-                    tokens_to_use = min(available_tokens, source_tokens)
-                    if tokens_to_use >= LectureService.MIN_TOKENS_PER_SOURCE:
-                        truncated_text = LectureService._truncate_text_by_tokens(
-                            source["text"], tokens_to_use
-                        )
-                        source["text"] = truncated_text
-                        source["tokens"] = LectureService._estimate_tokens(truncated_text)
-                        included_sources.append(source)
-                        available_tokens -= source["tokens"]
-                    else:
-                        truncated_sources.append(source)
                 else:
                     truncated_sources.append(source)
+                break
+        
+        # Step 2: Process priority 3 sources (other primary documents) with remaining tokens
+        for source in priority_3_sources:
+            source_tokens = source["tokens"]
+            if available_tokens >= source_tokens:
+                included_sources.append(source)
+                available_tokens -= source_tokens
+            elif available_tokens >= LectureService.MIN_TOKENS_PER_SOURCE:
+                truncated_text = LectureService._truncate_text_by_tokens(
+                    source["text"], available_tokens
+                )
+                source["text"] = truncated_text
+                source["tokens"] = LectureService._estimate_tokens(truncated_text)
+                included_sources.append(source)
+                available_tokens = 0
+                break
+            else:
+                truncated_sources.append(source)
+        
+        # Step 3: Process priority 4 sources (additional pieces) last - truncate aggressively
+        # These get whatever tokens are left after priority 1 and 3
+        for source in priority_4_sources:
+            if available_tokens > 0:
+                tokens_to_use = min(available_tokens, source["tokens"])
+                if tokens_to_use >= LectureService.MIN_TOKENS_PER_SOURCE:
+                    truncated_text = LectureService._truncate_text_by_tokens(
+                        source["text"], tokens_to_use
+                    )
+                    source["text"] = truncated_text
+                    source["tokens"] = LectureService._estimate_tokens(truncated_text)
+                    included_sources.append(source)
+                    available_tokens -= source["tokens"]
+                else:
+                    # Not enough tokens for minimum - skip this additional piece
+                    truncated_sources.append(source)
+            else:
+                # No tokens left - skip all remaining additional pieces
+                truncated_sources.append(source)
         
         # Combine included sources
         combined_parts = []
@@ -501,6 +505,8 @@ ADDITIONAL TRANSIENT SOURCES (NOT SAVED):
 
 The lecture should be written **as if the teacher is speaking to the class**, guiding students through concepts, examples, and explanations in a natural, instructive tone.
 
+**IMPORTANT: This lecture should be designed for approximately 45 minutes of delivery time.** The content should be substantial, detailed, and comprehensive enough to fill this duration when spoken at a natural teaching pace.
+
 ---
 
 **Title:** {title}
@@ -516,25 +522,34 @@ The lecture should be written **as if the teacher is speaking to the class**, gu
 
 ### Instructions for the Lecture Script:
 
-1. **Write in a teacher’s spoken voice** — the tone should be clear, conversational, and engaging, as though the teacher is explaining concepts live in class.  
-2. **Be descriptive and vivid** — elaborate on key points, provide context, and help students visualize or deeply understand the topic.  
+1. **Write in a teacher's spoken voice** — the tone should be clear, conversational, and engaging, as though the teacher is explaining concepts live in class.  
+2. **Be descriptive and vivid** — elaborate extensively on key points, provide rich context, and help students visualize or deeply understand the topic. **Expand on concepts with detailed explanations.**
 3. **Structure clearly**:
-   - Introduction (set learning objectives, connect with prior knowledge)
-   - Main Sections (each with explanations, transitions, and subtopics)
+   - Introduction (set learning objectives, connect with prior knowledge, provide context)
+   - Main Sections (each with detailed explanations, transitions, and subtopics)
    - Examples and Illustrations (real-world or conceptual where appropriate)
    - Summary / Conclusion (recap key ideas, ask reflective or guiding questions)
-4. **Align fully** with the teacher’s overview — reflect the intended focus, tone, and depth.
-5. **Integrate the source material naturally** — explain and expand on its content instead of simply restating it.  
-6. **Use educational techniques**:
-   - Analogies and storytelling to make abstract ideas concrete  
+4. **Align fully** with the teacher's overview — reflect the intended focus, tone, and depth.
+5. **Integrate the source material naturally** — explain and expand on its content instead of simply restating it. **Add substantial depth and elaboration.**
+6. **Use extensive educational techniques**:
+   - **Multiple analogies and examples** — For each major concept, provide 2-3 analogies or real-world examples to help students understand from different angles
+   - **Thinking and brainstorming activities** — Include 3-5 moments throughout the lecture where you pause and ask students to think, brainstorm, or reflect (e.g., "Take a moment to think about...", "Let's brainstorm together...", "Before I continue, consider this scenario...")
+   - **"Ask yourself" questions** — Include 5-8 unmarked, thought-provoking questions throughout the lecture (no answers provided, just food for thought). Format these as: "Ask yourself: [question]" or "Consider this: [question]"
    - Questions to prompt student thinking  
-   - Emphasis and pauses (use phrases like “Let’s think about this for a moment…” or “Now, this part is really important…”)
-7. Maintain **academic accuracy** and logical flow, but keep it accessible for students.
-8. The final output should be a **ready-to-deliver lecture script**, not just notes or bullet points.
+   - Emphasis and pauses (use phrases like "Let's think about this for a moment…" or "Now, this part is really important…")
+7. **Length and depth**: The lecture should be comprehensive enough to fill approximately 45 minutes when delivered. This means:
+   - Extensive elaboration on concepts
+   - Multiple examples and analogies for each major point
+   - Detailed explanations that go beyond surface-level coverage
+   - Rich context and background information
+   - Multiple thinking activities and reflection points
+8. **Minimum size requirement**: Produce **at least 20,500 words**. If the material runs short, expand with narratives, case studies, comparisons, and reflective prompts until the word count is met. Include `[Estimated duration: ~X minutes]` callouts at the start of each major section to reinforce pacing.
+9. Maintain **academic accuracy** and logical flow, but keep it accessible for students.
+10. The final output should be a **ready-to-deliver lecture script**, not just notes or bullet points. It should be detailed enough that a teacher can read it naturally and fill 45 minutes.
 
 ---
 
-Now, generate a **complete, engaging, teacher-style lecture script** that fulfills these requirements.
+Now, generate a **complete, comprehensive, and engaging teacher-style lecture script** that fulfills these requirements and is designed for approximately 45 minutes of delivery time.
 CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
 """
 
@@ -545,11 +560,12 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert educational content creator specializing in generating high-quality academic lectures.",
+                        "content": "You are an expert educational content creator specializing in generating high-quality academic lectures. You create comprehensive, detailed lectures designed for 45-minute delivery.",
                     },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
+                max_tokens=20000,  # Increased to allow for longer, more comprehensive lectures
             )
 
             generated_content = response.choices[0].message.content
@@ -1333,6 +1349,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 "download_url": download_url,
                 "file_name": file_name,
                 "file_size": file_size,
+                "lecture_content": duplicate_lecture.get("content"),
             }
 
             logger.info(
@@ -1353,7 +1370,11 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             )
 
     @staticmethod
-    def get_lecture_download_url(db, lecture_id: str, teacher_id: str) -> str:
+    def get_lecture_download_url(
+        db,
+        lecture_id: str,
+        teacher_id: str | None = None,
+    ) -> str:
         """
         Get download URL for a generated lecture PDF.
 
@@ -1376,8 +1397,8 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                     detail="Lecture not found",
                 )
 
-            # Verify lecture belongs to teacher
-            if lecture_data.get("teacher_id") != teacher_id:
+            # Verify lecture belongs to teacher if teacher_id is provided
+            if teacher_id is not None and lecture_data.get("teacher_id") != teacher_id:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Access denied to this lecture",

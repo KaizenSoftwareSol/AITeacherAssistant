@@ -68,6 +68,9 @@ async def get_teacher_courses(
     """
     Get all courses for the current teacher's university.
 
+    Returns courses with extended stats: description, curriculum_content, 
+    total_students, published_lectures, total_documents, created_at, updated_at.
+
     This endpoint is only accessible to teachers and admins.
     """
     try:
@@ -91,10 +94,58 @@ async def get_teacher_courses(
             limit=1000,
         )
 
+        # Enrich each course with aggregate stats
+        enriched_courses = []
+        for course in courses:
+            course_id = course.get("id")
+            
+            # Get total students (active enrollments)
+            enrollments_result = (
+                db.admin_client.table("enrollment")
+                .select("id", count="exact")
+                .eq("course_id", course_id)
+                .eq("is_active", True)
+                .execute()
+            )
+            total_students = enrollments_result.count or 0
+            
+            # Get published lectures count
+            lectures_result = (
+                db.admin_client.table("lecture")
+                .select("id", count="exact")
+                .eq("course_id", course_id)
+                .in_("status", ["PUBLISHED", "DELIVERED"])
+                .execute()
+            )
+            published_lectures = lectures_result.count or 0
+            
+            # Get total documents count (documents used in lectures for this course)
+            # Count unique documents from lectures
+            lecture_docs_result = (
+                db.admin_client.table("lecture")
+                .select("document_id")
+                .eq("course_id", course_id)
+                .not_.is_("document_id", "null")
+                .execute()
+            )
+            unique_doc_ids = set()
+            if lecture_docs_result.data:
+                unique_doc_ids = {lec.get("document_id") for lec in lecture_docs_result.data if lec.get("document_id")}
+            total_documents = len(unique_doc_ids)
+            
+            # Enrich course with stats
+            enriched_course = {
+                **course,
+                "total_students": total_students,
+                "published_lectures": published_lectures,
+                "total_documents": total_documents,
+            }
+            enriched_courses.append(enriched_course)
+
         logger.info(
-            f"Found {len(courses)} courses for university {teacher.university_id}"
+            f"Found {len(enriched_courses)} courses for university {teacher.university_id}"
         )
-        return courses
+        return enriched_courses
 
     except HTTPException:
         raise
@@ -219,6 +270,120 @@ async def create_course(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error while creating course",
         ) from e
+
+
+@router.get("/{course_id}", response_model=dict)
+async def get_course(
+    current_user: Annotated[User, Depends(require_teacher)],
+    course_id: str,
+    db=Depends(get_db),
+):
+    """
+    Get a specific course by ID with full details including semesters and aggregate stats.
+
+    Returns: curriculum_content (markdown), semesters[{id,name,start_date,end_date}], 
+    and aggregate stats (total_students, published_lectures, total_documents).
+
+    This endpoint is only accessible to teachers and admins.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching course {course_id}")
+
+        # Get course
+        course = db.get_record_by_id("course", course_id)
+        if not course:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found",
+            )
+
+        # Verify course belongs to teacher's university
+        if course.get("university_id") != teacher.university_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this course",
+            )
+
+        # Get semesters for this course
+        semesters_result = (
+            db.admin_client.table("semester")
+            .select("id, name, start_date, end_date, created_at, updated_at")
+            .eq("course_id", course_id)
+            .order("start_date", desc=True)
+            .execute()
+        )
+        
+        semesters = []
+        for sem in (semesters_result.data or []):
+            semesters.append({
+                "id": sem["id"],
+                "name": sem["name"],
+                "start_date": sem.get("start_date"),
+                "end_date": sem.get("end_date"),
+            })
+
+        # Get aggregate stats
+        # Total students (active enrollments)
+        enrollments_result = (
+            db.admin_client.table("enrollment")
+            .select("id", count="exact")
+            .eq("course_id", course_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        total_students = enrollments_result.count or 0
+
+        # Published lectures count
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("id", count="exact")
+            .eq("course_id", course_id)
+            .in_("status", ["PUBLISHED", "DELIVERED"])
+            .execute()
+        )
+        published_lectures = lectures_result.count or 0
+
+        # Total documents count (unique documents used in lectures)
+        lecture_docs_result = (
+            db.admin_client.table("lecture")
+            .select("document_id")
+            .eq("course_id", course_id)
+            .not_.is_("document_id", "null")
+            .execute()
+        )
+        unique_doc_ids = set()
+        if lecture_docs_result.data:
+            unique_doc_ids = {lec.get("document_id") for lec in lecture_docs_result.data if lec.get("document_id")}
+        total_documents = len(unique_doc_ids)
+
+        # Build response
+        response = {
+            **course,
+            "semesters": semesters,
+            "total_students": total_students,
+            "published_lectures": published_lectures,
+            "total_documents": total_documents,
+        }
+
+        logger.info(f"Found course {course_id} with {len(semesters)} semesters")
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching course: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while fetching course",
+        )
 
 
 @router.get("/{course_id}/semesters", response_model=list[dict])
@@ -432,6 +597,7 @@ async def get_course_enrollments(
     """
     Get list of students enrolled in a course.
     
+    Returns course_code and accurate total_students that matches students.length.
     Shows students who enrolled using the course code.
     """
     try:
@@ -482,10 +648,14 @@ async def get_course_enrollments(
                 "enrolled_at": enrollment["enrolled_at"],
             })
         
+        # Ensure total_students matches students.length
+        total_students = len(students)
+        
         return {
+            "course_id": course_id,
             "course_name": course["name"],
             "course_code": course["code"],
-            "total_students": len(students),
+            "total_students": total_students,
             "students": students,
         }
     
@@ -496,6 +666,113 @@ async def get_course_enrollments(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error fetching enrollments",
+        )
+
+
+@router.get("/{course_id}/lectures", response_model=list[dict])
+async def get_course_lectures(
+    current_user: Annotated[User, Depends(require_teacher)],
+    course_id: str,
+    status: str = None,
+    topic: str = None,
+    db=Depends(get_db),
+):
+    """
+    Get all lectures for a specific course.
+    
+    Returns: id, title, status, topic, lecture_number, created_at, 
+    has_embeddings, pdf_filename, pdf_size.
+    
+    Optional filters: ?status=, ?topic=
+    
+    This endpoint is only accessible to teachers and admins.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching lectures for course {course_id}")
+
+        # Verify course belongs to teacher's university
+        course_result = (
+            db.admin_client.table("course")
+            .select("id")
+            .eq("id", course_id)
+            .eq("university_id", teacher.university_id)
+            .execute()
+        )
+        
+        if not course_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found",
+            )
+
+        # Build query
+        query = (
+            db.admin_client.table("lecture")
+            .select("id, title, status, topic, lecture_number, created_at, has_embeddings")
+            .eq("course_id", course_id)
+        )
+        
+        # Apply filters
+        if status:
+            query = query.eq("status", status)
+        if topic:
+            query = query.eq("topic", topic)
+        
+        lectures_result = query.order("created_at", desc=True).execute()
+        
+        lectures = []
+        lecture_ids = [lec["id"] for lec in (lectures_result.data or [])]
+        
+        # Batch fetch PDF info from lecture_content
+        pdf_info_by_lecture = {}
+        if lecture_ids:
+            content_result = (
+                db.admin_client.table("lecture_content")
+                .select("lecture_id, file_name, file_size")
+                .in_("lecture_id", lecture_ids)
+                .execute()
+            )
+            for content in (content_result.data or []):
+                lid = content.get("lecture_id")
+                if lid and lid not in pdf_info_by_lecture:
+                    pdf_info_by_lecture[lid] = {
+                        "pdf_filename": content.get("file_name"),
+                        "pdf_size": content.get("file_size", 0),
+                    }
+        
+        # Build response
+        for lecture in (lectures_result.data or []):
+            pdf_info = pdf_info_by_lecture.get(lecture["id"], {})
+            lectures.append({
+                "id": lecture["id"],
+                "title": lecture["title"],
+                "status": lecture["status"],
+                "topic": lecture.get("topic"),
+                "lecture_number": lecture.get("lecture_number"),
+                "created_at": lecture["created_at"],
+                "has_embeddings": lecture.get("has_embeddings", False),
+                "pdf_filename": pdf_info.get("pdf_filename"),
+                "pdf_size": pdf_info.get("pdf_size", 0),
+            })
+
+        logger.info(f"Found {len(lectures)} lectures for course {course_id}")
+        return lectures
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching course lectures: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while fetching course lectures",
         )
 
 

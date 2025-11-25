@@ -175,6 +175,7 @@ class LectureDownloadResponse(SQLModel):
     file_name: str
     file_size: int
     created_at: str
+    lecture_content: Optional[str] = None
 
 
 class DuplicateLectureInfo(SQLModel):
@@ -189,6 +190,7 @@ class DuplicateLectureInfo(SQLModel):
     download_url: str
     file_name: str
     file_size: int
+    lecture_content: Optional[str] = None
 
 
 class DuplicateCheckRequest(SQLModel):
