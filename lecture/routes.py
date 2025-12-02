@@ -1,7 +1,9 @@
 # lecture/routes.py
 
+import json
 from datetime import datetime
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi import File, UploadFile, Form
@@ -14,12 +16,16 @@ from models.lecture import (
     LectureDownloadResponse,
     LectureGenerationRequest,
     LectureGenerationResponse,
+    LecturePlanGenerationResponse,
 )
 from models.user import User, UserRole
+from services.embedding_service import EmbeddingService
+from services.flashcard_service import FlashcardService
 from services.lecture_service import LectureService
+from services.quiz_service import QuizService
+from services.summary_service import SummaryService
 from supabase_config import supabase
 from utils.db import get_db
-import json
 
 router = APIRouter()
 
@@ -643,6 +649,67 @@ async def get_lecture_download_link(
         )
 
 
+@router.post(
+    "/{lecture_id}/generate-plan",
+    response_model=LecturePlanGenerationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_lecture_plan(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Generate a comprehensive teaching plan for an existing lecture.
+
+    This endpoint generates a detailed plan including:
+    - Activities and exercises
+    - Quiz questions with answers
+    - Discussion questions
+    - Time allocations per section
+    - Differentiation strategies for diverse learners
+    - Teaching notes and tips
+    - Homework suggestions
+    - Formative assessments
+
+    **IMPORTANT:** This endpoint should be called AFTER generating a lecture.
+    The lecture must have content before a plan can be generated.
+
+    If a plan already exists, it will be replaced with a newly generated one.
+
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Generating lecture plan for lecture {lecture_id}")
+
+        # Generate the lecture plan
+        result = await LectureService.generate_lecture_plan(
+            db=db,
+            lecture_id=lecture_id,
+            teacher_id=teacher.id,
+        )
+
+        logger.info(f"Lecture plan generated successfully for lecture {lecture_id}")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating lecture plan: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while generating lecture plan",
+        )
+
+
 @router.get(
     "/{lecture_id}/plan",
     status_code=status.HTTP_200_OK,
@@ -662,6 +729,8 @@ async def get_lecture_plan(
     - Time allocations
     - Differentiation strategies
     - Teaching notes and tips
+
+    **NOTE:** The plan must be generated first using POST /{lecture_id}/generate-plan
 
     Only accessible to the teacher who created the lecture.
     """
@@ -812,6 +881,371 @@ async def get_teacher_lectures(
         )
 
 
+@router.post(
+    "/{lecture_id}/generate-summary",
+    status_code=status.HTTP_200_OK,
+)
+async def generate_lecture_summary(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Generate a summary for a lecture.
+    
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Generating summary for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Generate summary
+        summary_service = SummaryService()
+        summary = await summary_service.generate_lecture_summary(
+            lecture_data.get("content", "")
+        )
+        db.update_record("lecture", lecture_id, {"summary": summary})
+        
+        logger.info(f"Summary generated for lecture {lecture_id}")
+
+        return {
+            "message": "Summary generated successfully",
+            "lecture_id": lecture_id,
+            "summary": summary,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating summary for lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while generating summary",
+        )
+
+
+@router.post(
+    "/{lecture_id}/generate-quiz",
+    status_code=status.HTTP_200_OK,
+)
+async def generate_lecture_quiz(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Generate a default quiz for a lecture.
+    
+    Creates a 10-question multiple choice quiz. If a default quiz already exists,
+    it will be replaced.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Generating quiz for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Check if default quiz already exists and delete it
+        existing_quiz = db.get_records(
+            "assessment", {"lecture_id": lecture_id, "is_default": True}
+        )
+        
+        if existing_quiz:
+            # Delete existing questions first
+            for quiz in existing_quiz:
+                questions = db.get_records("question", {"assessment_id": quiz["id"]})
+                for question in questions:
+                    db.delete_record("question", question["id"])
+                # Delete the assessment
+                db.delete_record("assessment", quiz["id"])
+                logger.info(f"Deleted existing default quiz {quiz['id']}")
+
+        # Generate quiz
+        quiz_service = QuizService(db)
+        quiz_data = await quiz_service.generate_quiz_from_lecture(
+            lecture_id=lecture_id,
+            lecture_content=lecture_data.get("content", ""),
+            num_questions=10,
+            question_types=["MULTIPLE_CHOICE"],
+            difficulty="MEDIUM",
+            focus_areas=None,
+        )
+
+        # Create default assessment
+        assessment_id = str(uuid4())
+        assessment_data = {
+            "id": assessment_id,
+            "title": f"Quiz: {lecture_data.get('title')}",
+            "description": f"Default quiz for {lecture_data.get('title')}",
+            "assessment_type": "QUIZ",
+            "course_id": lecture_data.get("course_id"),
+            "lecture_id": lecture_id,
+            "teacher_id": teacher.id,
+            "time_limit": 30,
+            "max_attempts": 3,
+            "passing_score": 60.0,
+            "is_published": True,
+            "is_default": True,  # Mark as default quiz
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        db.admin_client.table("assessment").insert(assessment_data).execute()
+
+        # Create question records
+        questions_data = []
+        for idx, question in enumerate(quiz_data["questions"]):
+            question_id = str(uuid4())
+            question_data = {
+                "id": question_id,
+                "assessment_id": assessment_id,
+                "question_text": question["question_text"],
+                "question_type": question["question_type"],
+                "points": question.get("points", 1.0),
+                "order_index": idx,
+                "options": json.dumps(question.get("options", [])),
+                "correct_answer": question["correct_answer"],
+                "explanation": question.get("explanation"),
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            questions_data.append(question_data)
+
+        db.admin_client.table("question").insert(questions_data).execute()
+        logger.info(
+            f"Default quiz {assessment_id} created with {len(questions_data)} questions"
+        )
+
+        return {
+            "message": "Quiz generated successfully",
+            "lecture_id": lecture_id,
+            "assessment_id": assessment_id,
+            "num_questions": len(questions_data),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating quiz for lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while generating quiz",
+        )
+
+
+@router.post(
+    "/{lecture_id}/generate-flashcards",
+    status_code=status.HTTP_200_OK,
+)
+async def generate_lecture_flashcards(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Generate flashcards for a lecture.
+    
+    Creates 15 flashcards with mixed difficulty. If flashcards already exist,
+    they will be replaced.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Generating flashcards for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Check if flashcards already exist and delete them
+        existing_flashcards = db.get_records("flashcard", {"lecture_id": lecture_id})
+        if existing_flashcards:
+            for flashcard in existing_flashcards:
+                db.delete_record("flashcard", flashcard["id"])
+            logger.info(f"Deleted {len(existing_flashcards)} existing flashcards")
+
+        # Generate flashcards
+        flashcard_service = FlashcardService(db)
+        flashcards = await flashcard_service.generate_flashcards_from_lecture(
+            lecture_content=lecture_data.get("content", ""),
+            num_cards=15,
+            difficulty_mix=True
+        )
+        
+        # Save flashcards to database
+        flashcards_data = []
+        for idx, card in enumerate(flashcards):
+            flashcard_record = {
+                "id": str(uuid4()),
+                "lecture_id": lecture_id,
+                "question": card["question"],
+                "answer": card["answer"],
+                "order_index": idx,
+                "difficulty": card.get("difficulty", "MEDIUM"),
+                "topic": card.get("topic", "General"),
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            flashcards_data.append(flashcard_record)
+        
+        if flashcards_data:
+            db.admin_client.table("flashcard").insert(flashcards_data).execute()
+            logger.info(f"Created {len(flashcards_data)} flashcards for lecture {lecture_id}")
+
+        return {
+            "message": "Flashcards generated successfully",
+            "lecture_id": lecture_id,
+            "num_flashcards": len(flashcards_data),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating flashcards for lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while generating flashcards",
+        )
+
+
+@router.post(
+    "/{lecture_id}/generate-embeddings",
+    status_code=status.HTTP_200_OK,
+)
+async def generate_lecture_embeddings(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Generate embeddings for a lecture to enable RAG-based chatbot.
+    
+    Creates chunks and embeddings from the lecture content. If embeddings already exist,
+    they will be replaced.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Generating embeddings for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Check if embeddings already exist and delete them
+        if lecture_data.get("has_embeddings"):
+            embedding_service = EmbeddingService(db)
+            await embedding_service.delete_lecture_embeddings(lecture_id)
+            logger.info(f"Deleted existing embeddings for lecture {lecture_id}")
+
+        # Generate embeddings
+        embedding_service = EmbeddingService(db)
+        result = await embedding_service.generate_embeddings_for_lecture(
+            lecture_id=lecture_id,
+            lecture_content=lecture_data.get("content", "")
+        )
+
+        logger.info(
+            f"Generated {result['chunks_created']} chunks and "
+            f"{result['embeddings_created']} embeddings for lecture {lecture_id}"
+        )
+
+        return {
+            "message": "Embeddings generated successfully",
+            "lecture_id": lecture_id,
+            "chunks_created": result["chunks_created"],
+            "embeddings_created": result["embeddings_created"],
+            "has_embeddings": True,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating embeddings for lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while generating embeddings",
+        )
+
+
 @router.patch(
     "/{lecture_id}/publish",
     status_code=status.HTTP_200_OK,
@@ -826,6 +1260,12 @@ async def publish_lecture(
 
     Published lectures become visible to students enrolled in the course.
     Only accessible to the teacher who created the lecture.
+    
+    Note: This endpoint only changes the status. To generate content, use the separate endpoints:
+    - POST /{lecture_id}/generate-summary
+    - POST /{lecture_id}/generate-quiz
+    - POST /{lecture_id}/generate-flashcards
+    - POST /{lecture_id}/generate-embeddings (for RAG chatbot)
     """
     try:
         # Get teacher profile
@@ -858,128 +1298,11 @@ async def publish_lecture(
 
         logger.info(f"Successfully published lecture {lecture_id}")
 
-        # Auto-generate summary and basic quiz in background
-        try:
-            import json
-            from uuid import uuid4
-
-            from services.quiz_service import QuizService
-            from services.summary_service import SummaryService
-
-            # Generate summary if not exists
-            if not lecture_data.get("summary"):
-                logger.info(f"Auto-generating summary for lecture {lecture_id}")
-                summary_service = SummaryService()
-                summary = await summary_service.generate_lecture_summary(
-                    lecture_data.get("content", "")
-                )
-                db.update_record("lecture", lecture_id, {"summary": summary})
-                logger.info(f"Summary generated for lecture {lecture_id}")
-
-            # Check if default quiz already exists
-            existing_quiz = db.get_records(
-                "assessment", {"lecture_id": lecture_id, "is_default": True}
-            )
-
-            if not existing_quiz:
-                logger.info(f"Auto-generating default quiz for lecture {lecture_id}")
-                quiz_service = QuizService(db)
-                quiz_data = await quiz_service.generate_quiz_from_lecture(
-                    lecture_id=lecture_id,
-                    lecture_content=lecture_data.get("content", ""),
-                    num_questions=10,
-                    question_types=["MULTIPLE_CHOICE"],
-                    difficulty="MEDIUM",
-                    focus_areas=None,
-                )
-
-                # Create default assessment
-                assessment_id = str(uuid4())
-                assessment_data = {
-                    "id": assessment_id,
-                    "title": f"Quiz: {lecture_data.get('title')}",
-                    "description": f"Default quiz for {lecture_data.get('title')}",
-                    "assessment_type": "QUIZ",
-                    "course_id": lecture_data.get("course_id"),
-                    "lecture_id": lecture_id,
-                    "teacher_id": teacher.id,
-                    "time_limit": 30,
-                    "max_attempts": 3,
-                    "passing_score": 60.0,
-                    "is_published": True,
-                    "is_default": True,  # Mark as default quiz
-                    "created_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-                db.admin_client.table("assessment").insert(assessment_data).execute()
-
-                # Create question records
-                questions_data = []
-                for idx, question in enumerate(quiz_data["questions"]):
-                    question_id = str(uuid4())
-                    question_data = {
-                        "id": question_id,
-                        "assessment_id": assessment_id,
-                        "question_text": question["question_text"],
-                        "question_type": question["question_type"],
-                        "points": question.get("points", 1.0),
-                        "order_index": idx,
-                        "options": json.dumps(question.get("options", [])),
-                        "correct_answer": question["correct_answer"],
-                        "explanation": question.get("explanation"),
-                        "created_at": datetime.utcnow().isoformat(),
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                    questions_data.append(question_data)
-
-                db.admin_client.table("question").insert(questions_data).execute()
-                logger.info(
-                    f"Default quiz {assessment_id} created with {len(questions_data)} questions"
-                )
-            
-            # Generate flashcards
-            logger.info(f"Auto-generating flashcards for lecture {lecture_id}")
-            from services.flashcard_service import FlashcardService
-            
-            flashcard_service = FlashcardService(db)
-            flashcards = await flashcard_service.generate_flashcards_from_lecture(
-                lecture_content=lecture_data.get("content", ""),
-                num_cards=15,
-                difficulty_mix=True
-            )
-            
-            # Save flashcards to database
-            flashcards_data = []
-            for idx, card in enumerate(flashcards):
-                flashcard_record = {
-                    "id": str(uuid4()),
-                    "lecture_id": lecture_id,
-                    "question": card["question"],
-                    "answer": card["answer"],
-                    "order_index": idx,
-                    "difficulty": card.get("difficulty", "MEDIUM"),
-                    "topic": card.get("topic", "General"),
-                    "created_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-                flashcards_data.append(flashcard_record)
-            
-            if flashcards_data:
-                db.admin_client.table("flashcard").insert(flashcards_data).execute()
-                logger.info(f"Created {len(flashcards_data)} flashcards for lecture {lecture_id}")
-
-        except Exception as e:
-            logger.warning(
-                f"Failed to auto-generate summary/quiz/flashcards for lecture {lecture_id}: {str(e)}"
-            )
-            # Don't fail the publish operation if generation fails
-
         return {
             "message": "Lecture published successfully",
             "lecture_id": lecture_id,
             "status": "PUBLISHED",
             "title": lecture_data.get("title"),
-            "auto_generated": "Summary and quiz generation started",
         }
 
     except HTTPException:

@@ -24,3 +24,4 @@ openai
 pgvector
 reportlab==4.0.9
 pydantic[email]
+python-dotenv

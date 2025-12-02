@@ -501,7 +501,20 @@ ADDITIONAL TRANSIENT SOURCES (NOT SAVED):
 """
 
             # Create prompt for lecture generation
-            prompt = f"""You are an expert educational content creator and lecturer. Generate a **comprehensive, engaging, and descriptive lecture script** based on the provided source material and teacher's overview.
+            # Build learning outcomes instruction if provided
+            learning_outcomes_instruction = ""
+            if learning_outcomes:
+                learning_outcomes_instruction = f"""
+**CRITICAL - LEARNING OUTCOMES (HIGHEST PRIORITY):**
+The lecture MUST be structured to achieve these specific learning outcomes. Every section of the lecture should directly contribute to helping students achieve these outcomes:
+{learning_outcomes}
+
+Ensure that by the end of the lecture, students will have acquired the knowledge and skills specified in these learning outcomes.
+"""
+
+            prompt = f"""You are an expert educational content creator and lecturer. Generate a **comprehensive, engaging, and descriptive lecture script** based **PRIMARILY on the SOURCE MATERIAL provided below**.
+
+**CRITICAL INSTRUCTION: The lecture content MUST be derived from and based on the SOURCE MATERIAL and ADDITIONAL SOURCES provided. Do NOT generate generic content based solely on the title or description. Extract, explain, and elaborate on the actual concepts, facts, theories, and information present in the source material.**
 
 The lecture should be written **as if the teacher is speaking to the class**, guiding students through concepts, examples, and explanations in a natural, instructive tone.
 
@@ -509,63 +522,77 @@ The lecture should be written **as if the teacher is speaking to the class**, gu
 
 ---
 
-**Title:** {title}
+## PRIMARY SOURCE MATERIAL (BASE YOUR LECTURE ON THIS):
+========================================
+{source_text}
+========================================
+{additional_sources_section}
+{learning_outcomes_instruction}
+**Lecture Title:** {title}
 
-**Teacher's Description / Overview:**
+**Teacher's Guidance/Context:**
 {description}
 {learning_outcomes_section}
-**Source Material:**
-{source_text}
-{additional_sources_section}
 
 ---
 
 ### Instructions for the Lecture Script:
 
+**CONTENT PRIORITY (Follow this order):**
+1. **SOURCE MATERIAL IS PRIMARY** — The lecture content MUST be extracted from and based on the source material provided above. Cover the key concepts, theories, facts, and examples found in the source material.
+2. **LEARNING OUTCOMES ARE MANDATORY** — If learning outcomes are provided, structure the entire lecture to ensure students achieve those specific outcomes. Every section should contribute to at least one learning outcome.
+3. **ADDITIONAL SOURCES SUPPLEMENT** — Use any additional sources to enrich and expand on the primary source material.
+4. **Teacher's description provides CONTEXT ONLY** — Use the description to understand the tone, focus areas, and depth expected, but do NOT generate content from the description alone.
+
+**STYLE AND DELIVERY:**
 1. **Write in a teacher's spoken voice** — the tone should be clear, conversational, and engaging, as though the teacher is explaining concepts live in class.  
-2. **Be descriptive and vivid** — elaborate extensively on key points, provide rich context, and help students visualize or deeply understand the topic. **Expand on concepts with detailed explanations.**
+2. **Be descriptive and vivid** — elaborate extensively on key points from the source material, provide rich context, and help students visualize or deeply understand the topic. **Expand on concepts with detailed explanations.**
 3. **Structure clearly**:
-   - Introduction (set learning objectives, connect with prior knowledge, provide context)
-   - Main Sections (each with detailed explanations, transitions, and subtopics)
-   - Examples and Illustrations (real-world or conceptual where appropriate)
-   - Summary / Conclusion (recap key ideas, ask reflective or guiding questions)
-4. **Align fully** with the teacher's overview — reflect the intended focus, tone, and depth.
-5. **Integrate the source material naturally** — explain and expand on its content instead of simply restating it. **Add substantial depth and elaboration.**
-6. **Use extensive educational techniques**:
-   - **Multiple analogies and examples** — For each major concept, provide 2-3 analogies or real-world examples to help students understand from different angles
+   - Introduction (set learning objectives based on provided outcomes, connect with prior knowledge, provide context)
+   - Main Sections (each covering specific topics FROM THE SOURCE MATERIAL with detailed explanations, transitions, and subtopics)
+   - Examples and Illustrations (use examples from the source material AND add real-world applications)
+   - Summary / Conclusion (recap key ideas from the source material, verify learning outcomes are addressed)
+4. **Integrate the source material naturally** — explain and expand on its content instead of simply restating it. **Add substantial depth and elaboration while staying true to the source.**
+5. **Use extensive educational techniques**:
+   - **Multiple analogies and examples** — For each major concept FROM THE SOURCE, provide 2-3 analogies or real-world examples to help students understand from different angles
    - **Thinking and brainstorming activities** — Include 3-5 moments throughout the lecture where you pause and ask students to think, brainstorm, or reflect (e.g., "Take a moment to think about...", "Let's brainstorm together...", "Before I continue, consider this scenario...")
    - **"Ask yourself" questions** — Include 5-8 unmarked, thought-provoking questions throughout the lecture (no answers provided, just food for thought). Format these as: "Ask yourself: [question]" or "Consider this: [question]"
    - Questions to prompt student thinking  
    - Emphasis and pauses (use phrases like "Let's think about this for a moment…" or "Now, this part is really important…")
-7. **Length and depth**: The lecture should be comprehensive enough to fill approximately 45 minutes when delivered. This means:
-   - Extensive elaboration on concepts
+6. **Length and depth**: The lecture should be comprehensive enough to fill approximately 45 minutes when delivered. This means:
+   - Extensive elaboration on concepts FROM THE SOURCE MATERIAL
    - Multiple examples and analogies for each major point
    - Detailed explanations that go beyond surface-level coverage
    - Rich context and background information
    - Multiple thinking activities and reflection points
-8. **Minimum size requirement**: Produce **at least 20,500 words**. If the material runs short, expand with narratives, case studies, comparisons, and reflective prompts until the word count is met. Include `[Estimated duration: ~X minutes]` callouts at the start of each major section to reinforce pacing.
-9. Maintain **academic accuracy** and logical flow, but keep it accessible for students.
-10. The final output should be a **ready-to-deliver lecture script**, not just notes or bullet points. It should be detailed enough that a teacher can read it naturally and fill 45 minutes.
+7. **Minimum size requirement**: Produce **at least 20,500 words**. If the source material is limited, expand with narratives, case studies, comparisons, and reflective prompts that relate to the source content until the word count is met. Include `[Estimated duration: ~X minutes]` callouts at the start of each major section to reinforce pacing.
+8. Maintain **academic accuracy** and logical flow, but keep it accessible for students.
+9. The final output should be a **ready-to-deliver lecture script**, not just notes or bullet points. It should be detailed enough that a teacher can read it naturally and fill 45 minutes.
+10. **VERIFY LEARNING OUTCOMES**: Before concluding, mentally check that each learning outcome (if provided) has been adequately addressed in the lecture content.
 
 ---
 
-Now, generate a **complete, comprehensive, and engaging teacher-style lecture script** that fulfills these requirements and is designed for approximately 45 minutes of delivery time.
-CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
+Now, generate a **complete, comprehensive, and engaging teacher-style lecture script** that:
+- Is BASED ON THE SOURCE MATERIAL PROVIDED
+- Achieves all LEARNING OUTCOMES (if provided)
+- Is designed for approximately 45 minutes of delivery time
+
+CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
 """
 
             # Call OpenAI API
             client = LectureService.get_openai_client()
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5-mini",  # Using gpt-5-mini for lecture generation
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert educational content creator specializing in generating high-quality academic lectures. You create comprehensive, detailed lectures designed for 45-minute delivery.",
+                        "content": "You are an expert educational content creator specializing in generating high-quality academic lectures. You create comprehensive, detailed lectures designed for 45-minute delivery. IMPORTANT: Base your lecture content PRIMARILY on the source material provided, NOT on generic knowledge about the topic. If learning outcomes are provided, ensure the lecture achieves all of them.",
                     },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
-                max_tokens=20000,  # Increased to allow for longer, more comprehensive lectures
+                max_tokens=16384,  # Increased to allow for longer, more comprehensive lectures
             )
 
             generated_content = response.choices[0].message.content
@@ -1103,28 +1130,9 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
                 pdf_filename,
             )
 
-            # 8. Generate lecture plan for teacher (activities, quizzes, etc.)
+            # 8. Lecture plan is now generated separately via POST /{lecture_id}/generate-plan endpoint
+            # This allows frontend to call lecture generation and plan generation independently
             lecture_plan = None
-            try:
-                from services.lecture_planning_service import (
-                    LecturePlanningService,
-                )
-
-                logger.info("Generating lecture plan for teacher...")
-                plan_data = await LecturePlanningService.generate_lecture_plan(
-                    lecture_content=generated_content,
-                    lecture_title=lecture_title,
-                    lecture_description=lecture_description,
-                    learning_outcomes=learning_outcomes,
-                )
-                lecture_plan = json.dumps(plan_data)
-                logger.info("Lecture plan generated successfully")
-            except Exception as plan_error:
-                logger.warning(
-                    f"Failed to generate lecture plan: {str(plan_error)}"
-                )
-                # Don't fail the entire generation if planning fails
-                lecture_plan = None
 
             # 9. Calculate lecture number if topic is provided
             lecture_number = None
@@ -1434,4 +1442,92 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get download URL: {str(e)}",
+            )
+
+    @staticmethod
+    async def generate_lecture_plan(
+        db,
+        lecture_id: str,
+        teacher_id: str,
+    ) -> dict:
+        """
+        Generate a comprehensive teaching plan for an existing lecture.
+        
+        This method generates a detailed plan including activities, quizzes,
+        discussion questions, time allocations, and pedagogical strategies.
+        
+        Args:
+            db: Database instance
+            lecture_id: ID of the lecture
+            teacher_id: Teacher ID (for authorization)
+            
+        Returns:
+            Dictionary with lecture plan data
+        """
+        try:
+            logger.info(f"Generating lecture plan for lecture: {lecture_id}")
+
+            # 1. Fetch lecture record
+            lecture_data = db.get_record_by_id("lecture", lecture_id)
+            if not lecture_data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+
+            # 2. Verify lecture belongs to teacher
+            if lecture_data.get("teacher_id") != teacher_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this lecture",
+                )
+
+            # 3. Get lecture content
+            lecture_content = lecture_data.get("content")
+            if not lecture_content:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Lecture has no content. Please generate the lecture first.",
+                )
+
+            # 4. Generate the lecture plan using LecturePlanningService
+            from services.lecture_planning_service import LecturePlanningService
+
+            logger.info(f"Calling LecturePlanningService for lecture: {lecture_data.get('title')}")
+            
+            plan_data = await LecturePlanningService.generate_lecture_plan(
+                lecture_content=lecture_content,
+                lecture_title=lecture_data.get("title", "Untitled"),
+                lecture_description=lecture_data.get("description"),
+                learning_outcomes=lecture_data.get("learning_outcomes"),
+            )
+
+            # 5. Save the plan to the lecture record
+            lecture_plan_json = json.dumps(plan_data)
+            db.update_record(
+                "lecture",
+                lecture_id,
+                {
+                    "lecture_plan": lecture_plan_json,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            )
+
+            logger.info(f"✅ Lecture plan generated and saved for lecture: {lecture_id}")
+
+            return {
+                "lecture_id": lecture_id,
+                "lecture_title": lecture_data.get("title"),
+                "plan": plan_data,
+                "message": "Lecture plan generated successfully",
+                "created_at": datetime.utcnow().isoformat(),
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error generating lecture plan: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate lecture plan: {str(e)}",
             )

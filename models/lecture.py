@@ -211,3 +211,13 @@ class DuplicateCheckResponse(SQLModel):
     has_duplicate: bool
     duplicate_lecture: Optional[DuplicateLectureInfo] = None
     message: str
+
+
+class LecturePlanGenerationResponse(SQLModel):
+    """Response model for lecture plan generation."""
+
+    lecture_id: str
+    lecture_title: str
+    plan: dict  # The comprehensive teaching plan
+    message: str
+    created_at: str
