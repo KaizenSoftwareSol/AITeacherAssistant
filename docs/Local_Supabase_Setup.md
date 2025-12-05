@@ -169,16 +169,18 @@ pg_dump "postgresql://postgres:<PASSWORD>@db.<PROJECT>.supabase.co:5432/postgres
 
 ```powershell
 pg_dump "postgresql://postgres:<PASSWORD>@db.<PROJECT>.supabase.co:5432/postgres" --data-only --schema=public --no-owner --no-acl -f public_data_backup.sql
+
+pg_dump "postgresql://postgres:Kaizen%402025@db.idandiasdvntminjmnml.supabase.co:5432/postgres" --data-only --schema=public --no-owner --no-acl -f public_data_backup.sql
 ```
 
 ### Step 4: Import to Local
 
 ```powershell
 # Import schema (expect some errors for system schemas - that's OK!)
-psql "postgresql://postgres:postgres@127.0.0.1:54422/postgres" -f schema_backup.sql
+psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -f schema_backup.sql
 
 # Import your data
-psql "postgresql://postgres:postgres@127.0.0.1:54422/postgres" -f public_data_backup.sql
+psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -f data_backup.sql
 ```
 
 > **Expected Errors:** You'll see errors like "schema 'auth' already exists" or "permission denied for schema storage". These are **normal** - local Supabase already has system schemas. Your `public` tables are what matters.
