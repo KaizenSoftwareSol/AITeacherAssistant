@@ -11,9 +11,12 @@ CONSOLIDATED ENDPOINTS (reduce API calls):
 """
 
 import json
-from typing import Annotated, Optional
+from datetime import datetime
+from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
 from dependencies import require_teacher
 from logger import logger
@@ -1275,7 +1278,7 @@ async def get_lecture_resources(
 async def get_course_lectures_for_teacher(
     current_user: Annotated[User, Depends(require_teacher)],
     course_id: str,
-    status_filter: Optional[str] = None,
+    status_filter: str | None = None,
     db=Depends(get_db),
 ):
     """
@@ -1457,6 +1460,587 @@ async def get_course_quizzes(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error fetching course quizzes",
+        )
+
+
+# ==================== QUIZ MODIFICATION ENDPOINTS ====================
+
+
+class QuestionUpdateRequest(BaseModel):
+    """Request model for updating a quiz question."""
+    question_text: str | None = None
+    question_type: str | None = None
+    points: float | None = None
+    options: list[str] | None = None
+    correct_answer: str | None = None
+    explanation: str | None = None
+
+
+class QuestionCreateRequest(BaseModel):
+    """Request model for creating a new quiz question."""
+    question_text: str
+    question_type: str = "MULTIPLE_CHOICE"
+    points: float = 1.0
+    options: list[str]
+    correct_answer: str
+    explanation: str | None = None
+
+
+@router.put("/lectures/{lecture_id}/quiz/questions/{question_id}")
+async def update_quiz_question(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    question_id: str,
+    request: QuestionUpdateRequest,
+    db=Depends(get_db),
+):
+    """
+    Update a quiz question for a lecture.
+    
+    Teachers can modify question text, options, correct answer, explanation, and points.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Updating question {question_id} for lecture {lecture_id}, teacher {teacher.id}")
+
+        # Verify lecture ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, teacher_id")
+            .eq("id", lecture_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        # Get the question and verify it belongs to an assessment for this lecture
+        question_result = (
+            db.admin_client.table("question")
+            .select("*, assessment!inner(lecture_id)")
+            .eq("id", question_id)
+            .execute()
+        )
+
+        if not question_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Question not found",
+            )
+
+        question = question_result.data[0]
+        if question.get("assessment", {}).get("lecture_id") != lecture_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Question does not belong to this lecture",
+            )
+
+        # Build update data
+        update_data = {"updated_at": datetime.utcnow().isoformat()}
+        
+        if request.question_text is not None:
+            update_data["question_text"] = request.question_text
+        if request.question_type is not None:
+            update_data["question_type"] = request.question_type
+        if request.points is not None:
+            update_data["points"] = request.points
+        if request.options is not None:
+            update_data["options"] = json.dumps(request.options)
+        if request.correct_answer is not None:
+            update_data["correct_answer"] = request.correct_answer
+        if request.explanation is not None:
+            update_data["explanation"] = request.explanation
+
+        # Update the question
+        db.admin_client.table("question").update(update_data).eq("id", question_id).execute()
+
+        logger.info(f"Updated question {question_id}")
+
+        return {
+            "message": "Question updated successfully",
+            "question_id": question_id,
+            "updated_fields": list(update_data.keys()),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating question: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating question",
+        )
+
+
+@router.post("/lectures/{lecture_id}/quiz/questions")
+async def add_quiz_question(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    request: QuestionCreateRequest,
+    db=Depends(get_db),
+):
+    """
+    Add a new question to a lecture's quiz.
+    
+    Creates a new question and appends it to the default quiz for this lecture.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Adding question to quiz for lecture {lecture_id}, teacher {teacher.id}")
+
+        # Verify lecture ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, teacher_id, title")
+            .eq("id", lecture_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        # Get the default assessment for this lecture
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("id")
+            .eq("lecture_id", lecture_id)
+            .eq("is_default", True)
+            .execute()
+        )
+
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No quiz found for this lecture. Generate a quiz first.",
+            )
+
+        assessment_id = assessment_result.data[0]["id"]
+
+        # Get current max order_index
+        questions_result = (
+            db.admin_client.table("question")
+            .select("order_index")
+            .eq("assessment_id", assessment_id)
+            .order("order_index", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        next_order = 0
+        if questions_result.data:
+            next_order = (questions_result.data[0].get("order_index", 0) or 0) + 1
+
+        # Create new question
+        question_id = str(uuid4())
+        question_data = {
+            "id": question_id,
+            "assessment_id": assessment_id,
+            "question_text": request.question_text,
+            "question_type": request.question_type,
+            "points": request.points,
+            "order_index": next_order,
+            "options": json.dumps(request.options),
+            "correct_answer": request.correct_answer,
+            "explanation": request.explanation,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        db.admin_client.table("question").insert(question_data).execute()
+
+        logger.info(f"Created question {question_id} for assessment {assessment_id}")
+
+        return {
+            "message": "Question added successfully",
+            "question_id": question_id,
+            "assessment_id": assessment_id,
+            "order_index": next_order,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding question: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error adding question",
+        )
+
+
+@router.delete("/lectures/{lecture_id}/quiz/questions/{question_id}")
+async def delete_quiz_question(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    question_id: str,
+    db=Depends(get_db),
+):
+    """
+    Delete a question from a lecture's quiz.
+    
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Deleting question {question_id} from lecture {lecture_id}, teacher {teacher.id}")
+
+        # Verify lecture ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, teacher_id")
+            .eq("id", lecture_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        # Get the question and verify it belongs to an assessment for this lecture
+        question_result = (
+            db.admin_client.table("question")
+            .select("*, assessment!inner(lecture_id)")
+            .eq("id", question_id)
+            .execute()
+        )
+
+        if not question_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Question not found",
+            )
+
+        question = question_result.data[0]
+        if question.get("assessment", {}).get("lecture_id") != lecture_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Question does not belong to this lecture",
+            )
+
+        # Delete the question
+        db.admin_client.table("question").delete().eq("id", question_id).execute()
+
+        logger.info(f"Deleted question {question_id}")
+
+        return {
+            "message": "Question deleted successfully",
+            "question_id": question_id,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting question: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error deleting question",
+        )
+
+
+# ==================== FLASHCARD MODIFICATION ENDPOINTS ====================
+
+
+class FlashcardUpdateRequest(BaseModel):
+    """Request model for updating a flashcard."""
+    question: str | None = None
+    answer: str | None = None
+    difficulty: str | None = None
+    topic: str | None = None
+
+
+class FlashcardCreateRequest(BaseModel):
+    """Request model for creating a new flashcard."""
+    question: str
+    answer: str
+    difficulty: str = "MEDIUM"
+    topic: str | None = "General"
+
+
+@router.put("/lectures/{lecture_id}/flashcards/{flashcard_id}")
+async def update_flashcard(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    flashcard_id: str,
+    request: FlashcardUpdateRequest,
+    db=Depends(get_db),
+):
+    """
+    Update a flashcard for a lecture.
+    
+    Teachers can modify the question, answer, difficulty, and topic.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Updating flashcard {flashcard_id} for lecture {lecture_id}, teacher {teacher.id}")
+
+        # Verify lecture ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, teacher_id")
+            .eq("id", lecture_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        # Get the flashcard and verify it belongs to this lecture
+        flashcard_result = (
+            db.admin_client.table("flashcard")
+            .select("*")
+            .eq("id", flashcard_id)
+            .eq("lecture_id", lecture_id)
+            .execute()
+        )
+
+        if not flashcard_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Flashcard not found or does not belong to this lecture",
+            )
+
+        # Build update data
+        update_data = {"updated_at": datetime.utcnow().isoformat()}
+        
+        if request.question is not None:
+            update_data["question"] = request.question
+        if request.answer is not None:
+            update_data["answer"] = request.answer
+        if request.difficulty is not None:
+            # Validate difficulty
+            if request.difficulty not in ["EASY", "MEDIUM", "HARD"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Difficulty must be EASY, MEDIUM, or HARD",
+                )
+            update_data["difficulty"] = request.difficulty
+        if request.topic is not None:
+            update_data["topic"] = request.topic
+
+        # Update the flashcard
+        db.admin_client.table("flashcard").update(update_data).eq("id", flashcard_id).execute()
+
+        logger.info(f"Updated flashcard {flashcard_id}")
+
+        return {
+            "message": "Flashcard updated successfully",
+            "flashcard_id": flashcard_id,
+            "updated_fields": list(update_data.keys()),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating flashcard: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating flashcard",
+        )
+
+
+@router.post("/lectures/{lecture_id}/flashcards")
+async def add_flashcard(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    request: FlashcardCreateRequest,
+    db=Depends(get_db),
+):
+    """
+    Add a new flashcard to a lecture.
+    
+    Creates a new flashcard and appends it to the lecture's flashcard set.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Adding flashcard to lecture {lecture_id}, teacher {teacher.id}")
+
+        # Verify lecture ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, teacher_id")
+            .eq("id", lecture_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        # Validate difficulty
+        if request.difficulty not in ["EASY", "MEDIUM", "HARD"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Difficulty must be EASY, MEDIUM, or HARD",
+            )
+
+        # Get current max order_index
+        flashcards_result = (
+            db.admin_client.table("flashcard")
+            .select("order_index")
+            .eq("lecture_id", lecture_id)
+            .order("order_index", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        next_order = 0
+        if flashcards_result.data:
+            next_order = (flashcards_result.data[0].get("order_index", 0) or 0) + 1
+
+        # Create new flashcard
+        flashcard_id = str(uuid4())
+        flashcard_data = {
+            "id": flashcard_id,
+            "lecture_id": lecture_id,
+            "question": request.question,
+            "answer": request.answer,
+            "difficulty": request.difficulty,
+            "topic": request.topic or "General",
+            "order_index": next_order,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        db.admin_client.table("flashcard").insert(flashcard_data).execute()
+
+        logger.info(f"Created flashcard {flashcard_id} for lecture {lecture_id}")
+
+        return {
+            "message": "Flashcard added successfully",
+            "flashcard_id": flashcard_id,
+            "order_index": next_order,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding flashcard: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error adding flashcard",
+        )
+
+
+@router.delete("/lectures/{lecture_id}/flashcards/{flashcard_id}")
+async def delete_flashcard(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    flashcard_id: str,
+    db=Depends(get_db),
+):
+    """
+    Delete a flashcard from a lecture.
+    
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Deleting flashcard {flashcard_id} from lecture {lecture_id}, teacher {teacher.id}")
+
+        # Verify lecture ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, teacher_id")
+            .eq("id", lecture_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        # Get the flashcard and verify it belongs to this lecture
+        flashcard_result = (
+            db.admin_client.table("flashcard")
+            .select("id")
+            .eq("id", flashcard_id)
+            .eq("lecture_id", lecture_id)
+            .execute()
+        )
+
+        if not flashcard_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Flashcard not found or does not belong to this lecture",
+            )
+
+        # Delete the flashcard
+        db.admin_client.table("flashcard").delete().eq("id", flashcard_id).execute()
+
+        logger.info(f"Deleted flashcard {flashcard_id}")
+
+        return {
+            "message": "Flashcard deleted successfully",
+            "flashcard_id": flashcard_id,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting flashcard: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error deleting flashcard",
         )
 
 

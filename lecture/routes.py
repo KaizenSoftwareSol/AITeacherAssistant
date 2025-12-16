@@ -16,6 +16,8 @@ from models.lecture import (
     LectureDownloadResponse,
     LectureGenerationRequest,
     LectureGenerationResponse,
+    LectureModifyRequest,
+    LectureModifyResponse,
     LecturePlanGenerationResponse,
 )
 from models.user import User, UserRole
@@ -392,6 +394,74 @@ async def check_duplicate_lecture(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error during duplicate check",
+        )
+
+
+@router.patch(
+    "/{lecture_id}",
+    response_model=LectureModifyResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def modify_lecture(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    request: LectureModifyRequest,
+    db=Depends(get_db),
+):
+    """
+    Modify an existing generated lecture.
+
+    This endpoint allows teachers to update:
+    - title: New title for the lecture
+    - description: New description/overview
+    - learning_outcomes: Updated learning outcomes
+    - content: Modified lecture content (will trigger PDF regeneration)
+    - topic: Topic for grouping lectures
+    - lecture_number: Sequential number within the topic
+    - regenerate_pdf: Force PDF regeneration even if content unchanged
+
+    When content or title is changed, or regenerate_pdf is True, a new PDF
+    will be generated and the old one will be replaced.
+
+    The lecture version will be incremented on each modification.
+
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Modifying lecture {lecture_id} for teacher {teacher.id}")
+
+        # Modify the lecture
+        result = await LectureService.modify_lecture(
+            db=db,
+            lecture_id=lecture_id,
+            teacher_id=teacher.id,
+            title=request.title,
+            description=request.description,
+            learning_outcomes=request.learning_outcomes,
+            content=request.content,
+            topic=request.topic,
+            lecture_number=request.lecture_number,
+            regenerate_pdf=request.regenerate_pdf,
+        )
+
+        logger.info(f"Lecture {lecture_id} modified successfully")
+        return LectureModifyResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error modifying lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while modifying lecture",
         )
 
 
@@ -1376,6 +1446,348 @@ async def unpublish_lecture(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error while unpublishing lecture",
         )
+
+
+@router.post(
+    "/{lecture_id}/generate-audio",
+    status_code=status.HTTP_200_OK,
+)
+async def generate_lecture_audio(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    voice: str | None = "george",
+    model: str | None = "eleven_turbo_v2_5",
+    db=Depends(get_db),
+):
+    """
+    Generate audio narration for a lecture using ElevenLabs TTS.
+    
+    This endpoint generates an MP3 audio file from the lecture content.
+    The audio is stored in Supabase storage and can be played by students.
+    
+    Query Parameters:
+    - voice: Voice key (e.g., 'george', 'rachel', 'brian') or voice_id. Default: george
+    - model: Model ID. Options:
+        - eleven_multilingual_v2 (default): Best quality, stable for long-form
+        - eleven_flash_v2_5: Fastest, lowest latency
+        - eleven_turbo_v2_5: Balanced quality and speed
+    
+    If audio already exists for this lecture, it will be replaced.
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Generating audio for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Check if lecture has content
+        content = lecture_data.get("content", "")
+        if not content or len(content.strip()) < 100:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Lecture content is too short to generate audio. "
+                       "Minimum 100 characters required.",
+            )
+
+        # Check if audio already exists and delete it
+        existing_audio = db.get_records(
+            "lecture_content",
+            {"lecture_id": lecture_id, "file_type": "mp3"}
+        )
+        
+        if existing_audio:
+            for audio_record in existing_audio:
+                # Delete from storage
+                try:
+                    storage_path = audio_record.get("storage_path")
+                    bucket_name = audio_record.get("storage_bucket")
+                    if storage_path and bucket_name:
+                        supabase.delete_file(bucket_name, storage_path)
+                except Exception as e:
+                    logger.warning(f"Could not delete existing audio file: {e}")
+                # Delete the record
+                db.delete_record("lecture_content", audio_record["id"])
+            logger.info(f"Deleted existing audio for lecture {lecture_id}")
+
+        # Generate audio
+        from services.audio_service import AudioService
+        audio_service = AudioService(db)
+        result = await audio_service.generate_audio_for_lecture(
+            lecture_id=lecture_id,
+            lecture_content=content,
+            lecture_title=lecture_data.get("title", "Lecture"),
+            voice=voice,
+            model=model,
+        )
+
+        # Create lecture content record for the audio
+        audio_content_id = str(uuid4())
+        audio_content_data = {
+            "id": audio_content_id,
+            "lecture_id": lecture_id,
+            "file_name": result["audio_filename"],
+            "file_type": "mp3",
+            "file_size": result["file_size"],
+            "storage_path": result["storage_path"],
+            "storage_bucket": result["storage_bucket"],
+            "mime_type": result["mime_type"],
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        db.admin_client.table("lecture_content").insert(audio_content_data).execute()
+
+        logger.info(f"Audio generated successfully for lecture {lecture_id}")
+
+        return {
+            "message": "Audio generated successfully",
+            "lecture_id": lecture_id,
+            "audio_content_id": audio_content_id,
+            "audio_filename": result["audio_filename"],
+            "download_url": result["download_url"],
+            "file_size": result["file_size"],
+            "estimated_duration_seconds": result["estimated_duration_seconds"],
+            "voice": result["voice"],
+            "model": result["model"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating audio for lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while generating audio",
+        )
+
+
+@router.get(
+    "/{lecture_id}/audio",
+    status_code=status.HTTP_200_OK,
+)
+async def get_lecture_audio(
+    current_user: Annotated[User, Depends(get_current_user)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Get audio information for a lecture.
+    
+    Returns the audio file details and download URL if audio exists.
+    Accessible to both teachers (who own the lecture) and students (enrolled in the course).
+    """
+    try:
+        logger.info(f"Fetching audio for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Check access - teachers can access their own, students can access published
+        if current_user.role == UserRole.TEACHER:
+            teacher = current_user.teacher_profile
+            if not teacher or lecture_data.get("teacher_id") != teacher.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this lecture",
+                )
+        elif current_user.role == UserRole.STUDENT:
+            # Check if lecture is published
+            if lecture_data.get("status") not in ["PUBLISHED", "DELIVERED"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Lecture is not published",
+                )
+            # Check if student is enrolled in the course
+            student = current_user.student_profile
+            if student:
+                enrollment = db.get_records(
+                    "enrollment",
+                    {"student_id": student.id, "course_id": lecture_data.get("course_id"), "is_active": True}
+                )
+                if not enrollment:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="You are not enrolled in this course",
+                    )
+
+        # Get audio content record
+        audio_records = db.get_records(
+            "lecture_content",
+            {"lecture_id": lecture_id, "file_type": "mp3"}
+        )
+        
+        if not audio_records:
+            return {
+                "lecture_id": lecture_id,
+                "has_audio": False,
+                "message": "No audio available for this lecture",
+            }
+
+        audio_record = audio_records[0]
+        
+        # Get download URL
+        download_url = None
+        try:
+            bucket_name = audio_record.get("storage_bucket")
+            storage_path = audio_record.get("storage_path")
+            if bucket_name and storage_path:
+                bucket = supabase.get_storage_bucket(bucket_name)
+                download_url = bucket.get_public_url(storage_path)
+        except Exception as e:
+            logger.warning(f"Could not get audio download URL: {e}")
+
+        return {
+            "lecture_id": lecture_id,
+            "has_audio": True,
+            "audio_content_id": audio_record["id"],
+            "audio_filename": audio_record.get("file_name"),
+            "file_size": audio_record.get("file_size"),
+            "download_url": download_url,
+            "created_at": audio_record.get("created_at"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching audio for lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while fetching audio",
+        )
+
+
+@router.delete(
+    "/{lecture_id}/audio",
+    status_code=status.HTTP_200_OK,
+)
+async def delete_lecture_audio(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    db=Depends(get_db),
+):
+    """
+    Delete audio for a lecture.
+    
+    Only accessible to the teacher who created the lecture.
+    """
+    try:
+        # Get teacher profile
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Deleting audio for lecture {lecture_id}")
+
+        # Get lecture details
+        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        if not lecture_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+
+        # Verify access
+        if lecture_data.get("teacher_id") != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this lecture",
+            )
+
+        # Get audio content records
+        audio_records = db.get_records(
+            "lecture_content",
+            {"lecture_id": lecture_id, "file_type": "mp3"}
+        )
+        
+        if not audio_records:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No audio found for this lecture",
+            )
+
+        deleted_count = 0
+        for audio_record in audio_records:
+            # Delete from storage
+            try:
+                storage_path = audio_record.get("storage_path")
+                bucket_name = audio_record.get("storage_bucket")
+                if storage_path and bucket_name:
+                    supabase.delete_file(bucket_name, storage_path)
+            except Exception as e:
+                logger.warning(f"Could not delete audio file from storage: {e}")
+            
+            # Delete the record
+            db.delete_record("lecture_content", audio_record["id"])
+            deleted_count += 1
+
+        logger.info(f"Deleted {deleted_count} audio file(s) for lecture {lecture_id}")
+
+        return {
+            "message": "Audio deleted successfully",
+            "lecture_id": lecture_id,
+            "deleted_count": deleted_count,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting audio for lecture: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while deleting audio",
+        )
+
+
+@router.get("/audio/voices")
+async def get_available_voices():
+    """
+    Get list of available TTS voices and models.
+    
+    Returns ElevenLabs voice and model options for the audio generation feature.
+    
+    Voices include popular pre-made voices like George (British narrator),
+    Rachel (professional female), Brian (deep narrator), and many more.
+    
+    Models:
+    - eleven_multilingual_v2: Best quality, 29 languages, stable for long-form
+    - eleven_flash_v2_5: Fastest, 32 languages, lowest cost
+    - eleven_turbo_v2_5: Balanced quality and speed
+    """
+    from services.audio_service import AudioService
+    return {
+        "voices": AudioService.get_available_voices(),
+        "default_voice": AudioService.DEFAULT_VOICE,
+        "models": AudioService.get_available_models(),
+        "default_model": AudioService.DEFAULT_MODEL,
+        "provider": "elevenlabs",
+    }
 
 
 # Import and include the router in the lecture_router from routes_config

@@ -1211,6 +1211,72 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
             )
 
     @staticmethod
+    def generate_unique_versioned_title(
+        db,
+        base_title: str,
+        teacher_id: str,
+        course_id: str,
+        university_id: str,
+    ) -> str:
+        """
+        Generate a unique versioned title for a lecture when a duplicate exists.
+        
+        If "My Lecture" exists, returns "My Lecture (1)".
+        If "My Lecture (1)" also exists, returns "My Lecture (2)", etc.
+        
+        Args:
+            db: Database instance
+            base_title: The original title that has a duplicate
+            teacher_id: Teacher ID
+            course_id: Course ID
+            university_id: University ID for storage path
+            
+        Returns:
+            A unique versioned title string
+        """
+        import re
+        
+        # Extract base title without any existing version number
+        # Match patterns like "Title (1)", "Title (2)", etc.
+        version_pattern = r'^(.+?)\s*\((\d+)\)\s*$'
+        match = re.match(version_pattern, base_title)
+        
+        if match:
+            # Title already has a version number, use the base part
+            clean_base_title = match.group(1).strip()
+        else:
+            clean_base_title = base_title.strip()
+        
+        # Find all existing versions of this title
+        version = 1
+        max_attempts = 100  # Prevent infinite loop
+        
+        while version <= max_attempts:
+            # Generate candidate title
+            candidate_title = f"{clean_base_title} ({version})"
+            sanitized_title = LectureService.sanitize_filename(candidate_title)
+            pdf_filename = f"{sanitized_title}.pdf"
+            expected_storage_path = f"university_{university_id}/teacher_{teacher_id}/course_{course_id}/generated_lectures/{pdf_filename}"
+            
+            # Check if this storage path already exists
+            lecture_contents = db.get_records(
+                "lecture_content", {"storage_path": expected_storage_path}
+            )
+            
+            if not lecture_contents:
+                # This version is available!
+                logger.info(f"Generated unique versioned title: '{candidate_title}'")
+                return candidate_title
+            
+            version += 1
+        
+        # Fallback: add timestamp to ensure uniqueness
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        fallback_title = f"{clean_base_title} ({timestamp})"
+        logger.warning(f"Exceeded max version attempts, using timestamp fallback: '{fallback_title}'")
+        return fallback_title
+
+    @staticmethod
     def check_for_duplicate_lecture(
         db,
         teacher_id: str,
@@ -1322,9 +1388,18 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
                     "has_duplicate": False,
                     "duplicate_lecture": None,
                     "message": "No duplicate found",
+                    "suggested_title": None,
                 }
 
-            # ========== Duplicate found! Build response with lecture details ==========
+            # ========== Duplicate found! Generate a unique versioned title ==========
+            suggested_title = LectureService.generate_unique_versioned_title(
+                db=db,
+                base_title=title,
+                teacher_id=teacher_id,
+                course_id=course_id,
+                university_id=university_id,
+            )
+            
             lecture_id = duplicate_lecture["id"]
             
             # Get lecture content for download URL
@@ -1361,13 +1436,16 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
             }
 
             logger.info(
-                f"Duplicate found: Lecture '{duplicate_lecture['title']}' - Reason: {duplicate_reason}"
+                f"Duplicate found: Lecture '{duplicate_lecture['title']}' - "
+                f"Reason: {duplicate_reason} - Suggested new title: '{suggested_title}'"
             )
 
+            # Return with suggested_title so frontend can proceed with versioned name
             return {
                 "has_duplicate": True,
                 "duplicate_lecture": duplicate_info,
-                "message": duplicate_reason,
+                "message": f"{duplicate_reason}. You can create a new version as '{suggested_title}'.",
+                "suggested_title": suggested_title,
             }
 
         except Exception as e:
@@ -1530,4 +1608,197 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate lecture plan: {str(e)}",
+            )
+
+    @staticmethod
+    async def modify_lecture(
+        db,
+        lecture_id: str,
+        teacher_id: str,
+        title: str = None,
+        description: str = None,
+        learning_outcomes: str = None,
+        content: str = None,
+        topic: str = None,
+        lecture_number: int = None,
+        regenerate_pdf: bool = False,
+    ) -> dict:
+        """
+        Modify an existing generated lecture.
+        
+        Allows teachers to update lecture metadata and content.
+        If content is changed or regenerate_pdf is True, a new PDF will be generated.
+        
+        Args:
+            db: Database instance
+            lecture_id: ID of the lecture to modify
+            teacher_id: Teacher ID (for authorization)
+            title: New title (optional)
+            description: New description (optional)
+            learning_outcomes: New learning outcomes (optional)
+            content: New lecture content (optional, triggers PDF regeneration)
+            topic: New topic for grouping (optional)
+            lecture_number: New lecture number within topic (optional)
+            regenerate_pdf: Force PDF regeneration even if content unchanged
+            
+        Returns:
+            Dictionary with updated lecture information
+        """
+        try:
+            logger.info(f"Modifying lecture: {lecture_id}")
+
+            # 1. Fetch lecture record
+            lecture_data = db.get_record_by_id("lecture", lecture_id)
+            if not lecture_data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+
+            # 2. Verify lecture belongs to teacher
+            if lecture_data.get("teacher_id") != teacher_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this lecture",
+                )
+
+            # 3. Build update data
+            update_data = {
+                "updated_at": datetime.utcnow().isoformat(),
+                "version": lecture_data.get("version", 1) + 1,
+            }
+
+            # Track what was changed
+            changes = []
+
+            if title is not None and title != lecture_data.get("title"):
+                update_data["title"] = title
+                changes.append("title")
+
+            if description is not None and description != lecture_data.get("description"):
+                update_data["description"] = description
+                changes.append("description")
+
+            if learning_outcomes is not None and learning_outcomes != lecture_data.get("learning_outcomes"):
+                update_data["learning_outcomes"] = learning_outcomes
+                changes.append("learning_outcomes")
+
+            if content is not None and content != lecture_data.get("content"):
+                update_data["content"] = content
+                changes.append("content")
+
+            if topic is not None and topic != lecture_data.get("topic"):
+                update_data["topic"] = topic
+                changes.append("topic")
+
+            if lecture_number is not None and lecture_number != lecture_data.get("lecture_number"):
+                update_data["lecture_number"] = lecture_number
+                changes.append("lecture_number")
+
+            # 4. Update lecture record
+            db.update_record("lecture", lecture_id, update_data)
+            logger.info(f"Updated lecture fields: {changes}")
+
+            # 5. Regenerate PDF if content changed or explicitly requested
+            pdf_regenerated = False
+            pdf_storage_path = None
+
+            should_regenerate = regenerate_pdf or "content" in changes or "title" in changes
+
+            if should_regenerate:
+                logger.info(f"Regenerating PDF for lecture: {lecture_id}")
+
+                # Get the final content (either new or existing)
+                final_content = content if content is not None else lecture_data.get("content")
+                final_title = title if title is not None else lecture_data.get("title")
+
+                # Create new PDF
+                pdf_bytes = LectureService.create_pdf(final_title, final_content)
+
+                # Get storage info from existing lecture content
+                lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+                
+                if lecture_contents:
+                    old_pdf_content = lecture_contents[0]
+                    storage_bucket = old_pdf_content["storage_bucket"]
+                    old_storage_path = old_pdf_content["storage_path"]
+
+                    # Delete old PDF from storage
+                    try:
+                        supabase.delete_file(storage_bucket, old_storage_path)
+                        logger.info(f"Deleted old PDF: {old_storage_path}")
+                    except Exception as e:
+                        logger.warning(f"Could not delete old PDF: {e}")
+
+                    # Generate new storage path with updated title
+                    sanitized_title = LectureService.sanitize_filename(final_title)
+                    pdf_filename = f"{sanitized_title}.pdf"
+                    
+                    # Extract path components from old storage path
+                    # Format: university_{id}/teacher_{id}/course_{id}/generated_lectures/{filename}
+                    path_parts = old_storage_path.rsplit("/", 1)
+                    base_path = path_parts[0] if len(path_parts) > 1 else ""
+                    new_storage_path = f"{base_path}/{pdf_filename}"
+
+                    # Upload new PDF
+                    bucket = supabase.get_storage_bucket(storage_bucket)
+                    bucket.upload(
+                        new_storage_path,
+                        pdf_bytes,
+                        {"content-type": "application/pdf"}
+                    )
+                    logger.info(f"Uploaded new PDF: {new_storage_path}")
+
+                    # Update lecture content record
+                    db.update_record(
+                        "lecture_content",
+                        old_pdf_content["id"],
+                        {
+                            "file_name": pdf_filename,
+                            "file_size": len(pdf_bytes),
+                            "storage_path": new_storage_path,
+                        }
+                    )
+
+                    pdf_regenerated = True
+                    pdf_storage_path = new_storage_path
+                else:
+                    logger.warning(f"No existing PDF found for lecture: {lecture_id}")
+
+            # 6. Fetch updated lecture data
+            updated_lecture = db.get_record_by_id("lecture", lecture_id)
+
+            # Build message
+            if not changes and not pdf_regenerated:
+                message = "No changes were made to the lecture."
+            else:
+                change_parts = []
+                if changes:
+                    change_parts.append(f"Updated: {', '.join(changes)}")
+                if pdf_regenerated:
+                    change_parts.append("PDF regenerated")
+                message = "Lecture modified successfully. " + ". ".join(change_parts) + "."
+
+            logger.info(f"✅ Lecture modification completed: {lecture_id}")
+
+            return {
+                "lecture_id": lecture_id,
+                "title": updated_lecture.get("title"),
+                "description": updated_lecture.get("description"),
+                "learning_outcomes": updated_lecture.get("learning_outcomes"),
+                "status": updated_lecture.get("status"),
+                "version": updated_lecture.get("version"),
+                "pdf_regenerated": pdf_regenerated,
+                "pdf_storage_path": pdf_storage_path,
+                "updated_at": updated_lecture.get("updated_at"),
+                "message": message,
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error modifying lecture: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to modify lecture: {str(e)}",
             )

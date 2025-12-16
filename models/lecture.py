@@ -211,6 +211,7 @@ class DuplicateCheckResponse(SQLModel):
     has_duplicate: bool
     duplicate_lecture: Optional[DuplicateLectureInfo] = None
     message: str
+    suggested_title: Optional[str] = None  # Suggested versioned title when duplicate found (e.g., "Lecture Title (1)")
 
 
 class LecturePlanGenerationResponse(SQLModel):
@@ -221,3 +222,30 @@ class LecturePlanGenerationResponse(SQLModel):
     plan: dict  # The comprehensive teaching plan
     message: str
     created_at: str
+
+
+class LectureModifyRequest(SQLModel):
+    """Request model for modifying a generated lecture."""
+
+    title: Optional[str] = None  # New title for the lecture
+    description: Optional[str] = None  # New description
+    learning_outcomes: Optional[str] = None  # New learning outcomes
+    content: Optional[str] = None  # Modified lecture content (will trigger PDF regeneration)
+    topic: Optional[str] = None  # Topic for grouping
+    lecture_number: Optional[int] = None  # Sequential number within topic
+    regenerate_pdf: bool = False  # If True, regenerate PDF even if content unchanged
+
+
+class LectureModifyResponse(SQLModel):
+    """Response model for lecture modification."""
+
+    lecture_id: str
+    title: str
+    description: Optional[str] = None
+    learning_outcomes: Optional[str] = None
+    status: str
+    version: int
+    pdf_regenerated: bool
+    pdf_storage_path: Optional[str] = None
+    updated_at: str
+    message: str
