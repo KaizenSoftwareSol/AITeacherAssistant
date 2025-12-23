@@ -21,6 +21,21 @@ class AssessmentType(str, Enum):
     PROJECT = "PROJECT"
 
 
+class QuizMode(str, Enum):
+    """Quiz mode enumeration - distinguishes practice from graded quizzes."""
+
+    PRACTICE = "PRACTICE"  # AI-generated practice quizzes, no deadline
+    TEST = "TEST"  # Teacher-created or AI-generated tests with deadlines
+
+
+class DifficultyLevel(str, Enum):
+    """Difficulty level for quizzes."""
+
+    EASY = "EASY"
+    MEDIUM = "MEDIUM"
+    HARD = "HARD"
+
+
 class QuestionType(str, Enum):
     """Question type enumeration."""
 
@@ -47,6 +62,12 @@ class Assessment(SQLModel, table=True):
     max_attempts: int = Field(default=1)
     passing_score: float = Field(default=60.0)  # percentage
     is_published: bool = Field(default=False)
+
+    # Quiz-specific settings (NEW)
+    quiz_mode: str = Field(default="PRACTICE")  # PRACTICE or TEST
+    difficulty: str = Field(default="MEDIUM")  # EASY, MEDIUM, HARD
+    is_default: bool = Field(default=False)  # True for auto-generated practice quizzes
+    show_leaderboard: bool = Field(default=True)  # Whether to show leaderboard for TEST quizzes
 
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -112,3 +133,41 @@ class AssessmentSubmission(SQLModel, table=True):
     # Relationships
     assessment: Optional["Assessment"] = Relationship(back_populates="submissions")
     student: Optional["Student"] = Relationship()
+
+
+class ResultViewRequestStatus(str, Enum):
+    """Status for result view requests."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class ResultViewRequest(SQLModel, table=True):
+    """
+    Student requests to view graded quiz results.
+    
+    Students submit a request to view their results for a specific graded quiz.
+    Teachers can approve or reject these requests.
+    Once approved, students can view their detailed results.
+    """
+    __tablename__ = "result_view_request"
+
+    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    assessment_id: str = Field(foreign_key="assessment.id")  # UUID - the graded quiz
+    student_id: str = Field(foreign_key="student.id")  # UUID - student requesting
+    teacher_id: str = Field(foreign_key="teacher.id")  # UUID - teacher who owns the quiz
+    
+    # Request details
+    status: str = Field(default="PENDING")  # PENDING, APPROVED, REJECTED
+    request_message: Optional[str] = None  # Optional message from student
+    response_message: Optional[str] = None  # Optional message from teacher when approving/rejecting
+    
+    # Timestamps
+    requested_at: datetime = Field(default_factory=datetime.utcnow)
+    responded_at: Optional[datetime] = None
+    
+    # Relationships
+    assessment: Optional["Assessment"] = Relationship()
+    student: Optional["Student"] = Relationship()
+    teacher: Optional["Teacher"] = Relationship()

@@ -220,3 +220,157 @@ class ChatMessageWithQuizResult(SQLModel):
     content: str  # Text summary of quiz results
     quiz_result: Optional[QuizResultForChat] = None
 
+
+# ==================== Test Quiz Models ====================
+
+
+class TestQuizCreateRequest(SQLModel):
+    """Request model for creating a test quiz (teacher)."""
+
+    title: str
+    description: Optional[str] = None
+    lecture_id: str  # The lecture this quiz is based on
+    difficulty: str = "MEDIUM"  # EASY, MEDIUM, HARD
+    time_limit: Optional[int] = None  # in minutes
+    max_attempts: int = 1
+    passing_score: float = 60.0
+    due_date: datetime  # Deadline for submission
+    show_leaderboard: bool = True
+
+
+class TestQuizAIGenerateRequest(SQLModel):
+    """Request model for AI-generating questions for a test quiz."""
+
+    num_questions: int = 10
+    question_types: Optional[list[str]] = None  # e.g., ["MULTIPLE_CHOICE", "TRUE_FALSE"]
+    focus_areas: Optional[list[str]] = None  # Specific topics to focus on
+
+
+class ManualQuestionCreateRequest(SQLModel):
+    """Request model for adding a manual question to a test quiz."""
+
+    question_text: str
+    question_type: str = "MULTIPLE_CHOICE"
+    points: float = 1.0
+    options: list[str]
+    correct_answer: str
+    explanation: Optional[str] = None
+
+
+class TestQuizResponse(SQLModel):
+    """Response model for a test quiz."""
+
+    assessment_id: str
+    title: str
+    description: Optional[str] = None
+    lecture_id: str
+    lecture_title: Optional[str] = None
+    difficulty: str
+    quiz_mode: str = "TEST"
+    time_limit: Optional[int] = None
+    max_attempts: int
+    passing_score: float
+    due_date: datetime
+    is_published: bool
+    show_leaderboard: bool
+    questions_count: int
+    created_at: datetime
+    is_overdue: bool = False
+
+
+class StudentSubmissionSummary(SQLModel):
+    """Summary of a student's submission for teacher view."""
+
+    student_id: str
+    student_name: str
+    student_email: Optional[str] = None
+    submission_id: Optional[str] = None
+    score: Optional[float] = None
+    max_score: Optional[float] = None
+    percentage: Optional[float] = None
+    attempt_number: int = 0
+    submitted_at: Optional[datetime] = None
+    time_taken: Optional[int] = None
+    is_submitted: bool = False
+    is_graded: bool = False
+    rank: Optional[int] = None
+
+
+class QuestionResultDetail(SQLModel):
+    """Detailed result for a single question in a submission."""
+
+    question_id: str
+    question_text: str
+    question_type: str
+    points_possible: float
+    points_earned: float
+    student_answer: Optional[str] = None
+    correct_answer: str
+    is_correct: bool
+    explanation: Optional[str] = None
+
+
+class DetailedSubmissionResponse(SQLModel):
+    """Detailed view of a student's submission for teacher review."""
+
+    submission_id: str
+    assessment_id: str
+    assessment_title: str
+    student_id: str
+    student_name: str
+    student_email: Optional[str] = None
+    score: float
+    max_score: float
+    percentage: float
+    correct_count: int
+    total_questions: int
+    attempt_number: int
+    time_taken: Optional[int] = None
+    started_at: datetime
+    submitted_at: Optional[datetime] = None
+    question_results: list[QuestionResultDetail]
+
+
+class LeaderboardEntry(SQLModel):
+    """Entry in the quiz leaderboard."""
+
+    rank: int
+    student_id: str
+    student_name: str
+    # Score and percentage are ONLY shown for teacher view
+    score: Optional[float] = None
+    percentage: Optional[float] = None
+    submitted_at: Optional[datetime] = None
+
+
+class LeaderboardResponse(SQLModel):
+    """Response model for quiz leaderboard."""
+
+    assessment_id: str
+    assessment_title: str
+    total_participants: int
+    leaderboard: list[LeaderboardEntry]
+    # Only for teacher view
+    average_score: Optional[float] = None
+    highest_score: Optional[float] = None
+    lowest_score: Optional[float] = None
+
+
+class StudentTestQuizInfo(SQLModel):
+    """Test quiz information for student view."""
+
+    assessment_id: str
+    title: str
+    description: Optional[str] = None
+    lecture_id: str
+    lecture_title: Optional[str] = None
+    difficulty: str
+    time_limit: Optional[int] = None
+    max_attempts: int
+    passing_score: float
+    due_date: datetime
+    is_overdue: bool = False
+    questions_count: int
+    my_attempts: int = 0
+    my_best_score: Optional[float] = None
+    can_attempt: bool = True  # False if overdue or max attempts reached

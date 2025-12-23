@@ -10,6 +10,7 @@ from typing import Annotated, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
 from dependencies import get_current_user
 from logger import logger
@@ -1340,6 +1341,1109 @@ async def get_chat_history(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error fetching chat history",
+        )
+
+
+# ==================== Test Quiz Routes ====================
+
+
+@router.get("/courses/{course_id}/test-quizzes")
+async def get_test_quizzes(
+    course_id: str,
+    user_student: Annotated[tuple[User, Student], Depends(require_student)],
+    db=Depends(get_db),
+):
+    """
+    Get all published test quizzes for a course.
+    
+    Shows test quizzes with deadlines that the student can attempt.
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Fetching test quizzes for course {course_id}, student {student.id}")
+        
+        # Verify enrollment
+        enrollment_result = (
+            db.admin_client.table("enrollment")
+            .select("id")
+            .eq("student_id", str(student.id))
+            .eq("course_id", course_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        if not enrollment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course",
+            )
+        
+        # Get published test quizzes
+        assessments_result = (
+            db.admin_client.table("assessment")
+            .select("*, lecture!inner(id, title)")
+            .eq("course_id", course_id)
+            .eq("quiz_mode", "TEST")
+            .eq("is_published", True)
+            .order("due_date", desc=False)
+            .execute()
+        )
+        
+        # Get student's submissions for these quizzes
+        assessment_ids = [a["id"] for a in (assessments_result.data or [])]
+        
+        submissions_by_assessment = {}
+        if assessment_ids:
+            submissions_result = (
+                db.admin_client.table("assessment_submission")
+                .select("assessment_id, score, max_score, is_submitted")
+                .eq("student_id", str(student.id))
+                .in_("assessment_id", assessment_ids)
+                .execute()
+            )
+            
+            for sub in (submissions_result.data or []):
+                aid = sub["assessment_id"]
+                if aid not in submissions_by_assessment:
+                    submissions_by_assessment[aid] = []
+                submissions_by_assessment[aid].append(sub)
+        
+        quizzes = []
+        for a in (assessments_result.data or []):
+            # Get question count
+            questions_result = (
+                db.admin_client.table("question")
+                .select("id")
+                .eq("assessment_id", a["id"])
+                .execute()
+            )
+            
+            # Check if overdue
+            due_date = a.get("due_date")
+            is_overdue = False
+            if due_date:
+                try:
+                    due_dt = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                    is_overdue = datetime.utcnow() > due_dt.replace(tzinfo=None)
+                except:
+                    pass
+            
+            # Calculate student's attempts and best score
+            my_submissions = submissions_by_assessment.get(a["id"], [])
+            my_attempts = len([s for s in my_submissions if s.get("is_submitted")])
+            my_best_score = None
+            if my_submissions:
+                scores = [s.get("score") for s in my_submissions if s.get("score") is not None]
+                if scores:
+                    my_best_score = max(scores)
+            
+            # Check if can attempt
+            can_attempt = not is_overdue and my_attempts < a.get("max_attempts", 1)
+            
+            quizzes.append({
+                "assessment_id": a["id"],
+                "title": a["title"],
+                "description": a.get("description"),
+                "lecture_id": a["lecture"]["id"],
+                "lecture_title": a["lecture"]["title"],
+                "difficulty": a.get("difficulty", "MEDIUM"),
+                "time_limit": a.get("time_limit"),
+                "max_attempts": a.get("max_attempts", 1),
+                "passing_score": a.get("passing_score", 60.0),
+                "due_date": due_date,
+                "is_overdue": is_overdue,
+                "show_leaderboard": a.get("show_leaderboard", True),
+                "questions_count": len(questions_result.data) if questions_result.data else 0,
+                "my_attempts": my_attempts,
+                "my_best_score": my_best_score,
+                "can_attempt": can_attempt,
+            })
+        
+        return {
+            "course_id": course_id,
+            "test_quizzes": quizzes,
+            "total_count": len(quizzes),
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching test quizzes: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching test quizzes",
+        )
+
+
+@router.get("/test-quizzes/{assessment_id}")
+async def get_test_quiz_details(
+    assessment_id: str,
+    user_student: Annotated[tuple[User, Student], Depends(require_student)],
+    db=Depends(get_db),
+):
+    """
+    Get details of a test quiz for attempting.
+    
+    Returns quiz questions (without correct answers) if the student can attempt it.
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Fetching test quiz {assessment_id} for student {student.id}")
+        
+        # Get assessment
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("*, lecture!inner(id, course_id)")
+            .eq("id", assessment_id)
+            .eq("quiz_mode", "TEST")
+            .eq("is_published", True)
+            .execute()
+        )
+        
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test quiz not found or not published",
+            )
+        
+        assessment = assessment_result.data[0]
+        course_id = assessment["lecture"]["course_id"]
+        
+        # Verify enrollment
+        enrollment_result = (
+            db.admin_client.table("enrollment")
+            .select("id")
+            .eq("student_id", str(student.id))
+            .eq("course_id", course_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        if not enrollment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course",
+            )
+        
+        # Check if overdue
+        due_date = assessment.get("due_date")
+        is_overdue = False
+        if due_date:
+            try:
+                due_dt = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                is_overdue = datetime.utcnow() > due_dt.replace(tzinfo=None)
+            except:
+                pass
+        
+        # Check attempts
+        submissions_result = (
+            db.admin_client.table("assessment_submission")
+            .select("id, is_submitted")
+            .eq("assessment_id", assessment_id)
+            .eq("student_id", str(student.id))
+            .execute()
+        )
+        
+        my_attempts = len([s for s in (submissions_result.data or []) if s.get("is_submitted")])
+        max_attempts = assessment.get("max_attempts", 1)
+        
+        can_attempt = not is_overdue and my_attempts < max_attempts
+        
+        if not can_attempt:
+            reason = "Quiz deadline has passed" if is_overdue else f"Maximum attempts ({max_attempts}) reached"
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot attempt this quiz: {reason}",
+            )
+        
+        # Get questions (without correct answers)
+        questions_result = (
+            db.admin_client.table("question")
+            .select("id, question_text, question_type, points, order_index, options")
+            .eq("assessment_id", assessment_id)
+            .order("order_index")
+            .execute()
+        )
+        
+        questions = []
+        for q in (questions_result.data or []):
+            questions.append({
+                "question_id": q["id"],
+                "question_text": q["question_text"],
+                "question_type": q.get("question_type", "MULTIPLE_CHOICE"),
+                "points": q.get("points", 1.0),
+                "options": json.loads(q.get("options", "[]")),
+            })
+        
+        return {
+            "assessment_id": assessment_id,
+            "title": assessment["title"],
+            "description": assessment.get("description"),
+            "difficulty": assessment.get("difficulty", "MEDIUM"),
+            "time_limit": assessment.get("time_limit"),
+            "max_attempts": max_attempts,
+            "passing_score": assessment.get("passing_score", 60.0),
+            "due_date": due_date,
+            "is_overdue": is_overdue,
+            "my_attempts": my_attempts,
+            "attempts_remaining": max_attempts - my_attempts,
+            "questions_count": len(questions),
+            "questions": questions,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching test quiz: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching test quiz",
+        )
+
+
+@router.post("/test-quizzes/{assessment_id}/submit")
+async def submit_test_quiz(
+    assessment_id: str,
+    submission: dict,
+    user_student: Annotated[tuple[User, Student], Depends(require_student)],
+    db=Depends(get_db),
+):
+    """
+    Submit answers for a test quiz.
+    
+    Validates deadline and attempt limits before accepting the submission.
+    Returns grading results.
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Submitting test quiz {assessment_id} for student {student.id}")
+        
+        # Get assessment
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("*, lecture!inner(id, course_id)")
+            .eq("id", assessment_id)
+            .eq("quiz_mode", "TEST")
+            .eq("is_published", True)
+            .execute()
+        )
+        
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test quiz not found",
+            )
+        
+        assessment = assessment_result.data[0]
+        course_id = assessment["lecture"]["course_id"]
+        lecture_id = assessment["lecture"]["id"]
+        
+        # Verify enrollment
+        enrollment_result = (
+            db.admin_client.table("enrollment")
+            .select("id")
+            .eq("student_id", str(student.id))
+            .eq("course_id", course_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        if not enrollment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course",
+            )
+        
+        # Check deadline
+        due_date = assessment.get("due_date")
+        if due_date:
+            try:
+                due_dt = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                if datetime.utcnow() > due_dt.replace(tzinfo=None):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Quiz deadline has passed",
+                    )
+            except HTTPException:
+                raise
+            except:
+                pass
+        
+        # Check attempts
+        submissions_result = (
+            db.admin_client.table("assessment_submission")
+            .select("id, is_submitted")
+            .eq("assessment_id", assessment_id)
+            .eq("student_id", str(student.id))
+            .execute()
+        )
+        
+        my_attempts = len([s for s in (submissions_result.data or []) if s.get("is_submitted")])
+        max_attempts = assessment.get("max_attempts", 1)
+        
+        if my_attempts >= max_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Maximum attempts ({max_attempts}) reached",
+            )
+        
+        # Get questions
+        questions_result = (
+            db.admin_client.table("question")
+            .select("*")
+            .eq("assessment_id", assessment_id)
+            .order("order_index")
+            .execute()
+        )
+        
+        questions = questions_result.data
+        
+        # Grade the submission
+        quiz_service = QuizService(db)
+        grading_result = quiz_service.grade_submission(
+            questions=questions,
+            student_answers=submission.get("answers", {}),
+        )
+        
+        # Create submission record
+        submission_id = str(uuid4())
+        submission_data = {
+            "id": submission_id,
+            "assessment_id": assessment_id,
+            "student_id": str(student.id),
+            "answers": json.dumps(submission.get("answers", {})),
+            "score": grading_result["score"],
+            "max_score": grading_result["max_score"],
+            "attempt_number": my_attempts + 1,
+            "time_taken": submission.get("time_taken"),
+            "is_submitted": True,
+            "is_graded": True,
+            "started_at": submission.get("started_at", datetime.utcnow().isoformat()),
+            "submitted_at": datetime.utcnow().isoformat(),
+            "graded_at": datetime.utcnow().isoformat(),
+        }
+        db.admin_client.table("assessment_submission").insert(submission_data).execute()
+        
+        percentage = (grading_result["score"] / grading_result["max_score"]) * 100 if grading_result["max_score"] > 0 else 0
+        passed = percentage >= assessment.get("passing_score", 60.0)
+        
+        logger.info(f"Graded test quiz {assessment_id} - Score: {grading_result['score']}/{grading_result['max_score']}")
+        
+        return {
+            "submission_id": submission_id,
+            "score": grading_result["score"],
+            "max_score": grading_result["max_score"],
+            "percentage": percentage,
+            "correct_count": grading_result["correct_count"],
+            "total_questions": grading_result["total_questions"],
+            "passed": passed,
+            "attempt_number": my_attempts + 1,
+            "attempts_remaining": max_attempts - (my_attempts + 1),
+            "question_results": grading_result.get("question_results", []),
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error submitting test quiz: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error submitting quiz: {str(e)}",
+        )
+
+
+@router.get("/test-quizzes/{assessment_id}/leaderboard")
+async def get_quiz_leaderboard(
+    assessment_id: str,
+    user_student: Annotated[tuple[User, Student], Depends(require_student)],
+    db=Depends(get_db),
+):
+    """
+    Get the leaderboard for a test quiz (student view).
+    
+    Shows only student names and ranks - NO SCORES to protect student confidence.
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Fetching leaderboard for quiz {assessment_id}, student {student.id}")
+        
+        # Get assessment
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("id, title, show_leaderboard, lecture!inner(course_id)")
+            .eq("id", assessment_id)
+            .eq("quiz_mode", "TEST")
+            .eq("is_published", True)
+            .execute()
+        )
+        
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test quiz not found",
+            )
+        
+        assessment = assessment_result.data[0]
+        course_id = assessment["lecture"]["course_id"]
+        
+        # Verify enrollment
+        enrollment_result = (
+            db.admin_client.table("enrollment")
+            .select("id")
+            .eq("student_id", str(student.id))
+            .eq("course_id", course_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        if not enrollment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course",
+            )
+        
+        # Check if leaderboard is enabled
+        if not assessment.get("show_leaderboard", True):
+            return {
+                "assessment_id": assessment_id,
+                "assessment_title": assessment["title"],
+                "leaderboard_enabled": False,
+                "message": "Leaderboard is not available for this quiz",
+                "leaderboard": [],
+            }
+        
+        # Get submissions ordered by score
+        submissions_result = (
+            db.admin_client.table("assessment_submission")
+            .select("student_id, score, max_score")
+            .eq("assessment_id", assessment_id)
+            .eq("is_submitted", True)
+            .order("score", desc=True)
+            .execute()
+        )
+        
+        # Get best score per student
+        best_by_student = {}
+        for sub in (submissions_result.data or []):
+            sid = sub["student_id"]
+            if sid not in best_by_student or (sub.get("score") or 0) > (best_by_student[sid].get("score") or 0):
+                best_by_student[sid] = sub
+        
+        if not best_by_student:
+            return {
+                "assessment_id": assessment_id,
+                "assessment_title": assessment["title"],
+                "leaderboard_enabled": True,
+                "total_participants": 0,
+                "my_rank": None,
+                "leaderboard": [],
+            }
+        
+        # Get student details
+        student_ids = list(best_by_student.keys())
+        students_result = (
+            db.admin_client.table("student")
+            .select("id, user_id")
+            .in_("id", student_ids)
+            .execute()
+        )
+        student_user_map = {s["id"]: s["user_id"] for s in (students_result.data or [])}
+        
+        user_ids = list(student_user_map.values())
+        users_result = (
+            db.admin_client.table("users")
+            .select("id, first_name, last_name")
+            .in_("id", user_ids)
+            .execute()
+        )
+        user_map = {u["id"]: u for u in (users_result.data or [])}
+        
+        # Build leaderboard - NAMES AND RANKS ONLY (no scores for students)
+        sorted_entries = sorted(
+            best_by_student.items(),
+            key=lambda x: (x[1].get("score") or 0),
+            reverse=True
+        )
+        
+        leaderboard = []
+        my_rank = None
+        
+        for rank, (sid, sub) in enumerate(sorted_entries, 1):
+            user_id = student_user_map.get(sid)
+            u = user_map.get(user_id, {})
+            
+            # Check if this is the current student
+            if sid == str(student.id):
+                my_rank = rank
+            
+            leaderboard.append({
+                "rank": rank,
+                "student_name": f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or "Anonymous",
+                # NO SCORES shown to students
+            })
+        
+        return {
+            "assessment_id": assessment_id,
+            "assessment_title": assessment["title"],
+            "leaderboard_enabled": True,
+            "total_participants": len(leaderboard),
+            "my_rank": my_rank,
+            "leaderboard": leaderboard,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching leaderboard: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching leaderboard",
+        )
+
+
+# ==================== Result View Request Routes ====================
+
+
+class ResultViewRequestCreate(BaseModel):
+    """Request body for creating a result view request."""
+    message: Optional[str] = None  # Optional message to teacher
+
+
+@router.post("/test-quizzes/{assessment_id}/request-results")
+async def request_quiz_results(
+    assessment_id: str,
+    request: Optional[ResultViewRequestCreate] = None,
+    user_student: Annotated[tuple[User, Student], Depends(require_student)] = None,
+    db=Depends(get_db),
+):
+    """
+    Request to view results of a graded quiz.
+    
+    Students can request access to see their detailed results for a graded quiz.
+    The teacher must approve the request before the student can view results.
+    
+    Returns the request status.
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Student {student.id} requesting results for assessment {assessment_id}")
+        
+        # Get the assessment and verify it's a graded quiz (TEST mode)
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("id, title, teacher_id, course_id, quiz_mode, lecture!inner(course_id)")
+            .eq("id", assessment_id)
+            .eq("quiz_mode", "TEST")
+            .eq("is_published", True)
+            .execute()
+        )
+        
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Graded quiz not found",
+            )
+        
+        assessment = assessment_result.data[0]
+        course_id = assessment["lecture"]["course_id"]
+        teacher_id = assessment["teacher_id"]
+        
+        # Verify student is enrolled in the course
+        enrollment_result = (
+            db.admin_client.table("enrollment")
+            .select("id")
+            .eq("student_id", str(student.id))
+            .eq("course_id", course_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        if not enrollment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course",
+            )
+        
+        # Verify student has submitted the quiz
+        submission_result = (
+            db.admin_client.table("assessment_submission")
+            .select("id")
+            .eq("assessment_id", assessment_id)
+            .eq("student_id", str(student.id))
+            .eq("is_submitted", True)
+            .execute()
+        )
+        
+        if not submission_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You must submit the quiz before requesting results",
+            )
+        
+        # Check if request already exists
+        existing_request = (
+            db.admin_client.table("result_view_request")
+            .select("id, status, requested_at, responded_at, response_message")
+            .eq("assessment_id", assessment_id)
+            .eq("student_id", str(student.id))
+            .execute()
+        )
+        
+        if existing_request.data:
+            req = existing_request.data[0]
+            return {
+                "message": f"Request already exists with status: {req['status']}",
+                "request_id": req["id"],
+                "status": req["status"],
+                "requested_at": req["requested_at"],
+                "responded_at": req.get("responded_at"),
+                "response_message": req.get("response_message"),
+            }
+        
+        # Create new request
+        request_id = str(uuid4())
+        request_data = {
+            "id": request_id,
+            "assessment_id": assessment_id,
+            "student_id": str(student.id),
+            "teacher_id": teacher_id,
+            "status": "PENDING",
+            "request_message": request.message if request else None,
+            "requested_at": datetime.utcnow().isoformat(),
+        }
+        
+        db.admin_client.table("result_view_request").insert(request_data).execute()
+        
+        logger.info(f"Created result view request {request_id} for student {student.id}")
+        
+        return {
+            "message": "Result view request submitted successfully. Waiting for teacher approval.",
+            "request_id": request_id,
+            "assessment_id": assessment_id,
+            "assessment_title": assessment["title"],
+            "status": "PENDING",
+            "requested_at": request_data["requested_at"],
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating result view request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error submitting result view request",
+        )
+
+
+@router.get("/my-result-requests")
+async def get_my_result_requests(
+    user_student: Annotated[tuple[User, Student], Depends(require_student)],
+    status_filter: Optional[str] = None,
+    db=Depends(get_db),
+):
+    """
+    Get all result view requests submitted by the student.
+    
+    Optionally filter by status: PENDING, APPROVED, REJECTED
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Fetching result requests for student {student.id}")
+        
+        query = (
+            db.admin_client.table("result_view_request")
+            .select("*, assessment!inner(id, title, quiz_mode, lecture!inner(title))")
+            .eq("student_id", str(student.id))
+            .order("requested_at", desc=True)
+        )
+        
+        if status_filter and status_filter.upper() in ["PENDING", "APPROVED", "REJECTED"]:
+            query = query.eq("status", status_filter.upper())
+        
+        result = query.execute()
+        
+        requests = []
+        for req in (result.data or []):
+            requests.append({
+                "request_id": req["id"],
+                "assessment_id": req["assessment_id"],
+                "assessment_title": req["assessment"]["title"],
+                "lecture_title": req["assessment"]["lecture"]["title"],
+                "status": req["status"],
+                "request_message": req.get("request_message"),
+                "response_message": req.get("response_message"),
+                "requested_at": req["requested_at"],
+                "responded_at": req.get("responded_at"),
+            })
+        
+        return {
+            "total_count": len(requests),
+            "requests": requests,
+        }
+    
+    except Exception as e:
+        logger.error(f"Error fetching result requests: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching result requests",
+        )
+
+
+@router.get("/test-quizzes/{assessment_id}/my-results")
+async def get_my_quiz_results(
+    assessment_id: str,
+    user_student: Annotated[tuple[User, Student], Depends(require_student)],
+    db=Depends(get_db),
+):
+    """
+    Get detailed results for a graded quiz (if approved by teacher).
+    
+    Returns full question-by-question breakdown with:
+    - Your answers
+    - Correct answers
+    - Explanations
+    - Points earned per question
+    
+    Only accessible if the teacher has approved your result view request.
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Student {student.id} viewing results for assessment {assessment_id}")
+        
+        # Check if student has an approved request
+        request_result = (
+            db.admin_client.table("result_view_request")
+            .select("id, status")
+            .eq("assessment_id", assessment_id)
+            .eq("student_id", str(student.id))
+            .execute()
+        )
+        
+        if not request_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You must request access to view results first. Use POST /test-quizzes/{assessment_id}/request-results",
+            )
+        
+        req = request_result.data[0]
+        
+        if req["status"] == "PENDING":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your request is pending teacher approval",
+            )
+        
+        if req["status"] == "REJECTED":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your request to view results was rejected by the teacher",
+            )
+        
+        # Request is APPROVED - get the full results
+        
+        # Get assessment details
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("id, title, passing_score, lecture!inner(id, title, course_id)")
+            .eq("id", assessment_id)
+            .execute()
+        )
+        
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found",
+            )
+        
+        assessment = assessment_result.data[0]
+        
+        # Get student's submission(s) - get the best one
+        submissions_result = (
+            db.admin_client.table("assessment_submission")
+            .select("*")
+            .eq("assessment_id", assessment_id)
+            .eq("student_id", str(student.id))
+            .eq("is_submitted", True)
+            .order("score", desc=True)
+            .execute()
+        )
+        
+        if not submissions_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No submission found",
+            )
+        
+        best_submission = submissions_result.data[0]
+        student_answers = json.loads(best_submission.get("answers", "{}"))
+        
+        # Get all questions with correct answers
+        questions_result = (
+            db.admin_client.table("question")
+            .select("*")
+            .eq("assessment_id", assessment_id)
+            .order("order_index")
+            .execute()
+        )
+        
+        # Build detailed results
+        question_results = []
+        for q in (questions_result.data or []):
+            question_id = q["id"]
+            student_answer = student_answers.get(question_id)
+            correct_answer = q.get("correct_answer")
+            is_correct = student_answer == correct_answer if student_answer else False
+            
+            question_results.append({
+                "question_id": question_id,
+                "question_text": q["question_text"],
+                "question_type": q.get("question_type", "MULTIPLE_CHOICE"),
+                "options": json.loads(q.get("options", "[]")),
+                "your_answer": student_answer,
+                "correct_answer": correct_answer,
+                "is_correct": is_correct,
+                "points_possible": q.get("points", 1.0),
+                "points_earned": q.get("points", 1.0) if is_correct else 0,
+                "explanation": q.get("explanation"),
+            })
+        
+        # Calculate statistics
+        total_correct = sum(1 for q in question_results if q["is_correct"])
+        total_questions = len(question_results)
+        percentage = (best_submission["score"] / best_submission["max_score"] * 100) if best_submission.get("max_score") else 0
+        passed = percentage >= assessment.get("passing_score", 60.0)
+        
+        return {
+            "assessment_id": assessment_id,
+            "assessment_title": assessment["title"],
+            "lecture_title": assessment["lecture"]["title"],
+            "submission_id": best_submission["id"],
+            "score": best_submission["score"],
+            "max_score": best_submission["max_score"],
+            "percentage": round(percentage, 2),
+            "passing_score": assessment.get("passing_score", 60.0),
+            "passed": passed,
+            "correct_count": total_correct,
+            "total_questions": total_questions,
+            "attempt_number": best_submission.get("attempt_number", 1),
+            "submitted_at": best_submission.get("submitted_at"),
+            "time_taken": best_submission.get("time_taken"),
+            "question_results": question_results,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching quiz results: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching quiz results",
+        )
+
+
+# ==================== ALL ASSESSMENTS ENDPOINT ====================
+
+
+@router.get("/assessments/all")
+async def get_all_student_assessments(
+    user_student: Annotated[tuple[User, Student], Depends(require_student)],
+    db=Depends(get_db),
+):
+    """
+    Get ALL available quizzes across ALL enrolled courses for a student.
+    
+    Returns quizzes from all published lectures in all courses the student is enrolled in.
+    Includes submission history and completion status.
+    """
+    user, student = user_student
+    
+    try:
+        logger.info(f"Fetching all assessments for student {student.id}")
+        
+        # Get all active enrollments
+        enrollments_result = (
+            db.admin_client.table("enrollment")
+            .select("course_id")
+            .eq("student_id", str(student.id))
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        if not enrollments_result.data:
+            return {
+                "student_id": str(student.id),
+                "total_quizzes": 0,
+                "completed_quizzes": 0,
+                "pending_quizzes": 0,
+                "quizzes": [],
+                "by_course": {},
+            }
+        
+        course_ids = [e["course_id"] for e in enrollments_result.data]
+        
+        # Get all courses info
+        courses_result = (
+            db.admin_client.table("course")
+            .select("id, name, code")
+            .in_("id", course_ids)
+            .execute()
+        )
+        course_map = {c["id"]: c for c in (courses_result.data or [])}
+        
+        # Get all published lectures for these courses
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("id, title, course_id, topic, lecture_number")
+            .in_("course_id", course_ids)
+            .in_("status", ["PUBLISHED", "DELIVERED"])
+            .execute()
+        )
+        
+        if not lectures_result.data:
+            return {
+                "student_id": str(student.id),
+                "total_quizzes": 0,
+                "completed_quizzes": 0,
+                "pending_quizzes": 0,
+                "quizzes": [],
+                "by_course": {},
+            }
+        
+        lecture_ids = [l["id"] for l in lectures_result.data]
+        lecture_map = {l["id"]: l for l in lectures_result.data}
+        
+        # Get all GRADED TEST assessments (is_default=False means graded test, not practice quiz)
+        assessments_result = (
+            db.admin_client.table("assessment")
+            .select("id, lecture_id, title, description, time_limit, passing_score, created_at")
+            .in_("lecture_id", lecture_ids)
+            .eq("is_default", False)
+            .execute()
+        )
+        
+        if not assessments_result.data:
+            return {
+                "student_id": str(student.id),
+                "total_quizzes": 0,
+                "completed_quizzes": 0,
+                "pending_quizzes": 0,
+                "quizzes": [],
+                "by_course": {},
+            }
+        
+        assessment_ids = [a["id"] for a in assessments_result.data]
+        
+        # Get question counts for each assessment
+        questions_result = (
+            db.admin_client.table("question")
+            .select("assessment_id")
+            .in_("assessment_id", assessment_ids)
+            .execute()
+        )
+        question_counts = {}
+        for q in (questions_result.data or []):
+            aid = q["assessment_id"]
+            question_counts[aid] = question_counts.get(aid, 0) + 1
+        
+        # Get all submissions by this student
+        submissions_result = (
+            db.admin_client.table("assessment_submission")
+            .select("assessment_id, score, max_score, submitted_at, attempt_number")
+            .eq("student_id", str(student.id))
+            .in_("assessment_id", assessment_ids)
+            .order("submitted_at", desc=True)
+            .execute()
+        )
+        
+        # Group submissions by assessment (get best score)
+        submissions_by_assessment = {}
+        for sub in (submissions_result.data or []):
+            aid = sub["assessment_id"]
+            if aid not in submissions_by_assessment:
+                submissions_by_assessment[aid] = sub
+            else:
+                # Keep the one with higher score
+                existing = submissions_by_assessment[aid]
+                if sub["score"] > existing["score"]:
+                    submissions_by_assessment[aid] = sub
+        
+        # Build quizzes list
+        quizzes = []
+        by_course = {}
+        completed_count = 0
+        
+        for assessment in assessments_result.data:
+            lecture = lecture_map.get(assessment["lecture_id"], {})
+            course = course_map.get(lecture.get("course_id"), {})
+            submission = submissions_by_assessment.get(assessment["id"])
+            
+            is_completed = submission is not None
+            if is_completed:
+                completed_count += 1
+            
+            quiz_info = {
+                "assessment_id": assessment["id"],
+                "title": assessment["title"],
+                "description": assessment.get("description"),
+                "lecture_id": assessment["lecture_id"],
+                "lecture_title": lecture.get("title"),
+                "lecture_topic": lecture.get("topic"),
+                "lecture_number": lecture.get("lecture_number"),
+                "course_id": lecture.get("course_id"),
+                "course_name": course.get("name"),
+                "course_code": course.get("code"),
+                "questions_count": question_counts.get(assessment["id"], 0),
+                "time_limit": assessment.get("time_limit", 30),
+                "passing_score": assessment.get("passing_score", 60.0),
+                "created_at": assessment.get("created_at"),
+                "is_completed": is_completed,
+                "best_score": submission["score"] if submission else None,
+                "max_score": submission["max_score"] if submission else None,
+                "best_percentage": round((submission["score"] / submission["max_score"]) * 100, 1) if submission and submission["max_score"] else None,
+                "passed": (submission["score"] / submission["max_score"] * 100) >= assessment.get("passing_score", 60.0) if submission and submission["max_score"] else None,
+                "last_attempt_at": submission["submitted_at"] if submission else None,
+                "attempts": submission["attempt_number"] if submission else 0,
+            }
+            quizzes.append(quiz_info)
+            
+            # Group by course
+            course_id = lecture.get("course_id")
+            if course_id:
+                if course_id not in by_course:
+                    by_course[course_id] = {
+                        "course_name": course.get("name"),
+                        "course_code": course.get("code"),
+                        "quizzes": [],
+                    }
+                by_course[course_id]["quizzes"].append(quiz_info)
+        
+        # Sort quizzes by created_at descending
+        quizzes.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        
+        return {
+            "student_id": str(student.id),
+            "total_quizzes": len(quizzes),
+            "completed_quizzes": completed_count,
+            "pending_quizzes": len(quizzes) - completed_count,
+            "completion_rate": round((completed_count / len(quizzes)) * 100, 1) if quizzes else 0,
+            "quizzes": quizzes,
+            "by_course": by_course,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching all assessments: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching assessments",
         )
 
 
