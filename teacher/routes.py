@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Annotated, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile
 from pydantic import BaseModel
 
 from dependencies import require_teacher
@@ -4005,6 +4005,458 @@ async def add_bulk_questions(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error adding questions",
+        )
+
+
+# ==================== CSV Export/Import for Quiz Questions ====================
+
+
+@router.get("/assessments/{assessment_id}/questions/export-csv")
+async def export_questions_to_csv(
+    current_user: Annotated[User, Depends(require_teacher)],
+    assessment_id: str,
+    db=Depends(get_db),
+):
+    """
+    Export quiz questions to a CSV file for download.
+    
+    CSV Structure:
+    Question | Option 1 | Option 2 | Option 3 | Option 4 | Correct Answer | Points
+    
+    For True/False questions, Option 3 and Option 4 will be empty.
+    """
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        # Verify assessment exists and belongs to teacher's lecture
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("*, lecture!inner(teacher_id, title)")
+            .eq("id", assessment_id)
+            .execute()
+        )
+
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found",
+            )
+
+        assessment = assessment_result.data[0]
+        if assessment["lecture"]["teacher_id"] != str(teacher.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access this assessment",
+            )
+
+        # Get all questions
+        questions_result = (
+            db.admin_client.table("question")
+            .select("*")
+            .eq("assessment_id", assessment_id)
+            .order("order_index")
+            .execute()
+        )
+
+        questions = questions_result.data or []
+
+        # Create CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        writer.writerow([
+            "Question",
+            "Option 1",
+            "Option 2", 
+            "Option 3",
+            "Option 4",
+            "Correct Answer",
+            "Points",
+            "Explanation"
+        ])
+        
+        # Write questions
+        for q in questions:
+            options = q.get("options", [])
+            # Pad options to always have 4 columns
+            while len(options) < 4:
+                options.append("")
+            
+            writer.writerow([
+                q.get("question_text", ""),
+                options[0] if len(options) > 0 else "",
+                options[1] if len(options) > 1 else "",
+                options[2] if len(options) > 2 else "",
+                options[3] if len(options) > 3 else "",
+                q.get("correct_answer", ""),
+                q.get("points", 1.0),
+                q.get("explanation", "") or ""
+            ])
+
+        # Prepare response
+        output.seek(0)
+        
+        # Create filename
+        lecture_title = assessment["lecture"]["title"].replace(" ", "_")[:30]
+        assessment_title = assessment.get("title", "quiz").replace(" ", "_")[:30]
+        filename = f"quiz_questions_{lecture_title}_{assessment_title}.csv"
+
+        logger.info(f"Exported {len(questions)} questions for assessment {assessment_id}")
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting questions: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error exporting questions",
+        )
+
+
+@router.get("/assessments/{assessment_id}/questions/template-csv")
+async def get_csv_template(
+    current_user: Annotated[User, Depends(require_teacher)],
+    assessment_id: str,
+    db=Depends(get_db),
+):
+    """
+    Get an empty CSV template for adding questions.
+    
+    CSV Structure:
+    Question | Option 1 | Option 2 | Option 3 | Option 4 | Correct Answer | Points
+    
+    Instructions:
+    - For Multiple Choice: Fill all 4 options, set Correct Answer to one of the options
+    - For True/False: Set Option 1 = "True", Option 2 = "False", leave Option 3 & 4 empty
+    - Points default to 1.0 if not specified
+    """
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        # Verify assessment exists and belongs to teacher's lecture
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("*, lecture!inner(teacher_id)")
+            .eq("id", assessment_id)
+            .execute()
+        )
+
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found",
+            )
+
+        assessment = assessment_result.data[0]
+        if assessment["lecture"]["teacher_id"] != str(teacher.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access this assessment",
+            )
+
+        # Create CSV template in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        writer.writerow([
+            "Question",
+            "Option 1",
+            "Option 2", 
+            "Option 3",
+            "Option 4",
+            "Correct Answer",
+            "Points",
+            "Explanation"
+        ])
+        
+        # Write example rows
+        writer.writerow([
+            "What is the capital of France?",
+            "London",
+            "Paris",
+            "Berlin",
+            "Madrid",
+            "Paris",
+            "1",
+            "Paris is the capital and largest city of France."
+        ])
+        writer.writerow([
+            "The Earth is flat.",
+            "True",
+            "False",
+            "",
+            "",
+            "False",
+            "1",
+            "The Earth is approximately spherical."
+        ])
+
+        # Prepare response
+        output.seek(0)
+        filename = "quiz_questions_template.csv"
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating template: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error generating template",
+        )
+
+
+@router.post("/assessments/{assessment_id}/questions/import-csv")
+async def import_questions_from_csv(
+    current_user: Annotated[User, Depends(require_teacher)],
+    assessment_id: str,
+    file: UploadFile,
+    replace_existing: bool = False,
+    db=Depends(get_db),
+):
+    """
+    Import quiz questions from a CSV file.
+    
+    CSV Structure (header row required):
+    Question | Option 1 | Option 2 | Option 3 | Option 4 | Correct Answer | Points | Explanation
+    
+    Parameters:
+    - file: The CSV file to upload
+    - replace_existing: If True, deletes all existing questions before import. 
+                        If False, appends to existing questions.
+    
+    Notes:
+    - For True/False questions, leave Option 3 and Option 4 empty
+    - Points defaults to 1.0 if not specified
+    - Explanation is optional
+    """
+    import csv
+    import io
+    
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        # Verify assessment exists and belongs to teacher's lecture
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("*, lecture!inner(teacher_id)")
+            .eq("id", assessment_id)
+            .execute()
+        )
+
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found",
+            )
+
+        assessment = assessment_result.data[0]
+        if assessment["lecture"]["teacher_id"] != str(teacher.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access this assessment",
+            )
+
+        # Read and parse CSV file
+        contents = await file.read()
+        try:
+            # Try UTF-8 first, then fall back to latin-1
+            try:
+                decoded = contents.decode("utf-8")
+            except UnicodeDecodeError:
+                decoded = contents.decode("latin-1")
+            
+            csv_file = io.StringIO(decoded)
+            reader = csv.DictReader(csv_file)
+            
+            # Validate headers
+            required_headers = ["Question", "Option 1", "Option 2", "Correct Answer"]
+            if not reader.fieldnames:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="CSV file is empty or has no headers",
+                )
+            
+            missing_headers = [h for h in required_headers if h not in reader.fieldnames]
+            if missing_headers:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Missing required headers: {', '.join(missing_headers)}",
+                )
+            
+            # Parse questions
+            questions_to_add = []
+            errors = []
+            row_num = 1
+            
+            for row in reader:
+                row_num += 1
+                question_text = row.get("Question", "").strip()
+                
+                if not question_text:
+                    errors.append(f"Row {row_num}: Empty question text")
+                    continue
+                
+                # Get options (filter out empty ones)
+                options = []
+                for i in range(1, 5):
+                    opt = row.get(f"Option {i}", "").strip()
+                    if opt:
+                        options.append(opt)
+                
+                if len(options) < 2:
+                    errors.append(f"Row {row_num}: At least 2 options required")
+                    continue
+                
+                correct_answer = row.get("Correct Answer", "").strip()
+                if not correct_answer:
+                    errors.append(f"Row {row_num}: Missing correct answer")
+                    continue
+                
+                if correct_answer not in options:
+                    errors.append(f"Row {row_num}: Correct answer must match one of the options")
+                    continue
+                
+                # Determine question type
+                if len(options) == 2 and set(opt.lower() for opt in options) == {"true", "false"}:
+                    question_type = "TRUE_FALSE"
+                else:
+                    question_type = "MULTIPLE_CHOICE"
+                
+                # Get points (default to 1.0)
+                try:
+                    points = float(row.get("Points", "1").strip() or "1")
+                except ValueError:
+                    points = 1.0
+                
+                explanation = row.get("Explanation", "").strip() or None
+                
+                questions_to_add.append({
+                    "question_text": question_text,
+                    "question_type": question_type,
+                    "options": options,
+                    "correct_answer": correct_answer,
+                    "points": points,
+                    "explanation": explanation,
+                })
+            
+            if not questions_to_add:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"No valid questions found. Errors: {'; '.join(errors)}",
+                )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Error parsing CSV: {str(e)}",
+            )
+
+        # If replace_existing, delete all current questions
+        if replace_existing:
+            db.admin_client.table("question").delete().eq(
+                "assessment_id", assessment_id
+            ).execute()
+            start_order = 0
+        else:
+            # Get current max order_index
+            existing_result = (
+                db.admin_client.table("question")
+                .select("order_index")
+                .eq("assessment_id", assessment_id)
+                .order("order_index", desc=True)
+                .limit(1)
+                .execute()
+            )
+            start_order = (existing_result.data[0]["order_index"] + 1) if existing_result.data else 0
+
+        # Insert questions
+        questions_to_insert = []
+        for i, q in enumerate(questions_to_add):
+            question_id = str(uuid4())
+            questions_to_insert.append({
+                "id": question_id,
+                "assessment_id": assessment_id,
+                "question_text": q["question_text"],
+                "question_type": q["question_type"],
+                "options": q["options"],
+                "correct_answer": q["correct_answer"],
+                "points": q["points"],
+                "explanation": q["explanation"],
+                "order_index": start_order + i,
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+            })
+
+        if questions_to_insert:
+            db.admin_client.table("question").insert(questions_to_insert).execute()
+
+        logger.info(f"Imported {len(questions_to_insert)} questions for assessment {assessment_id}")
+
+        response = {
+            "message": f"Successfully imported {len(questions_to_insert)} questions",
+            "assessment_id": assessment_id,
+            "questions_imported": len(questions_to_insert),
+            "replace_existing": replace_existing,
+        }
+        
+        if errors:
+            response["warnings"] = errors
+            response["rows_skipped"] = len(errors)
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error importing questions: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error importing questions",
         )
 
 
