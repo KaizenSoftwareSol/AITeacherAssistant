@@ -24,6 +24,7 @@ from models.user import User, UserRole
 from services.embedding_service import EmbeddingService
 from services.flashcard_service import FlashcardService
 from services.lecture_service import LectureService
+from services.notification_service import NotificationService
 from services.quiz_service import QuizService
 from services.summary_service import SummaryService
 from supabase_config import supabase
@@ -1367,6 +1368,56 @@ async def publish_lecture(
         db.update_record("lecture", lecture_id, {"status": "PUBLISHED"})
 
         logger.info(f"Successfully published lecture {lecture_id}")
+
+        # Notify all enrolled students
+        try:
+            course_id = lecture_data.get("course_id")
+            lecture_title = lecture_data.get("title", "Lecture")
+            
+            # Get course name
+            course_result = (
+                db.admin_client.table("course")
+                .select("name")
+                .eq("id", course_id)
+                .execute()
+            )
+            course_name = course_result.data[0]["name"] if course_result.data else "Course"
+            
+            # Get all enrolled students' user_ids
+            enrollments_result = (
+                db.admin_client.table("enrollment")
+                .select("student_id")
+                .eq("course_id", course_id)
+                .eq("is_active", True)
+                .execute()
+            )
+            
+            if enrollments_result.data:
+                student_ids = [e["student_id"] for e in enrollments_result.data]
+                
+                # Get user_ids for these students
+                students_result = (
+                    db.admin_client.table("student")
+                    .select("user_id")
+                    .in_("id", student_ids)
+                    .execute()
+                )
+                
+                if students_result.data:
+                    student_user_ids = [s["user_id"] for s in students_result.data]
+                    
+                    # Send notifications
+                    notification_service = NotificationService(db)
+                    await notification_service.notify_lecture_published(
+                        student_user_ids=student_user_ids,
+                        lecture_title=lecture_title,
+                        course_name=course_name,
+                        lecture_id=lecture_id,
+                    )
+                    logger.info(f"Sent lecture published notifications to {len(student_user_ids)} students")
+        except Exception as notify_error:
+            # Don't fail the publish if notification fails
+            logger.warning(f"Failed to send lecture published notifications: {notify_error}")
 
         return {
             "message": "Lecture published successfully",

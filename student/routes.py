@@ -34,6 +34,7 @@ from models.lecture_embedding import (
 )
 from models.user import Student, User, UserRole
 from services.embedding_service import EmbeddingService
+from services.notification_service import NotificationService
 from services.quiz_service import QuizService
 from services.rag_service import RAGService
 from utils.db import get_db
@@ -191,6 +192,56 @@ async def enroll_in_course(
         result = db.admin_client.table("enrollment").insert(enrollment_data).execute()
         
         logger.info(f"Student {student.id} successfully enrolled in course {course_id}")
+        
+        # Send notifications
+        notification_service = NotificationService(db)
+        
+        # Get student's full name for notification
+        student_name = f"{user.first_name} {user.last_name}".strip() or "A student"
+        
+        # Get teacher info to send notification
+        try:
+            # Find lectures for this course to get teacher_id
+            lecture_result = (
+                db.admin_client.table("lecture")
+                .select("teacher_id")
+                .eq("course_id", course_id)
+                .limit(1)
+                .execute()
+            )
+            
+            if lecture_result.data:
+                teacher_id = lecture_result.data[0]["teacher_id"]
+                # Get teacher's user_id
+                teacher_result = (
+                    db.admin_client.table("teacher")
+                    .select("user_id")
+                    .eq("id", teacher_id)
+                    .execute()
+                )
+                
+                if teacher_result.data:
+                    teacher_user_id = teacher_result.data[0]["user_id"]
+                    # Notify teacher about new enrollment
+                    await notification_service.notify_student_enrolled(
+                        teacher_user_id=teacher_user_id,
+                        student_name=student_name,
+                        course_name=course["name"],
+                        course_id=course_id,
+                    )
+        except Exception as notify_error:
+            # Don't fail enrollment if notification fails
+            logger.warning(f"Failed to send teacher notification: {notify_error}")
+        
+        # Notify student about successful enrollment
+        try:
+            await notification_service.notify_enrollment_confirmed(
+                student_user_id=str(user.id),
+                course_name=course["name"],
+                course_id=course_id,
+            )
+        except Exception as notify_error:
+            logger.warning(f"Failed to send student notification: {notify_error}")
         
         return {
             "message": "Successfully enrolled in course",
@@ -1732,6 +1783,43 @@ async def submit_test_quiz(
         
         logger.info(f"Graded test quiz {assessment_id} - Score: {grading_result['score']}/{grading_result['max_score']}")
         
+        # Send notifications to teacher
+        try:
+            notification_service = NotificationService(db)
+            student_name = f"{user.first_name} {user.last_name}".strip() or "A student"
+            
+            # Get teacher's user_id from assessment
+            teacher_result = (
+                db.admin_client.table("teacher")
+                .select("user_id")
+                .eq("id", assessment.get("teacher_id"))
+                .execute()
+            )
+            
+            if teacher_result.data:
+                teacher_user_id = teacher_result.data[0]["user_id"]
+                
+                # Notify teacher about quiz submission
+                await notification_service.notify_quiz_submitted(
+                    teacher_user_id=teacher_user_id,
+                    student_name=student_name,
+                    quiz_title=assessment.get("title", "Quiz"),
+                    assessment_id=assessment_id,
+                )
+                
+                # If score is below passing, send additional alert
+                passing_score = assessment.get("passing_score", 60.0)
+                if percentage < passing_score:
+                    await notification_service.notify_low_quiz_score(
+                        teacher_user_id=teacher_user_id,
+                        student_name=student_name,
+                        quiz_title=assessment.get("title", "Quiz"),
+                        score_percentage=percentage,
+                        assessment_id=assessment_id,
+                    )
+        except Exception as notify_error:
+            logger.warning(f"Failed to send quiz submission notification: {notify_error}")
+        
         return {
             "submission_id": submission_id,
             "score": grading_result["score"],
@@ -2020,6 +2108,30 @@ async def request_quiz_results(
         db.admin_client.table("result_view_request").insert(request_data).execute()
         
         logger.info(f"Created result view request {request_id} for student {student.id}")
+        
+        # Notify teacher about the result request
+        try:
+            notification_service = NotificationService(db)
+            student_name = f"{user.first_name} {user.last_name}".strip() or "A student"
+            
+            # Get teacher's user_id
+            teacher_result = (
+                db.admin_client.table("teacher")
+                .select("user_id")
+                .eq("id", teacher_id)
+                .execute()
+            )
+            
+            if teacher_result.data:
+                teacher_user_id = teacher_result.data[0]["user_id"]
+                await notification_service.notify_result_request(
+                    teacher_user_id=teacher_user_id,
+                    student_name=student_name,
+                    quiz_title=assessment["title"],
+                    request_id=request_id,
+                )
+        except Exception as notify_error:
+            logger.warning(f"Failed to send result request notification: {notify_error}")
         
         return {
             "message": "Result view request submitted successfully. Waiting for teacher approval.",
@@ -2322,7 +2434,7 @@ async def get_all_student_assessments(
         # Get all GRADED TEST assessments (is_default=False means graded test, not practice quiz)
         assessments_result = (
             db.admin_client.table("assessment")
-            .select("id, lecture_id, title, description, time_limit, passing_score, created_at")
+            .select("id, lecture_id, title, description, time_limit, passing_score, created_at, show_leaderboard, due_date, max_attempts")
             .in_("lecture_id", lecture_ids)
             .eq("is_default", False)
             .execute()
@@ -2388,6 +2500,16 @@ async def get_all_student_assessments(
             if is_completed:
                 completed_count += 1
             
+            # Calculate is_overdue based on due_date
+            due_date = assessment.get("due_date")
+            is_overdue = False
+            if due_date:
+                try:
+                    due_dt = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                    is_overdue = datetime.utcnow() > due_dt.replace(tzinfo=None)
+                except:
+                    pass
+            
             quiz_info = {
                 "assessment_id": assessment["id"],
                 "title": assessment["title"],
@@ -2410,6 +2532,11 @@ async def get_all_student_assessments(
                 "passed": (submission["score"] / submission["max_score"] * 100) >= assessment.get("passing_score", 60.0) if submission and submission["max_score"] else None,
                 "last_attempt_at": submission["submitted_at"] if submission else None,
                 "attempts": submission["attempt_number"] if submission else 0,
+                # New fields for leaderboard and due dates
+                "show_leaderboard": assessment.get("show_leaderboard", False),
+                "due_date": due_date,
+                "is_overdue": is_overdue,
+                "max_attempts": assessment.get("max_attempts", 1),
             }
             quizzes.append(quiz_info)
             

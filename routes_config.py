@@ -9,6 +9,7 @@ lecture_router = APIRouter(tags=["Lecture Generation"])
 course_router = APIRouter(tags=["Course Management"])
 student_router = APIRouter(tags=["Student Portal"])
 teacher_router = APIRouter(tags=["Teacher Resources"])
+notification_router = APIRouter(tags=["Notifications"])
 
 
 import auth.routes
@@ -18,3 +19,4 @@ import lecture.routes
 import student.routes
 import user.routes
 import teacher.routes
+import notification.routes

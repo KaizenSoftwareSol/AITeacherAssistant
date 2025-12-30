@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from dependencies import require_teacher
 from logger import logger
 from models.user import User
+from services.notification_service import NotificationService
 from utils.db import get_db
 
 router = APIRouter()
@@ -2791,10 +2792,60 @@ async def publish_test_quiz(
             "updated_at": datetime.utcnow().isoformat(),
         }).eq("id", assessment_id).execute()
 
+        quiz_title = assessment_result.data[0]["title"]
+        
+        # Notify enrolled students about the quiz
+        try:
+            # Get quiz details including course
+            quiz_full = (
+                db.admin_client.table("assessment")
+                .select("course_id, due_date")
+                .eq("id", assessment_id)
+                .execute()
+            )
+            
+            if quiz_full.data:
+                course_id = quiz_full.data[0].get("course_id")
+                due_date = quiz_full.data[0].get("due_date")
+                
+                # Get all enrolled students' user_ids
+                enrollments_result = (
+                    db.admin_client.table("enrollment")
+                    .select("student_id")
+                    .eq("course_id", course_id)
+                    .eq("is_active", True)
+                    .execute()
+                )
+                
+                if enrollments_result.data:
+                    student_ids = [e["student_id"] for e in enrollments_result.data]
+                    
+                    # Get user_ids for these students
+                    students_result = (
+                        db.admin_client.table("student")
+                        .select("user_id")
+                        .in_("id", student_ids)
+                        .execute()
+                    )
+                    
+                    if students_result.data:
+                        student_user_ids = [s["user_id"] for s in students_result.data]
+                        
+                        notification_service = NotificationService(db)
+                        await notification_service.notify_quiz_published(
+                            student_user_ids=student_user_ids,
+                            quiz_title=quiz_title,
+                            due_date=due_date,
+                            assessment_id=assessment_id,
+                        )
+                        logger.info(f"Sent quiz published notifications to {len(student_user_ids)} students")
+        except Exception as notify_error:
+            logger.warning(f"Failed to send quiz published notifications: {notify_error}")
+
         return {
             "message": "Quiz published successfully",
             "assessment_id": assessment_id,
-            "title": assessment_result.data[0]["title"],
+            "title": quiz_title,
             "is_published": True,
             "questions_count": len(questions_result.data),
         }
@@ -4743,6 +4794,27 @@ async def approve_result_request(
 
         logger.info(f"Approved result view request {request_id}")
 
+        # Notify student about the approval
+        try:
+            notification_service = NotificationService(db)
+            
+            # Get quiz title from assessment
+            assessment_result = (
+                db.admin_client.table("assessment")
+                .select("title")
+                .eq("id", req.get("assessment_id"))
+                .execute()
+            )
+            quiz_title = assessment_result.data[0]["title"] if assessment_result.data else "Quiz"
+            
+            await notification_service.notify_result_approved(
+                student_user_id=student_user_id,
+                quiz_title=quiz_title,
+                assessment_id=req.get("assessment_id"),
+            )
+        except Exception as notify_error:
+            logger.warning(f"Failed to send result approval notification: {notify_error}")
+
         return {
             "message": f"Request approved. {student_name} can now view their quiz results.",
             "request_id": request_id,
@@ -4828,6 +4900,28 @@ async def reject_result_request(
         student_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "Unknown"
 
         logger.info(f"Rejected result view request {request_id}")
+
+        # Notify student about the rejection
+        try:
+            notification_service = NotificationService(db)
+            
+            # Get quiz title from assessment
+            assessment_result = (
+                db.admin_client.table("assessment")
+                .select("title")
+                .eq("id", req.get("assessment_id"))
+                .execute()
+            )
+            quiz_title = assessment_result.data[0]["title"] if assessment_result.data else "Quiz"
+            
+            await notification_service.notify_result_rejected(
+                student_user_id=student_user_id,
+                quiz_title=quiz_title,
+                reason=response.message if response else None,
+                assessment_id=req.get("assessment_id"),
+            )
+        except Exception as notify_error:
+            logger.warning(f"Failed to send result rejection notification: {notify_error}")
 
         return {
             "message": f"Request rejected. {student_name} will not be able to view their results.",

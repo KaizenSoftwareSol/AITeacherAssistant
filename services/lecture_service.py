@@ -591,8 +591,8 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
                     },
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.7,
-                max_tokens=16384,  # Increased to allow for longer, more comprehensive lectures
+                # temperature=0.7,
+                # max_tokens=16384,  # Increased to allow for longer, more comprehensive lectures
             )
 
             generated_content = response.choices[0].message.content

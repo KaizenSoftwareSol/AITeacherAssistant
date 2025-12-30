@@ -14,6 +14,10 @@ from .job_queue import JobQueue, JobStatus, JobType
 from .lecture import (Lecture, LectureContent, LectureDownloadResponse,
                       LectureGenerationRequest, LectureGenerationResponse,
                       LectureRead, LectureStatus, LectureType, LectureUpdate)
+from .notification import (Notification, NotificationCreate,
+                           NotificationListResponse, NotificationRead,
+                           NotificationSeverity, NotificationType,
+                           NotificationUpdate, UnreadCountResponse)
 from .university import University
 from .user import Student, Teacher, User, UserRole
 
@@ -64,4 +68,13 @@ __all__ = [
     "DocumentCreate",
     "DocumentRead",
     "DocumentUpdate",
+    # Notifications
+    "Notification",
+    "NotificationType",
+    "NotificationSeverity",
+    "NotificationCreate",
+    "NotificationRead",
+    "NotificationUpdate",
+    "NotificationListResponse",
+    "UnreadCountResponse",
 ]
