@@ -18,7 +18,7 @@ class RAGService:
         """Initialize the RAG service."""
         self.db = db
         self.embedding_service = EmbeddingService(db)
-        self.top_k_chunks = 5
+        self.top_k_chunks = 8  # Increased to include both lecture content and source material chunks
     
     async def generate_response(
         self,
@@ -61,10 +61,19 @@ class RAGService:
             similarity_scores = []
             
             for chunk in similar_chunks:
-                context_parts.append(chunk["chunk_content"])
+                # Get chunk type (LECTURE_CONTENT or SOURCE_MATERIAL)
+                chunk_type = chunk.get("chunk_type", "LECTURE_CONTENT")
+                
+                # Add context label for the AI
+                if chunk_type == "SOURCE_MATERIAL":
+                    context_parts.append(f"[SOURCE MATERIAL]\n{chunk['chunk_content']}")
+                else:
+                    context_parts.append(f"[LECTURE CONTENT]\n{chunk['chunk_content']}")
+                
                 sources.append({
                     "chunk_id": chunk["chunk_id"],
                     "chunk_index": chunk["chunk_index"],
+                    "chunk_type": chunk_type,  # Track whether from lecture or source
                     "preview": chunk["chunk_content"][:200] + "...",
                 })
                 similarity_scores.append(chunk["similarity_score"])
@@ -98,13 +107,17 @@ class RAGService:
             messages = [
                 {
                     "role": "system",
-                    "content": """You are a helpful AI teaching assistant. Your role is to help students understand lecture content by answering their questions based on the provided lecture material.
+                    "content": """You are a helpful AI teaching assistant. Your role is to help students understand lecture content by answering their questions based on BOTH the generated lecture material AND the original source documents the lecture was based on.
 
 Guidelines:
-- Answer questions based primarily on the provided lecture context
+- Answer questions based on the provided context, which includes:
+  * LECTURE_CONTENT: The generated lecture as delivered by the teacher
+  * SOURCE_MATERIAL: The original textbooks, PDFs, and documents the lecture was based on
+- You can provide deeper information from source materials that may not be explicitly covered in the lecture
 - Be clear, concise, and educational in your explanations
 - If the context doesn't contain enough information, acknowledge this and suggest the student ask their teacher
 - Use examples and analogies when helpful
+- When information comes from source material that goes beyond the lecture, you can mention "The source material also explains..." or "According to the textbook..."
 - Encourage critical thinking
 - If you see quiz results in the conversation history, focus on helping with weak areas
 - Be patient and supportive"""

@@ -63,18 +63,26 @@ class LecturePlanningService:
 instructional designer specializing in creating comprehensive, 
 practical teaching plans for university and school teachers.
 
+You create teaching plans for lectures that need to be engaging, informative, 
+self-explanatory, clearly understandable, and include examples and analogies 
+to meaningfully explain concepts to students at an undergraduate level.
+
 Your plans should be:
-- Actionable and specific
-- Time-conscious and realistic
-- Engaging and interactive
-- Aligned with learning objectives
-- Include diverse teaching methods
-- Return valid JSON format""",
+- Actionable and specific - teachers should be able to follow directly
+- Time-conscious and realistic with specific timing for each phase
+- Engaging and interactive with a mix of individual, pair, and group activities
+- Aligned with learning objectives and outcomes
+- Include diverse teaching methods and differentiation strategies
+- Provide suggested answers with examples and analogies for discussion questions
+- Include specific teaching notes, bullet points, and examples teachers can use
+- Return valid JSON format
+
+CRITICAL: Always output complete, valid JSON. Never truncate the response.""",
                     },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
-                max_tokens=4000,
+                max_tokens=16000,
                 response_format={"type": "json_object"},
             )
             
@@ -120,8 +128,11 @@ Your plans should be:
             truncated_content += "\n\n[... content truncated ...]"
         
         prompt = f"""You are creating a comprehensive teaching plan for a teacher 
-who will deliver the following lecture. The teacher needs a structured plan 
-with activities, quizzes, discussion questions, timing, and pedagogical strategies.
+who will deliver the following lecture at an undergraduate level. The teacher needs 
+a structured plan with activities, quizzes, discussion questions, timing, and 
+pedagogical strategies. The lecture needs to be engaging, informative, self-explanatory, 
+clearly understandable, and shall include examples and analogies to meaningfully 
+explain concepts to the students.
 
 ---
 
@@ -159,14 +170,65 @@ format with the following structure:
           "time_allocation": "5 minutes"
         }}
       ],
-      "teaching_notes": ["Tips and suggestions for the teacher"]
+      "teaching_notes": [
+        {{
+          "tip": "Brief teaching tip or suggestion",
+          "key_bullet_points": [
+            "Clear, concise bullet point the teacher can use to explain the concept",
+            "Another bullet point covering a different aspect",
+            "Additional point with specific detail or fact"
+          ],
+          "expandable_examples": [
+            {{
+              "context": "When to use this example",
+              "example": "Detailed, specific real-world example the teacher can share with students",
+              "analogy": "Optional: a relatable analogy to help students understand",
+              "cultural_context": "Optional: cultural/regional context if applicable"
+            }}
+          ]
+        }}
+      ],
+      "talking_points": [
+        {{
+          "point": "Key concept or idea to emphasize",
+          "explanation": "How to explain this point clearly and thoroughly",
+          "bullet_points_for_teacher": [
+            "Specific fact or detail to mention",
+            "Another key point to cover",
+            "Additional information that adds clarity"
+          ],
+          "analogies": [
+            {{
+              "analogy": "A relatable analogy that makes the concept easier to understand",
+              "how_to_present": "How the teacher should introduce this analogy"
+            }}
+          ],
+          "concrete_examples": [
+            {{
+              "title": "Example title/label",
+              "description": "Specific, detailed example illustrating this point (e.g., 'Alcohol is legal in Western countries but considered Haram and illegal in many Islamic nations like Saudi Arabia and Iran')",
+              "why_it_helps": "Why this example aids understanding",
+              "discussion_prompt": "Optional question to engage students about this example"
+            }}
+          ]
+        }}
+      ]
     }}
   ],
   "discussion_questions": [
     {{
-      "question": "Thought-provoking question",
-      "purpose": "Why ask this question",
-      "expected_depth": "surface/medium/deep"
+      "question": "Thought-provoking question that promotes critical thinking",
+      "purpose": "Why ask this question and what thinking it promotes",
+      "expected_depth": "surface/medium/deep",
+      "suggested_answer": {{
+        "key_points": ["Main points the answer should cover"],
+        "example_response": "A model answer that demonstrates good critical thinking",
+        "examples_and_analogies": [
+          "Specific example or analogy to help contextualize the students' thinking pattern",
+          "Another example from a different perspective or context"
+        ],
+        "follow_up_prompts": ["Questions to deepen the discussion if needed"]
+      }}
     }}
   ],
   "formative_assessments": [
@@ -240,17 +302,53 @@ format with the following structure:
 **Important Instructions:**
 
 1. Make the plan **realistic and actionable** - teachers should be able to 
-   follow it directly
-2. Include **specific timing** for each phase and activity
-3. Provide **at least 5-8 quiz questions** covering the main concepts
+   follow it directly without additional preparation
+2. Include **specific timing** for each phase and activity (in minutes)
+3. Provide **at least 5-8 quiz questions** covering the main concepts with 
+   clear explanations of correct answers
 4. Include **at least 3-5 engaging activities** (mix of individual, pair, 
-   and group work)
-5. Add **5-8 discussion questions** that promote critical thinking
-6. Suggest **formative assessments** throughout the lecture
-7. Include **differentiation strategies** for diverse learners
-8. Provide **specific teaching notes and tips**
+   and group work) with step-by-step instructions
+5. Add **5-8 discussion questions** that promote critical thinking. For each 
+   question, **suggest answers which include examples and analogies** to help 
+   contextualize the students' thinking patterns
+6. Suggest **formative assessments** throughout the lecture to check understanding
+7. Include **differentiation strategies** for diverse learners (struggling, 
+   advanced, and different learning styles)
+8. Provide **specific teaching notes and tips**, which also include **bullet 
+   points or examples the teacher can give** to explain a certain concept 
+   thoroughly and clearly
 9. Align everything with the lecture content and learning outcomes
 10. Make sure the total duration is reasonable (typically 45-90 minutes)
+
+**CRITICAL - EXPANDABLE EXAMPLES IN TEACHING NOTES:**
+
+11. For EACH phase in lesson_structure, provide **detailed talking_points** with 
+    **concrete_examples** that teachers can expand/reveal and share with students.
+    
+12. These examples MUST be:
+    - **Specific and detailed** - not generic suggestions like "use examples from 
+      different cultures" but actual examples like:
+      * "Alcohol is legal and socially accepted in Western countries, but in 
+        Islamic nations like Saudi Arabia and Iran, it is considered Haram 
+        (forbidden) and is illegal"
+      * "Same-sex marriage is recognized as a fundamental right in many Western 
+        democracies, but is prohibited under Islamic law in countries like 
+        Pakistan and Malaysia"
+      * "Capital punishment is abolished in most of Europe but actively practiced 
+        in the United States, China, and Saudi Arabia"
+    - **Culturally diverse** - include examples from different regions, religions, 
+      legal systems, and perspectives
+    - **Ready to use** - teachers should be able to read them directly to students
+    - **Discussion-provoking** - include optional prompts to engage students
+
+13. Each teaching_note should have the structure:
+    - "tip": Brief advice for the teacher
+    - "expandable_examples": Array of specific examples the teacher can reveal/expand
+
+14. Each talking_point should include:
+    - "point": The key concept
+    - "explanation": How to explain it
+    - "concrete_examples": Array of 2-3 specific, detailed, ready-to-use examples
 
 Generate a complete, detailed teaching plan now in valid JSON format.
 """

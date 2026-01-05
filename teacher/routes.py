@@ -464,7 +464,7 @@ async def get_course_full_details(
         if student_ids:
             students_result = (
                 db.admin_client.table("student")
-                .select("id, student_id_number, user_id")
+                .select("id, student_id, user_id")
                 .in_("id", student_ids)
                 .execute()
             )
@@ -488,7 +488,7 @@ async def get_course_full_details(
                     students.append({
                         "enrollment_id": enrollment["id"],
                         "student_id": enrollment["student_id"],
-                        "student_id_number": student.get("student_id_number"),
+                        "student_id_number": student.get("student_id"),
                         "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip(),
                         "email": user.get("email"),
                         "enrolled_at": enrollment["enrolled_at"],

@@ -514,9 +514,22 @@ Ensure that by the end of the lecture, students will have acquired the knowledge
 
             prompt = f"""You are an expert educational content creator and lecturer. Generate a **comprehensive, engaging, and descriptive lecture script** based **PRIMARILY on the SOURCE MATERIAL provided below**.
 
+**ABSOLUTE RULES - FOLLOW STRICTLY:**
+1. **START THE LECTURE IMMEDIATELY** - Begin directly with the lecture content. Do NOT include any preamble, introduction about yourself, or meta-commentary.
+2. **NO APOLOGIES OR DISCLAIMERS** - Never write things like "I cannot meet...", "I'm sorry but...", "This is not feasible...", "I will try to...", or any similar statements.
+3. **NO META-COMMENTARY** - Do not discuss the task, the word count, the limitations, or what you will/won't do. Just produce the lecture.
+4. **OUTPUT ONLY THE LECTURE** - The response should contain ONLY the lecture script that a teacher can read directly to students.
+
 **CRITICAL INSTRUCTION: The lecture content MUST be derived from and based on the SOURCE MATERIAL and ADDITIONAL SOURCES provided. Do NOT generate generic content based solely on the title or description. Extract, explain, and elaborate on the actual concepts, facts, theories, and information present in the source material.**
 
 The lecture should be written **as if the teacher is speaking to the class**, guiding students through concepts, examples, and explanations in a natural, instructive tone.
+
+**LECTURE QUALITY REQUIREMENTS:**
+- **Engaging** - Capture and maintain student attention throughout
+- **Informative** - Provide substantial educational value
+- **Self-explanatory** - Concepts should be explained fully without requiring external references
+- **Clearly understandable** - Use accessible language appropriate for undergraduate students
+- **Rich in examples and analogies** - Use concrete examples and meaningful analogies to help students grasp abstract concepts
 
 **IMPORTANT: This lecture should be designed for approximately 45 minutes of delivery time.** The content should be substantial, detailed, and comprehensive enough to fill this duration when spoken at a natural teaching pace.
 
@@ -565,19 +578,16 @@ The lecture should be written **as if the teacher is speaking to the class**, gu
    - Detailed explanations that go beyond surface-level coverage
    - Rich context and background information
    - Multiple thinking activities and reflection points
-7. **Minimum size requirement**: Produce **at least 20,500 words**. If the source material is limited, expand with narratives, case studies, comparisons, and reflective prompts that relate to the source content until the word count is met. Include `[Estimated duration: ~X minutes]` callouts at the start of each major section to reinforce pacing.
+7. **Content expansion**: If the source material is limited, expand with narratives, case studies, comparisons, and reflective prompts that relate to the source content. Include `[Estimated duration: ~X minutes]` callouts at the start of each major section to reinforce pacing.
 8. Maintain **academic accuracy** and logical flow, but keep it accessible for students.
 9. The final output should be a **ready-to-deliver lecture script**, not just notes or bullet points. It should be detailed enough that a teacher can read it naturally and fill 45 minutes.
 10. **VERIFY LEARNING OUTCOMES**: Before concluding, mentally check that each learning outcome (if provided) has been adequately addressed in the lecture content.
 
 ---
 
-Now, generate a **complete, comprehensive, and engaging teacher-style lecture script** that:
-- Is BASED ON THE SOURCE MATERIAL PROVIDED
-- Achieves all LEARNING OUTCOMES (if provided)
-- Is designed for approximately 45 minutes of delivery time
+**REMEMBER: Start the lecture immediately. No preamble, no apologies, no meta-commentary. Output ONLY the lecture script.**
 
-CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
+BEGIN THE LECTURE NOW:
 """
 
             # Call OpenAI API
@@ -587,7 +597,7 @@ CREATE COMPREHENSIVE AND ENGAGING LECTURE SCRIPT BASED ON THE SOURCE MATERIAL:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert educational content creator specializing in generating high-quality academic lectures. You create comprehensive, detailed lectures designed for 45-minute delivery. IMPORTANT: Base your lecture content PRIMARILY on the source material provided, NOT on generic knowledge about the topic. If learning outcomes are provided, ensure the lecture achieves all of them.",
+                        "content": "You are an expert educational content creator specializing in generating high-quality academic lectures at an undergraduate level. You create comprehensive, detailed lectures designed for 45-minute delivery. The lectures you create are engaging, informative, self-explanatory, clearly understandable, and include examples and analogies to meaningfully explain concepts to students. IMPORTANT: Base your lecture content PRIMARILY on the source material provided, NOT on generic knowledge about the topic. If learning outcomes are provided, ensure the lecture achieves all of them. CRITICAL: Always output ONLY the lecture content. Never include apologies, disclaimers, meta-commentary about the task, or statements like 'I cannot...' or 'I will try...'. Start directly with the lecture script.",
                     },
                     {"role": "user", "content": prompt},
                 ],
