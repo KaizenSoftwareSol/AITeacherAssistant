@@ -110,15 +110,25 @@ class EmbeddingService:
                 }
                 embedding_records.append(embedding_record)
             
-            # Insert chunks and embeddings into database
+            # Insert chunks and embeddings into database in batches to avoid timeout
             if self.db:
-                # Insert chunks
-                self.db.admin_client.table("lecture_chunk").insert(chunk_records).execute()
-                logger.info(f"Inserted {len(chunk_records)} chunks for lecture {lecture_id}")
+                BATCH_SIZE = 10  # Insert 10 records at a time to avoid Supabase timeout
                 
-                # Insert embeddings
-                self.db.admin_client.table("lecture_embedding").insert(embedding_records).execute()
-                logger.info(f"Inserted {len(embedding_records)} embeddings for lecture {lecture_id}")
+                # Insert chunks in batches
+                for i in range(0, len(chunk_records), BATCH_SIZE):
+                    batch = chunk_records[i:i + BATCH_SIZE]
+                    self.db.admin_client.table("lecture_chunk").insert(batch).execute()
+                    logger.info(f"Inserted chunk batch {i // BATCH_SIZE + 1} ({len(batch)} chunks) for lecture {lecture_id}")
+                
+                logger.info(f"Inserted total {len(chunk_records)} chunks for lecture {lecture_id}")
+                
+                # Insert embeddings in batches
+                for i in range(0, len(embedding_records), BATCH_SIZE):
+                    batch = embedding_records[i:i + BATCH_SIZE]
+                    self.db.admin_client.table("lecture_embedding").insert(batch).execute()
+                    logger.info(f"Inserted embedding batch {i // BATCH_SIZE + 1} ({len(batch)} embeddings) for lecture {lecture_id}")
+                
+                logger.info(f"Inserted total {len(embedding_records)} embeddings for lecture {lecture_id}")
                 
                 # Update lecture has_embeddings flag
                 self.db.admin_client.table("lecture").update({
