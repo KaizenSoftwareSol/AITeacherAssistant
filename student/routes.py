@@ -2,6 +2,8 @@
 """
 Student-facing API routes for course enrollment, lecture viewing, 
 chatbot interaction, and quiz generation.
+
+Optimized with caching for improved performance.
 """
 
 import json
@@ -33,11 +35,23 @@ from models.lecture_embedding import (
     StudentLectureInfo
 )
 from models.user import Student, User, UserRole
+from services.cache_service import cache
 from services.embedding_service import EmbeddingService
 from services.notification_service import NotificationService
 from services.quiz_service import QuizService
 from services.rag_service import RAGService
 from utils.db import get_db
+from utils.query_helpers import (
+    CourseQueryHelper,
+    EnrollmentQueryHelper,
+    LectureQueryHelper,
+    StudentQueryHelper,
+    AssessmentQueryHelper,
+    FlashcardQueryHelper,
+    TeacherQueryHelper,
+    verify_student_enrollment,
+    get_lecture_if_enrolled,
+)
 from supabase_config import supabase
 
 router = APIRouter()
@@ -52,6 +66,7 @@ async def require_student(
 ) -> tuple[User, Student]:
     """
     Dependency to ensure the user is a student and fetch their student profile.
+    Uses caching for improved performance.
     """
     if user.role not in [UserRole.STUDENT, UserRole.ADMIN]:
         raise HTTPException(
@@ -59,22 +74,16 @@ async def require_student(
             detail="This endpoint is only accessible to students",
         )
     
-    # Get student profile
+    # Get student profile with caching
     try:
-        student_result = (
-            db.admin_client.table("student")
-            .select("*")
-            .eq("user_id", str(user.id))
-            .execute()
-        )
+        student_data = StudentQueryHelper.get_student_profile(db, str(user.id))
         
-        if not student_result.data or len(student_result.data) == 0:
+        if not student_data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Student profile not found. Please contact administrator.",
             )
         
-        student_data = student_result.data[0]
         student = Student(**student_data)
         return user, student
     
@@ -108,22 +117,17 @@ async def enroll_in_course(
     try:
         logger.info(f"Student {student.id} attempting to enroll in course code: {request.course_code}")
         
-        # Find the course by code
-        course_result = (
-            db.admin_client.table("course")
-            .select("*")
-            .eq("code", request.course_code.upper())
-            .eq("university_id", str(student.university_id))
-            .execute()
+        # Find the course by code (cached)
+        course = CourseQueryHelper.get_course_by_code(
+            db, request.course_code, str(student.university_id)
         )
         
-        if not course_result.data or len(course_result.data) == 0:
+        if not course:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Course with code '{request.course_code}' not found at your university",
             )
         
-        course = course_result.data[0]
         course_id = course["id"]
         
         # Check if already enrolled
@@ -190,6 +194,9 @@ async def enroll_in_course(
         }
         
         result = db.admin_client.table("enrollment").insert(enrollment_data).execute()
+        
+        # Invalidate enrollment caches for this student
+        cache.invalidate_student(str(student.id))
         
         logger.info(f"Student {student.id} successfully enrolled in course {course_id}")
         
@@ -270,67 +277,85 @@ async def get_my_courses(
     
     Returns course information including teacher name and lecture counts.
     Format: "Course Name - Teacher Name"
+    
+    Optimized with caching and batch queries.
     """
     user, student = user_student
     
     try:
         logger.info(f"Fetching courses for student {student.id}")
         
-        # Get all active enrollments for this student
-        enrollments_result = (
-            db.admin_client.table("enrollment")
-            .select("*, course(*)")
-            .eq("student_id", str(student.id))
-            .eq("is_active", True)
-            .order("enrolled_at", desc=True)
-            .execute()
-        )
+        # Check cache first for the entire response
+        cache_key = f"my_courses:{student.id}"
+        cached_courses = cache.get("enrollments", cache_key)
+        if cached_courses is not None:
+            return cached_courses
         
-        if not enrollments_result.data:
+        # Get all active enrollments for this student (cached)
+        enrollments = EnrollmentQueryHelper.get_student_enrollments(db, str(student.id))
+        
+        if not enrollments:
             logger.info(f"No enrollments found for student {student.id}")
             return []
         
+        # Collect all course IDs for batch queries
+        course_ids = [e.get("course", {}).get("id") for e in enrollments if e.get("course", {}).get("id")]
+        
+        # Batch fetch all lectures for all courses at once
+        all_lectures_result = (
+            db.admin_client.table("lecture")
+            .select("id, status, teacher_id, course_id")
+            .in_("course_id", course_ids)
+            .execute()
+        )
+        
+        # Group lectures by course_id
+        lectures_by_course = {}
+        teacher_ids = set()
+        for lec in (all_lectures_result.data or []):
+            cid = lec.get("course_id")
+            if cid not in lectures_by_course:
+                lectures_by_course[cid] = []
+            lectures_by_course[cid].append(lec)
+            if lec.get("teacher_id"):
+                teacher_ids.add(lec["teacher_id"])
+        
+        # Batch fetch all teacher names at once
+        teacher_names = {}
+        if teacher_ids:
+            teachers_result = (
+                db.admin_client.table("teacher")
+                .select("id, users(first_name, last_name)")
+                .in_("id", list(teacher_ids))
+                .execute()
+            )
+            for t in (teachers_result.data or []):
+                user_data = t.get("users", {})
+                if user_data:
+                    name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
+                    teacher_names[t["id"]] = name or "Unknown Teacher"
+        
         courses = []
-        for enrollment in enrollments_result.data:
+        for enrollment in enrollments:
             course = enrollment.get("course", {})
             course_id = course.get("id")
             
             if not course_id:
                 continue
             
-            # Get lectures for this course
-            lectures_result = (
-                db.admin_client.table("lecture")
-                .select("id, status, teacher_id")
-                .eq("course_id", course_id)
-                .execute()
-            )
-            
-            total_lectures = len(lectures_result.data) if lectures_result.data else 0
+            course_lectures = lectures_by_course.get(course_id, [])
+            total_lectures = len(course_lectures)
             published_lectures = sum(
-                1 for l in (lectures_result.data or [])
+                1 for l in course_lectures
                 if l.get("status") in ["PUBLISHED", "DELIVERED"]
             )
             
             # Get teacher name from first lecture
             teacher_name = "Unknown Teacher"
-            if lectures_result.data and len(lectures_result.data) > 0:
-                teacher_id = lectures_result.data[0].get("teacher_id")
+            if course_lectures:
+                teacher_id = course_lectures[0].get("teacher_id")
                 if teacher_id:
-                    teacher_result = (
-                        db.admin_client.table("teacher")
-                        .select("*, users(*)")
-                        .eq("id", teacher_id)
-                        .limit(1)
-                        .execute()
-                    )
-                    
-                    if teacher_result.data:
-                        user_data = teacher_result.data[0].get("users", {})
-                        if user_data:
-                            first_name = user_data.get("first_name", "")
-                            last_name = user_data.get("last_name", "")
-                            teacher_name = f"{first_name} {last_name}".strip() or "Unknown Teacher"
+                    teacher_name = teacher_names.get(teacher_id, "Unknown Teacher")
             
             course_info = StudentCourseInfo(
                 course_id=course_id,
@@ -344,6 +369,9 @@ async def get_my_courses(
                 published_lectures=published_lectures,
             )
             courses.append(course_info)
+        
+        # Cache the result for 2 minutes
+        cache.set("enrollments", courses, cache_key, ttl=120)
         
         logger.info(f"Found {len(courses)} courses for student {student.id}")
         return courses
@@ -366,65 +394,69 @@ async def get_course_lectures(
     Get all published lectures for a specific course.
     
     Students can only see published/delivered lectures for courses they're enrolled in.
+    Optimized with caching.
     """
     user, student = user_student
     
     try:
         logger.info(f"Fetching lectures for course {course_id}, student {student.id}")
         
-        # Verify student is enrolled in this course
-        enrollment_result = (
-            db.admin_client.table("enrollment")
-            .select("*")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
-            .eq("is_active", True)
-            .execute()
-        )
+        # Check cache first
+        cache_key = f"course_lectures:{course_id}:{student.id}"
+        cached_response = cache.get("lectures", cache_key)
+        if cached_response is not None:
+            return cached_response
         
-        if not enrollment_result.data or len(enrollment_result.data) == 0:
+        # Verify student is enrolled in this course (cached)
+        enrollment = EnrollmentQueryHelper.check_enrollment(db, str(student.id), course_id)
+        
+        if not enrollment:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You are not enrolled in this course",
             )
         
-        # Get course information with teacher
-        course_result = (
-            db.admin_client.table("course")
-            .select("*, lecture!inner(teacher_id, teacher!inner(user_id, users!inner(first_name, last_name)))")
-            .eq("id", course_id)
-            .limit(1)
-            .execute()
-        )
+        # Get course information (cached)
+        course = CourseQueryHelper.get_course_with_cache(db, course_id)
         
-        if not course_result.data:
+        if not course:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Course not found",
             )
         
-        course = course_result.data[0]
-        
-        # Get teacher name (from first lecture's teacher)
-        teacher_name = "Unknown Teacher"
-        if course.get("lecture") and len(course["lecture"]) > 0:
-            teacher_data = course["lecture"][0].get("teacher", {})
-            if teacher_data:
-                user_data = teacher_data.get("users", {})
-                teacher_name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
-        
-        # Get all lectures (including GENERATED) for this course
-        lectures_result = (
-            db.admin_client.table("lecture")
-            .select("id, title, description, summary, chapter, status, created_at, has_embeddings, topic, lecture_number, content")
-            .eq("course_id", course_id)
-            .in_("status", ["PUBLISHED", "DELIVERED"])
-            .order("created_at", desc=False)
-            .execute()
+        # Get all published lectures for this course (cached)
+        lectures_data = LectureQueryHelper.get_course_lectures(
+            db, course_id, status_filter=["PUBLISHED", "DELIVERED"]
         )
         
+        # Get teacher name from first lecture if available
+        teacher_name = "Unknown Teacher"
+        if lectures_data:
+            teacher_id = None
+            # Try to get teacher_id from lectures
+            for lec in lectures_data:
+                if lec.get("teacher_id"):
+                    teacher_id = lec.get("teacher_id")
+                    break
+            
+            if not teacher_id:
+                # Fallback: query for teacher_id
+                first_lecture = (
+                    db.admin_client.table("lecture")
+                    .select("teacher_id")
+                    .eq("course_id", course_id)
+                    .limit(1)
+                    .execute()
+                )
+                if first_lecture.data:
+                    teacher_id = first_lecture.data[0].get("teacher_id")
+            
+            if teacher_id:
+                teacher_name = TeacherQueryHelper.get_teacher_name(db, teacher_id)
+        
         # Batch fetch lecture_content for PDFs
-        lecture_id_list = [row["id"] for row in (lectures_result.data or [])]
+        lecture_id_list = [row["id"] for row in lectures_data]
         content_by_lecture_id = {}
         if lecture_id_list:
             lc_result = (
@@ -441,7 +473,7 @@ async def get_course_lectures(
 
         # Build lecture list with content and pdf info
         lectures = []
-        for lecture_data in lectures_result.data if lectures_result.data else []:
+        for lecture_data in lectures_data:
             pdf_file_name = None
             pdf_file_size = None
             pdf_download_url = None
@@ -507,7 +539,7 @@ async def get_course_lectures(
             course_description=course.get("description"),
             teacher_name=teacher_name,
             display_name=f"{course['name']} - {teacher_name}",
-            enrolled_at=enrollment_result.data[0]["enrolled_at"],
+            enrolled_at=enrollment.get("enrolled_at"),
             total_lectures=len(lectures),
             published_lectures=len(lectures),
         )
@@ -519,6 +551,9 @@ async def get_course_lectures(
             lectures_without_topic=lectures_without_topic if lectures_without_topic else None,
             total_count=len(lectures),
         )
+        
+        # Cache the response for 3 minutes
+        cache.set("lectures", response, cache_key, ttl=180)
         
         logger.info(f"Found {len(lectures)} lectures for course {course_id}")
         return response
@@ -879,63 +914,44 @@ async def get_lecture_flashcards(
     
     Returns the pre-generated flashcards that were created when the lecture was published.
     Students can use these for quick review and study.
+    Optimized with caching.
     """
     user, student = user_student
     
     try:
         logger.info(f"Fetching flashcards for lecture {lecture_id}, student {student.id}")
         
-        # Verify lecture access
-        lecture_result = (
-            db.admin_client.table("lecture")
-            .select("*, course!inner(id)")
-            .eq("id", lecture_id)
-            .in_("status", ["PUBLISHED", "DELIVERED"])
-            .execute()
-        )
+        # Check cache for the full response
+        cache_key = f"flashcards_response:{lecture_id}"
+        cached_response = cache.get("flashcards", cache_key)
+        if cached_response is not None:
+            # Still need to verify enrollment (but this is cached too)
+            lecture = LectureQueryHelper.get_published_lecture(db, lecture_id)
+            if lecture:
+                course_id = lecture.get("course", {}).get("id") or lecture.get("course_id")
+                if course_id and verify_student_enrollment(db, str(student.id), course_id):
+                    return cached_response
         
-        if not lecture_result.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Lecture not found or not published",
-            )
+        # Verify lecture access and enrollment (cached)
+        lecture, error = get_lecture_if_enrolled(db, lecture_id, str(student.id), published_only=True)
         
-        lecture = lecture_result.data[0]
-        course_id = lecture["course"]["id"]
+        if error:
+            status_code = status.HTTP_403_FORBIDDEN if "not enrolled" in error else status.HTTP_404_NOT_FOUND
+            raise HTTPException(status_code=status_code, detail=error)
         
-        # Verify enrollment
-        enrollment_result = (
-            db.admin_client.table("enrollment")
-            .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
-            .eq("is_active", True)
-            .execute()
-        )
+        course_id = lecture.get("course", {}).get("id") or lecture.get("course_id")
         
-        if not enrollment_result.data:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not enrolled in this course",
-            )
+        # Get flashcards for this lecture (cached)
+        flashcards_data = FlashcardQueryHelper.get_lecture_flashcards(db, lecture_id)
         
-        # Get flashcards for this lecture
-        flashcards_result = (
-            db.admin_client.table("flashcard")
-            .select("*")
-            .eq("lecture_id", lecture_id)
-            .order("order_index")
-            .execute()
-        )
-        
-        if not flashcards_result.data:
+        if not flashcards_data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No flashcards available for this lecture yet. They may still be generating.",
             )
         
         flashcards = []
-        for card in flashcards_result.data:
+        for card in flashcards_data:
             flashcards.append({
                 "id": card["id"],
                 "question": card["question"],
@@ -954,7 +970,7 @@ async def get_lecture_flashcards(
             difficulties[diff] = difficulties.get(diff, 0) + 1
             topics[topic] = topics.get(topic, 0) + 1
         
-        return {
+        response = {
             "lecture_id": lecture_id,
             "lecture_title": lecture.get("title"),
             "total_flashcards": len(flashcards),
@@ -962,6 +978,11 @@ async def get_lecture_flashcards(
             "by_topic": topics,
             "flashcards": flashcards,
         }
+        
+        # Cache the response for 10 minutes
+        cache.set("flashcards", response, cache_key, ttl=600)
+        
+        return response
     
     except HTTPException:
         raise
@@ -987,84 +1008,54 @@ async def get_lecture_quiz(
     
     Returns the pre-generated quiz that was created when the lecture was published.
     This is the same quiz for all students.
+    Optimized with caching.
     """
     user, student = user_student
     
     try:
         logger.info(f"Fetching saved quiz for lecture {lecture_id}, student {student.id}")
         
-        # Verify lecture access
-        lecture_result = (
-            db.admin_client.table("lecture")
-            .select("*, course!inner(id, name), teacher!inner(id)")
-            .eq("id", lecture_id)
-            .in_("status", ["PUBLISHED", "DELIVERED"])
-            .execute()
-        )
+        # Check cache for the quiz response
+        cache_key = f"quiz_response:{lecture_id}"
+        cached_response = cache.get("assessments", cache_key)
         
-        if not lecture_result.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Lecture not found",
-            )
+        # Verify access first (cached operations)
+        lecture, error = get_lecture_if_enrolled(db, lecture_id, str(student.id), published_only=True)
         
-        lecture = lecture_result.data[0]
-        course_id = lecture["course"]["id"]
+        if error:
+            status_code = status.HTTP_403_FORBIDDEN if "not enrolled" in error else status.HTTP_404_NOT_FOUND
+            raise HTTPException(status_code=status_code, detail=error)
         
-        # Verify enrollment
-        enrollment_result = (
-            db.admin_client.table("enrollment")
-            .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
-            .eq("is_active", True)
-            .execute()
-        )
+        # Return cached response if available (after access verification)
+        if cached_response is not None:
+            return cached_response
         
-        if not enrollment_result.data:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not enrolled in this course",
-            )
+        course_id = lecture.get("course", {}).get("id") or lecture.get("course_id")
         
-        # Get default quiz for this lecture
-        assessment_result = (
-            db.admin_client.table("assessment")
-            .select("*")
-            .eq("lecture_id", lecture_id)
-            .eq("is_default", True)
-            .execute()
-        )
+        # Get default quiz for this lecture (cached)
+        assessment = AssessmentQueryHelper.get_default_assessment(db, lecture_id)
         
-        if not assessment_result.data:
+        if not assessment:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No quiz available for this lecture yet. It may still be generating.",
             )
         
-        assessment = assessment_result.data[0]
-        
-        # Get questions
-        questions_result = (
-            db.admin_client.table("question")
-            .select("*")
-            .eq("assessment_id", assessment["id"])
-            .order("order_index")
-            .execute()
-        )
+        # Get questions (cached)
+        questions_data = AssessmentQueryHelper.get_assessment_questions(db, assessment["id"])
         
         questions = []
-        for q in questions_result.data:
+        for q in questions_data:
             questions.append({
                 "question_id": q["id"],
                 "question_text": q["question_text"],
                 "question_type": q["question_type"],
                 "points": q.get("points", 1.0),
-                "options": json.loads(q.get("options", "[]")),
+                "options": json.loads(q.get("options", "[]")) if isinstance(q.get("options"), str) else q.get("options", []),
                 "explanation": q.get("explanation"),
             })
         
-        return {
+        response = {
             "assessment_id": assessment["id"],
             "title": assessment["title"],
             "description": assessment.get("description"),
@@ -1075,6 +1066,11 @@ async def get_lecture_quiz(
             "is_default": True,
             "questions": questions,
         }
+        
+        # Cache the response for 5 minutes
+        cache.set("assessments", response, cache_key, ttl=300)
+        
+        return response
     
     except HTTPException:
         raise

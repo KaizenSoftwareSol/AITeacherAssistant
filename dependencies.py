@@ -5,10 +5,57 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
 from models.user import User, UserRole
+from services.cache_service import cache, cached
 from settings import settings
 from utils.db import get_db
 
 security = HTTPBearer()
+
+
+def _get_cached_user_by_id(db, user_id: str) -> dict | None:
+    """Get user by ID with caching."""
+    # Check cache first
+    cached_user = cache.get("users", "user_by_id", user_id)
+    if cached_user is not None:
+        return cached_user
+    
+    # Fetch from database
+    user_data = db.get_user_by_id(user_id)
+    
+    # Cache the result (even None to prevent repeated lookups)
+    if user_data:
+        cache.set("users", user_data, "user_by_id", user_id, ttl=60)
+    
+    return user_data
+
+
+def _get_cached_teacher_profile(db, user_id: str) -> dict | None:
+    """Get teacher profile by user_id with caching."""
+    # Check cache first
+    cached_teacher = cache.get("teachers", "teacher_by_user", user_id)
+    if cached_teacher is not None:
+        return cached_teacher if cached_teacher != "__NONE__" else None
+    
+    # Fetch from database
+    try:
+        teacher_result = (
+            db.admin_client.table("teacher")
+            .select("*")
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        
+        if teacher_result.data and len(teacher_result.data) > 0:
+            teacher_data = teacher_result.data[0]
+            cache.set("teachers", teacher_data, "teacher_by_user", user_id, ttl=300)
+            return teacher_data
+        else:
+            # Cache the absence to avoid repeated lookups
+            cache.set("teachers", "__NONE__", "teacher_by_user", user_id, ttl=300)
+            return None
+    except Exception as e:
+        print(f"Warning: Could not load teacher profile: {e}")
+        return None
 
 
 class AuthDependency:
@@ -19,47 +66,52 @@ class AuthDependency:
         db=Depends(get_db),
     ) -> User:
         """
-        Dependency to get the current authenticated user from the JWT token
+        Dependency to get the current authenticated user from the JWT token.
+        Uses caching for improved performance.
         """
         # Standard header for 401 errors
         authenticate_header = {"WWW-Authenticate": "Bearer"}
         try:
             token = credentials.credentials
+            
+            # Check if we have a cached user for this token
+            token_hash = hash(token) % 10**8  # Simple hash for cache key
+            cached_result = cache.get("auth", "token", token_hash)
+            if cached_result is not None:
+                user = cached_result
+                request.state.user = user
+                return user
+            
+            # Decode token
             payload = jwt.decode(
                 token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
             )
 
             user_id: str = payload.get("sub")
             if user_id is None:
-                # Raise HTTPException for invalid token
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Could not validate credentials - Invalid token structure",
                     headers=authenticate_header,
                 )
 
-            # Get user from Supabase database
-            # Note: user_id can be either UUID string or integer depending on database
-            user_data = db.get_user_by_id(user_id)
+            # Get user from cache or database
+            user_data = _get_cached_user_by_id(db, user_id)
 
             if not user_data:
-                # Raise HTTPException for user not found
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,  # Often 401 or 404 depending on desired security feedback
+                    status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="User not found",
                     headers=authenticate_header,
                 )
 
             if not user_data.get("is_active", False):
-                # Raise HTTPException for inactive user
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Inactive user",
                 )
 
             # Convert dict to User object
-            # Don't try to create full User object with relationships
-            # Just create a basic user dict that we can work with
             from models.user import Teacher
 
             # Create basic user object
@@ -80,57 +132,44 @@ class AuthDependency:
             # Create user object without relationships initially
             user = User(**user_dict)
 
-            # Load teacher profile if user is a teacher or admin
+            # Load teacher profile if user is a teacher or admin (cached)
             if user.role in [UserRole.TEACHER, UserRole.ADMIN]:
-                try:
-                    # Query teacher profile by user_id
-                    teacher_result = (
-                        db.admin_client.table("teacher")
-                        .select("*")
-                        .eq("user_id", str(user.id))
-                        .execute()
-                    )
-
-                    if teacher_result.data and len(teacher_result.data) > 0:
-                        teacher_data = teacher_result.data[0]
-                        # Create a simple teacher object (not full model with relationships)
-                        teacher_dict = {
-                            "id": teacher_data.get("id"),
-                            "user_id": teacher_data.get("user_id"),
-                            "university_id": teacher_data.get("university_id"),
-                            "department": teacher_data.get("department"),
-                            "specialization": teacher_data.get("specialization"),
-                            "voice_config": teacher_data.get("voice_config"),
-                            "created_at": teacher_data.get("created_at"),
-                            "updated_at": teacher_data.get("updated_at"),
-                        }
-                        user.teacher_profile = Teacher(**teacher_dict)
-                    else:
-                        user.teacher_profile = None
-                except Exception as e:
-                    print(f"Warning: Could not load teacher profile: {e}")
-                    import traceback
-
-                    traceback.print_exc()
+                teacher_data = _get_cached_teacher_profile(db, str(user.id))
+                
+                if teacher_data:
+                    teacher_dict = {
+                        "id": teacher_data.get("id"),
+                        "user_id": teacher_data.get("user_id"),
+                        "university_id": teacher_data.get("university_id"),
+                        "department": teacher_data.get("department"),
+                        "specialization": teacher_data.get("specialization"),
+                        "voice_config": teacher_data.get("voice_config"),
+                        "created_at": teacher_data.get("created_at"),
+                        "updated_at": teacher_data.get("updated_at"),
+                    }
+                    user.teacher_profile = Teacher(**teacher_dict)
+                else:
                     user.teacher_profile = None
             else:
                 user.teacher_profile = None
+
+            # Cache the complete user object for this token (5 min TTL)
+            cache.set("auth", user, "token", token_hash, ttl=300)
 
             # Add user object to request state
             request.state.user = user
             return user
 
-        except JWTError:  # Catch other JWT errors
-            # Raise HTTPException for general token validation issues
+        except JWTError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Could not validate credentials - Token error",
                 headers=authenticate_header,
             )
+        except HTTPException:
+            raise
         except Exception as e:
-            # Log the detailed error for debugging
-            print(f"Unexpected authentication error: {e}")  # Consider proper logging
-            # Raise HTTPException for unexpected internal errors during auth
+            print(f"Unexpected authentication error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Internal server error during authentication",
@@ -146,10 +185,9 @@ class AuthDependency:
             user: User = Depends(AuthDependency.get_current_user),
         ) -> User:
             if user.role not in allowed_roles:
-                # Raise HTTPException for insufficient permissions
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Insufficient Permissions",  # Keep message user-friendly
+                    detail="Insufficient Permissions",
                 )
             return user
 

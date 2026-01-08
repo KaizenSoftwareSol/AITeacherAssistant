@@ -1,4 +1,8 @@
 # course/routes.py
+"""
+Course management routes for teachers.
+Optimized with caching for improved performance.
+"""
 
 from datetime import date, datetime
 import random
@@ -11,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationInfo
 from dependencies import require_teacher
 from logger import logger
 from models.user import User
+from services.cache_service import cache
 from utils.db import get_db
 
 router = APIRouter()
@@ -72,6 +77,7 @@ async def get_teacher_courses(
     total_students, published_lectures, total_documents, created_at, updated_at.
 
     This endpoint is only accessible to teachers and admins.
+    Optimized with caching and batch queries.
     """
     try:
         # Get teacher profile
@@ -85,6 +91,12 @@ async def get_teacher_courses(
         logger.info(
             f"Fetching courses for teacher {teacher.id}, university {teacher.university_id}"
         )
+        
+        # Check cache first
+        cache_key = f"teacher_courses:{teacher.university_id}"
+        cached_courses = cache.get("courses", cache_key)
+        if cached_courses is not None:
+            return cached_courses
 
         # Get courses for this teacher's university
         courses = db.get_records(
@@ -92,55 +104,62 @@ async def get_teacher_courses(
             filters={"university_id": teacher.university_id},
             skip=0,
             limit=1000,
+            use_cache=False,  # We're caching the enriched result
         )
+        
+        if not courses:
+            return []
+        
+        course_ids = [c["id"] for c in courses]
+        
+        # Batch fetch all enrollment counts at once
+        enrollments_result = (
+            db.admin_client.table("enrollment")
+            .select("course_id")
+            .in_("course_id", course_ids)
+            .eq("is_active", True)
+            .execute()
+        )
+        enrollment_counts = {}
+        for e in (enrollments_result.data or []):
+            cid = e.get("course_id")
+            enrollment_counts[cid] = enrollment_counts.get(cid, 0) + 1
+        
+        # Batch fetch all lectures with status at once
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("course_id, status, document_id")
+            .in_("course_id", course_ids)
+            .execute()
+        )
+        
+        # Process lecture data
+        published_counts = {}
+        doc_ids_by_course = {}
+        for lec in (lectures_result.data or []):
+            cid = lec.get("course_id")
+            if lec.get("status") in ["PUBLISHED", "DELIVERED"]:
+                published_counts[cid] = published_counts.get(cid, 0) + 1
+            if lec.get("document_id"):
+                if cid not in doc_ids_by_course:
+                    doc_ids_by_course[cid] = set()
+                doc_ids_by_course[cid].add(lec["document_id"])
 
         # Enrich each course with aggregate stats
         enriched_courses = []
         for course in courses:
             course_id = course.get("id")
             
-            # Get total students (active enrollments)
-            enrollments_result = (
-                db.admin_client.table("enrollment")
-                .select("id", count="exact")
-                .eq("course_id", course_id)
-                .eq("is_active", True)
-                .execute()
-            )
-            total_students = enrollments_result.count or 0
-            
-            # Get published lectures count
-            lectures_result = (
-                db.admin_client.table("lecture")
-                .select("id", count="exact")
-                .eq("course_id", course_id)
-                .in_("status", ["PUBLISHED", "DELIVERED"])
-                .execute()
-            )
-            published_lectures = lectures_result.count or 0
-            
-            # Get total documents count (documents used in lectures for this course)
-            # Count unique documents from lectures
-            lecture_docs_result = (
-                db.admin_client.table("lecture")
-                .select("document_id")
-                .eq("course_id", course_id)
-                .not_.is_("document_id", "null")
-                .execute()
-            )
-            unique_doc_ids = set()
-            if lecture_docs_result.data:
-                unique_doc_ids = {lec.get("document_id") for lec in lecture_docs_result.data if lec.get("document_id")}
-            total_documents = len(unique_doc_ids)
-            
-            # Enrich course with stats
             enriched_course = {
                 **course,
-                "total_students": total_students,
-                "published_lectures": published_lectures,
-                "total_documents": total_documents,
+                "total_students": enrollment_counts.get(course_id, 0),
+                "published_lectures": published_counts.get(course_id, 0),
+                "total_documents": len(doc_ids_by_course.get(course_id, set())),
             }
             enriched_courses.append(enriched_course)
+
+        # Cache the result for 2 minutes
+        cache.set("courses", enriched_courses, cache_key, ttl=120)
 
         logger.info(
             f"Found {len(enriched_courses)} courses for university {teacher.university_id}"
@@ -218,6 +237,9 @@ async def create_course(
 
         course_data = course_result.data[0]
         semester_data = None
+        
+        # Invalidate courses cache for this university
+        cache.caches["courses"].delete_pattern(f"courses:teacher_courses:{teacher.university_id}")
 
         if request.semester_name:
             semester_payload = {
@@ -285,6 +307,7 @@ async def get_course(
     and aggregate stats (total_students, published_lectures, total_documents).
 
     This endpoint is only accessible to teachers and admins.
+    Optimized with caching.
     """
     try:
         # Get teacher profile
@@ -296,8 +319,16 @@ async def get_course(
             )
 
         logger.info(f"Fetching course {course_id}")
+        
+        # Check cache first
+        cache_key = f"course_detail:{course_id}"
+        cached_course = cache.get("courses", cache_key)
+        if cached_course is not None:
+            # Still verify access
+            if cached_course.get("university_id") == teacher.university_id:
+                return cached_course
 
-        # Get course
+        # Get course (cached)
         course = db.get_record_by_id("course", course_id)
         if not course:
             raise HTTPException(
@@ -330,8 +361,8 @@ async def get_course(
                 "end_date": sem.get("end_date"),
             })
 
-        # Get aggregate stats
-        # Total students (active enrollments)
+        # Batch fetch all stats in parallel
+        # Get enrollment count, lecture data
         enrollments_result = (
             db.admin_client.table("enrollment")
             .select("id", count="exact")
@@ -341,27 +372,21 @@ async def get_course(
         )
         total_students = enrollments_result.count or 0
 
-        # Published lectures count
+        # Get all lectures with status and document_id in one query
         lectures_result = (
             db.admin_client.table("lecture")
-            .select("id", count="exact")
+            .select("status, document_id")
             .eq("course_id", course_id)
-            .in_("status", ["PUBLISHED", "DELIVERED"])
             .execute()
         )
-        published_lectures = lectures_result.count or 0
-
-        # Total documents count (unique documents used in lectures)
-        lecture_docs_result = (
-            db.admin_client.table("lecture")
-            .select("document_id")
-            .eq("course_id", course_id)
-            .not_.is_("document_id", "null")
-            .execute()
-        )
+        
+        published_lectures = 0
         unique_doc_ids = set()
-        if lecture_docs_result.data:
-            unique_doc_ids = {lec.get("document_id") for lec in lecture_docs_result.data if lec.get("document_id")}
+        for lec in (lectures_result.data or []):
+            if lec.get("status") in ["PUBLISHED", "DELIVERED"]:
+                published_lectures += 1
+            if lec.get("document_id"):
+                unique_doc_ids.add(lec["document_id"])
         total_documents = len(unique_doc_ids)
 
         # Build response
@@ -372,6 +397,9 @@ async def get_course(
             "published_lectures": published_lectures,
             "total_documents": total_documents,
         }
+
+        # Cache the result for 3 minutes
+        cache.set("courses", response, cache_key, ttl=180)
 
         logger.info(f"Found course {course_id} with {len(semesters)} semesters")
         return response
@@ -673,7 +701,7 @@ async def get_course_enrollments(
 async def get_course_lectures(
     current_user: Annotated[User, Depends(require_teacher)],
     course_id: str,
-    status: str = None,
+    lecture_status: str = None,
     topic: str = None,
     db=Depends(get_db),
 ):
@@ -683,9 +711,10 @@ async def get_course_lectures(
     Returns: id, title, status, topic, lecture_number, created_at, 
     has_embeddings, pdf_filename, pdf_size.
     
-    Optional filters: ?status=, ?topic=
+    Optional filters: ?lecture_status=, ?topic=
     
     This endpoint is only accessible to teachers and admins.
+    Optimized with caching.
     """
     try:
         # Get teacher profile
@@ -697,6 +726,12 @@ async def get_course_lectures(
             )
 
         logger.info(f"Fetching lectures for course {course_id}")
+        
+        # Check cache (include filters in cache key)
+        cache_key = f"teacher_lectures:{course_id}:s:{lecture_status or 'all'}:t:{topic or 'all'}"
+        cached_lectures = cache.get("lectures", cache_key)
+        if cached_lectures is not None:
+            return cached_lectures
 
         # Verify course belongs to teacher's university
         course_result = (
@@ -721,8 +756,8 @@ async def get_course_lectures(
         )
         
         # Apply filters
-        if status:
-            query = query.eq("status", status)
+        if lecture_status:
+            query = query.eq("status", lecture_status)
         if topic:
             query = query.eq("topic", topic)
         
@@ -762,6 +797,9 @@ async def get_course_lectures(
                 "pdf_filename": pdf_info.get("pdf_filename"),
                 "pdf_size": pdf_info.get("pdf_size", 0),
             })
+
+        # Cache the result for 2 minutes
+        cache.set("lectures", lectures, cache_key, ttl=120)
 
         logger.info(f"Found {len(lectures)} lectures for course {course_id}")
         return lectures

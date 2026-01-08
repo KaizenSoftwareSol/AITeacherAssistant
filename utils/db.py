@@ -5,11 +5,12 @@ from typing import Any, Dict, List, Optional
 
 from supabase import Client, create_client
 
+from services.cache_service import cache, cached
 from settings import settings
 
 
 class SupabaseDB:
-    """Supabase database operations using Supabase client directly."""
+    """Supabase database operations using Supabase client directly with caching support."""
 
     def __init__(self):
         self.client: Optional[Client] = None
@@ -68,35 +69,61 @@ class SupabaseDB:
             )
         return self.admin_client
 
-    # User operations
+    # User operations with caching
     def create_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new user."""
         try:
             result = self.get_admin_client().table("users").insert(user_data).execute()
-            return result.data[0] if result.data else None
+            user = result.data[0] if result.data else None
+            
+            # Invalidate any cached user data
+            if user:
+                cache.invalidate_user(str(user.get("id")))
+            
+            return user
         except Exception as e:
             print(f"Error creating user: {e}")
             raise
 
-    def get_user_by_id(self, user_id) -> Optional[Dict[str, Any]]:
-        """Get user by ID (supports both int and UUID string)."""
+    def get_user_by_id(self, user_id, use_cache: bool = True) -> Optional[Dict[str, Any]]:
+        """Get user by ID (supports both int and UUID string) with caching."""
         try:
-            # Convert user_id to string to handle UUIDs
+            user_id_str = str(user_id)
+            
+            # Check cache first
+            if use_cache:
+                cached_user = cache.get("users", "id", user_id_str)
+                if cached_user is not None:
+                    return cached_user if cached_user != "__NONE__" else None
+            
+            # Fetch from database
             result = (
                 self.get_admin_client()
                 .table("users")
                 .select("*")
-                .eq("id", str(user_id))
+                .eq("id", user_id_str)
                 .execute()
             )
-            return result.data[0] if result.data else None
+            user = result.data[0] if result.data else None
+            
+            # Cache result
+            if use_cache:
+                cache.set("users", user if user else "__NONE__", "id", user_id_str, ttl=60)
+            
+            return user
         except Exception as e:
             print(f"Error getting user: {e}")
             return None
 
-    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        """Get user by email."""
+    def get_user_by_email(self, email: str, use_cache: bool = True) -> Optional[Dict[str, Any]]:
+        """Get user by email with caching."""
         try:
+            # Check cache first
+            if use_cache:
+                cached_user = cache.get("users", "email", email)
+                if cached_user is not None:
+                    return cached_user if cached_user != "__NONE__" else None
+            
             result = (
                 self.get_admin_client()
                 .table("users")
@@ -104,7 +131,13 @@ class SupabaseDB:
                 .eq("email", email)
                 .execute()
             )
-            return result.data[0] if result.data else None
+            user = result.data[0] if result.data else None
+            
+            # Cache result
+            if use_cache:
+                cache.set("users", user if user else "__NONE__", "email", email, ttl=60)
+            
+            return user
         except Exception as e:
             print(f"Error getting user by email: {e}")
             return None
@@ -121,7 +154,12 @@ class SupabaseDB:
                 .eq("id", str(user_id))
                 .execute()
             )
-            return result.data[0] if result.data else None
+            user = result.data[0] if result.data else None
+            
+            # Invalidate cache
+            cache.invalidate_user(str(user_id))
+            
+            return user
         except Exception as e:
             print(f"Error updating user: {e}")
             return None
@@ -136,6 +174,10 @@ class SupabaseDB:
                 .eq("id", str(user_id))
                 .execute()
             )
+            
+            # Invalidate cache
+            cache.invalidate_user(str(user_id))
+            
             return len(result.data) > 0
         except Exception as e:
             print(f"Error deleting user: {e}")
@@ -156,7 +198,7 @@ class SupabaseDB:
             print(f"Error getting users: {e}")
             return []
 
-    # Document operations
+    # Document operations with caching
     def create_document(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new document."""
         try:
@@ -171,35 +213,64 @@ class SupabaseDB:
             print(f"Error creating document: {e}")
             raise
 
-    def get_document_by_id(self, document_id) -> Optional[Dict[str, Any]]:
-        """Get document by ID (supports UUID strings)."""
+    def get_document_by_id(self, document_id, use_cache: bool = True) -> Optional[Dict[str, Any]]:
+        """Get document by ID (supports UUID strings) with caching."""
         try:
+            doc_id_str = str(document_id)
+            
+            # Check cache first
+            if use_cache:
+                cached_doc = cache.get("queries", "document", doc_id_str)
+                if cached_doc is not None:
+                    return cached_doc if cached_doc != "__NONE__" else None
+            
             result = (
                 self.get_admin_client()
                 .table("documents")
                 .select("*")
-                .eq("id", str(document_id))
+                .eq("id", doc_id_str)
                 .execute()
             )
-            return result.data[0] if result.data else None
+            doc = result.data[0] if result.data else None
+            
+            # Cache result
+            if use_cache:
+                cache.set("queries", doc if doc else "__NONE__", "document", doc_id_str, ttl=300)
+            
+            return doc
         except Exception as e:
             print(f"Error getting document: {e}")
             return None
 
     def get_teacher_documents(
-        self, teacher_id, skip: int = 0, limit: int = 100
+        self, teacher_id, skip: int = 0, limit: int = 100, use_cache: bool = True
     ) -> List[Dict[str, Any]]:
-        """Get documents by teacher ID (supports UUID strings)."""
+        """Get documents by teacher ID (supports UUID strings) with caching."""
         try:
+            teacher_id_str = str(teacher_id)
+            cache_key = f"teacher_docs:{teacher_id_str}:{skip}:{limit}"
+            
+            # Check cache first
+            if use_cache:
+                cached_docs = cache.get("queries", cache_key)
+                if cached_docs is not None:
+                    return cached_docs
+            
             result = (
                 self.get_admin_client()
                 .table("documents")
                 .select("*")
-                .eq("teacher_id", str(teacher_id))
+                .eq("teacher_id", teacher_id_str)
                 .range(skip, skip + limit - 1)
                 .execute()
             )
-            return result.data
+            docs = result.data
+            
+            # Cache result
+            if use_cache:
+                cache.set("queries", docs, cache_key, ttl=120)
+            
+            return docs
         except Exception as e:
             print(f"Error getting teacher documents: {e}")
             return []
@@ -216,6 +287,10 @@ class SupabaseDB:
                 .eq("id", str(document_id))
                 .execute()
             )
+            
+            # Invalidate cache
+            cache.delete("queries", "document", str(document_id))
+            
             return result.data[0] if result.data else None
         except Exception as e:
             print(f"Error updating document: {e}")
@@ -231,32 +306,59 @@ class SupabaseDB:
                 .eq("id", str(document_id))
                 .execute()
             )
+            
+            # Invalidate cache
+            cache.delete("queries", "document", str(document_id))
+            
             return len(result.data) > 0
         except Exception as e:
             print(f"Error deleting document: {e}")
             return False
 
-    # Generic operations
+    # Generic operations with caching support
     def create_record(self, table_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a record in any table."""
         try:
             result = self.get_admin_client().table(table_name).insert(data).execute()
-            return result.data[0] if result.data else None
+            record = result.data[0] if result.data else None
+            
+            # Invalidate related caches based on table
+            if record:
+                self._invalidate_table_cache(table_name, record)
+            
+            return record
         except Exception as e:
             print(f"Error creating record in {table_name}: {e}")
             raise
 
-    def get_record_by_id(self, table_name: str, record_id) -> Optional[Dict[str, Any]]:
-        """Get a record by ID from any table (supports UUID strings and ints)."""
+    def get_record_by_id(
+        self, table_name: str, record_id, use_cache: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Get a record by ID from any table (supports UUID strings and ints) with caching."""
         try:
+            record_id_str = str(record_id)
+            cache_key = f"{table_name}:{record_id_str}"
+            
+            # Check cache first
+            if use_cache:
+                cached_record = cache.get("queries", cache_key)
+                if cached_record is not None:
+                    return cached_record if cached_record != "__NONE__" else None
+            
             result = (
                 self.get_admin_client()
                 .table(table_name)
                 .select("*")
-                .eq("id", str(record_id))
+                .eq("id", record_id_str)
                 .execute()
             )
-            return result.data[0] if result.data else None
+            record = result.data[0] if result.data else None
+            
+            # Cache result
+            if use_cache:
+                cache.set("queries", record if record else "__NONE__", cache_key, ttl=120)
+            
+            return record
         except Exception as e:
             print(f"Error getting record from {table_name}: {e}")
             return None
@@ -267,9 +369,20 @@ class SupabaseDB:
         filters: Dict[str, Any] = None,
         skip: int = 0,
         limit: int = 100,
+        use_cache: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Get records from any table with optional filters."""
+        """Get records from any table with optional filters and caching."""
         try:
+            # Build cache key from filters
+            filter_str = json.dumps(filters, sort_keys=True) if filters else "none"
+            cache_key = f"{table_name}:list:{filter_str}:{skip}:{limit}"
+            
+            # Check cache first
+            if use_cache:
+                cached_records = cache.get("queries", cache_key)
+                if cached_records is not None:
+                    return cached_records
+            
             query = self.get_admin_client().table(table_name).select("*")
 
             # Apply filters (convert values to strings for UUID support)
@@ -278,7 +391,13 @@ class SupabaseDB:
                     query = query.eq(key, str(value) if value is not None else value)
 
             result = query.range(skip, skip + limit - 1).execute()
-            return result.data
+            records = result.data
+            
+            # Cache result
+            if use_cache:
+                cache.set("queries", records, cache_key, ttl=60)
+            
+            return records
         except Exception as e:
             print(f"Error getting records from {table_name}: {e}")
             return []
@@ -295,7 +414,14 @@ class SupabaseDB:
                 .eq("id", str(record_id))
                 .execute()
             )
-            return result.data[0] if result.data else None
+            record = result.data[0] if result.data else None
+            
+            # Invalidate cache
+            cache.delete("queries", f"{table_name}:{str(record_id)}")
+            if record:
+                self._invalidate_table_cache(table_name, record)
+            
+            return record
         except Exception as e:
             print(f"Error updating record in {table_name}: {e}")
             return None
@@ -310,10 +436,87 @@ class SupabaseDB:
                 .eq("id", str(record_id))
                 .execute()
             )
+            
+            # Invalidate cache
+            cache.delete("queries", f"{table_name}:{str(record_id)}")
+            
             return len(result.data) > 0
         except Exception as e:
             print(f"Error deleting record from {table_name}: {e}")
             return False
+    
+    def _invalidate_table_cache(self, table_name: str, record: Dict[str, Any]) -> None:
+        """Invalidate caches based on table name and record data."""
+        record_id = record.get("id")
+        
+        if table_name == "course":
+            cache.invalidate_course(str(record_id))
+        elif table_name == "lecture":
+            cache.invalidate_lecture(str(record_id))
+            if record.get("course_id"):
+                cache.invalidate_course(str(record.get("course_id")))
+        elif table_name == "enrollment":
+            if record.get("student_id"):
+                cache.invalidate_student(str(record.get("student_id")))
+            if record.get("course_id"):
+                cache.invalidate_course(str(record.get("course_id")))
+        elif table_name == "student":
+            cache.invalidate_student(str(record_id))
+        elif table_name == "users":
+            cache.invalidate_user(str(record_id))
+    
+    # Optimized batch operations
+    def get_records_batch(
+        self,
+        table_name: str,
+        ids: List[str],
+        use_cache: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Get multiple records by IDs in a single query.
+        Returns a dict mapping id -> record for easy lookup.
+        """
+        if not ids:
+            return {}
+        
+        try:
+            # Check cache for each ID first
+            result_map = {}
+            missing_ids = []
+            
+            if use_cache:
+                for record_id in ids:
+                    cache_key = f"{table_name}:{str(record_id)}"
+                    cached = cache.get("queries", cache_key)
+                    if cached is not None and cached != "__NONE__":
+                        result_map[str(record_id)] = cached
+                    else:
+                        missing_ids.append(str(record_id))
+            else:
+                missing_ids = [str(id) for id in ids]
+            
+            # Fetch missing records in a single query
+            if missing_ids:
+                result = (
+                    self.get_admin_client()
+                    .table(table_name)
+                    .select("*")
+                    .in_("id", missing_ids)
+                    .execute()
+                )
+                
+                for record in result.data:
+                    record_id = str(record.get("id"))
+                    result_map[record_id] = record
+                    
+                    # Cache each record
+                    if use_cache:
+                        cache.set("queries", record, f"{table_name}:{record_id}", ttl=120)
+            
+            return result_map
+        except Exception as e:
+            print(f"Error getting batch records from {table_name}: {e}")
+            return {}
 
 
 # Global Supabase database instance
@@ -333,7 +536,7 @@ async def create_db_and_tables():
 
     try:
         # Check if admin user exists
-        admin_user = db.get_user_by_email("admin@admin.com")
+        admin_user = db.get_user_by_email("admin@admin.com", use_cache=False)
         if not admin_user:
             # Create admin user
             from auth.models import UserCreate, UserRole

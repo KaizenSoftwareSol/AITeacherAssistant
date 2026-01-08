@@ -494,7 +494,7 @@ class NotificationService:
             severity=NotificationSeverity.INFO,
             related_entity_type="assessment",
             related_entity_id=assessment_id,
-            action_url=f"/teacher/assessments/{assessment_id}/submissions",
+            action_url=f"/teacher/assessments/{assessment_id}",
         )
     
     async def notify_low_quiz_score(
@@ -514,7 +514,7 @@ class NotificationService:
             severity=NotificationSeverity.WARNING,
             related_entity_type="assessment",
             related_entity_id=assessment_id,
-            action_url=f"/teacher/assessments/{assessment_id}/submissions",
+            action_url=f"/teacher/assessments/{assessment_id}",
         )
     
     async def notify_result_request(
@@ -575,7 +575,7 @@ class NotificationService:
             severity=NotificationSeverity.INFO,
             related_entity_type="assessment",
             related_entity_id=assessment_id,
-            action_url=f"/student/test-quizzes/{assessment_id}",
+            action_url="/student/assessments/{assessment_id}",
         )
     
     async def notify_result_approved(
@@ -593,7 +593,7 @@ class NotificationService:
             severity=NotificationSeverity.SUCCESS,
             related_entity_type="assessment",
             related_entity_id=assessment_id,
-            action_url=f"/student/test-quizzes/{assessment_id}/my-results",
+            action_url="/student/assessments/{assessment_id}",
         )
     
     async def notify_result_rejected(
@@ -633,6 +633,6 @@ class NotificationService:
             severity=NotificationSeverity.WARNING,
             related_entity_type="assessment",
             related_entity_id=assessment_id,
-            action_url=f"/student/test-quizzes/{assessment_id}",
+            action_url="/student/assessments/{assessment_id}",
         )
 

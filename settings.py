@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
     # GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    
+    # Cache Configuration (Optional)
+    # Set REDIS_URL for distributed caching, otherwise uses in-memory LRU cache
+    REDIS_URL: str = os.getenv("REDIS_URL", "")
+    
+    # Cache TTL defaults (in seconds)
+    CACHE_TTL_AUTH: int = int(os.getenv("CACHE_TTL_AUTH", "600"))  # 10 min
+    CACHE_TTL_USER: int = int(os.getenv("CACHE_TTL_USER", "120"))   # 2 min
+    CACHE_TTL_COURSE: int = int(os.getenv("CACHE_TTL_COURSE", "600"))  # 10 min
+    CACHE_TTL_LECTURE: int = int(os.getenv("CACHE_TTL_LECTURE", "300"))  # 5 min
+    
+    # Cache size limits
+    CACHE_MAX_SIZE: int = int(os.getenv("CACHE_MAX_SIZE", "1000"))
 
     class Config:
         env_file = ".env"

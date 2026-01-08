@@ -25,3 +25,5 @@ pgvector
 reportlab==4.0.9
 pydantic[email]
 python-dotenv
+# Optional: Redis for distributed caching (uses in-memory LRU if not installed)
+redis>=4.5.0

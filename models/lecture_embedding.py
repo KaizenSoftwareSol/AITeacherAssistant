@@ -192,7 +192,7 @@ class StudentCourseLecturesResponse(SQLModel):
 class QuizGenerationRequest(SQLModel):
     """Request model for generating a quiz from lecture content."""
 
-    lecture_id: str
+    lecture_id: Optional[str] = None  # Optional when lecture_id is in path parameter
     num_questions: int = Field(default=10, ge=1, le=50)
     question_types: Optional[list[str]] = None  # e.g., ["MULTIPLE_CHOICE", "TRUE_FALSE"]
     difficulty: str = Field(default="MEDIUM")  # EASY, MEDIUM, HARD
