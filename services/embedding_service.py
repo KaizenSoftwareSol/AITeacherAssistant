@@ -32,12 +32,14 @@ class EmbeddingService:
         """
         Generate embeddings for a lecture by chunking the content and creating vectors.
         
+        OPTIMIZED VERSION:
+        - Batch embedding API calls (up to 100 texts per call vs 1)
+        - Larger database batch inserts (100 vs 10)
+        - Reduced logging overhead
+        
         This generates embeddings for BOTH:
         1. The generated lecture content
         2. The original source material (PDFs/documents) the lecture was based on
-        
-        This allows the AI chatbot to answer questions based on both the lecture
-        AND the underlying source material.
         
         Args:
             lecture_id: UUID of the lecture
@@ -55,30 +57,40 @@ class EmbeddingService:
             # Tag these as LECTURE_CONTENT
             for chunk in lecture_chunks:
                 chunk["type"] = "LECTURE_CONTENT"
-            logger.info(f"Created {len(lecture_chunks)} lecture content chunks for lecture {lecture_id}")
+            logger.info(f"Created {len(lecture_chunks)} lecture content chunks")
             
             # Also get and chunk the source material if requested
             source_chunks = []
             if include_source_material and self.db:
                 source_chunks = await self._get_source_material_chunks(lecture_id)
-                logger.info(f"Created {len(source_chunks)} source material chunks for lecture {lecture_id}")
+                logger.info(f"Created {len(source_chunks)} source material chunks")
             
             # Combine all chunks
             chunks = lecture_chunks + source_chunks
-            logger.info(f"Total chunks to embed: {len(chunks)} (lecture: {len(lecture_chunks)}, source: {len(source_chunks)})")
+            total_chunks = len(chunks)
+            logger.info(f"Total chunks to embed: {total_chunks}")
             
-            # Generate embeddings for each chunk
+            if total_chunks == 0:
+                logger.warning("No chunks to embed")
+                return {
+                    "lecture_id": lecture_id,
+                    "chunks_created": 0,
+                    "embeddings_created": 0,
+                    "embedding_model": self.embedding_model,
+                }
+            
             from openai import AsyncOpenAI
-            
             client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
             
+            # OPTIMIZATION 1: Generate all chunk records first (with IDs)
+            now = datetime.utcnow().isoformat()
             chunk_records = []
-            embedding_records = []
+            chunk_id_map = {}  # Map chunk index to chunk_id
             
             for idx, chunk_data in enumerate(chunks):
-                # Create chunk record
                 chunk_id = str(uuid4())
-                chunk_record = {
+                chunk_id_map[idx] = chunk_id
+                chunk_records.append({
                     "id": chunk_id,
                     "lecture_id": lecture_id,
                     "chunk_index": idx,
@@ -86,55 +98,72 @@ class EmbeddingService:
                     "chunk_type": chunk_data.get("type", "CONTENT"),
                     "tokens_count": chunk_data.get("tokens", 0),
                     "chunk_metadata": json.dumps(chunk_data.get("metadata", {})),
-                    "created_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-                chunk_records.append(chunk_record)
+                    "created_at": now,
+                    "updated_at": now,
+                })
+            
+            # OPTIMIZATION 2: Batch embedding API calls (100 texts per call)
+            # OpenAI allows up to 2048 inputs, but 100 is a good balance
+            EMBEDDING_BATCH_SIZE = 100
+            all_embeddings = []
+            
+            logger.info(f"Generating embeddings in batches of {EMBEDDING_BATCH_SIZE}...")
+            
+            for i in range(0, total_chunks, EMBEDDING_BATCH_SIZE):
+                batch_texts = [chunks[j]["content"] for j in range(i, min(i + EMBEDDING_BATCH_SIZE, total_chunks))]
                 
-                # Generate embedding
                 response = await client.embeddings.create(
                     model=self.embedding_model,
-                    input=chunk_data["content"],
+                    input=batch_texts,
                 )
                 
-                embedding_vector = response.data[0].embedding
+                # Extract embeddings in order
+                for emb_data in response.data:
+                    all_embeddings.append(emb_data.embedding)
                 
-                # Create embedding record
-                embedding_record = {
+                batch_num = (i // EMBEDDING_BATCH_SIZE) + 1
+                total_batches = (total_chunks + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
+                logger.info(f"Generated embedding batch {batch_num}/{total_batches} ({len(batch_texts)} embeddings)")
+            
+            # Create embedding records
+            embedding_records = []
+            for idx, embedding_vector in enumerate(all_embeddings):
+                embedding_records.append({
                     "id": str(uuid4()),
                     "lecture_id": lecture_id,
-                    "chunk_id": chunk_id,
-                    "embedding": embedding_vector,  # pgvector will handle the conversion
+                    "chunk_id": chunk_id_map[idx],
+                    "embedding": embedding_vector,
                     "embedding_model": self.embedding_model,
-                    "created_at": datetime.utcnow().isoformat(),
-                }
-                embedding_records.append(embedding_record)
+                    "created_at": now,
+                })
             
-            # Insert chunks and embeddings into database in batches to avoid timeout
+            # OPTIMIZATION 3: Larger database batch inserts
             if self.db:
-                BATCH_SIZE = 10  # Insert 10 records at a time to avoid Supabase timeout
+                DB_BATCH_SIZE = 100  # Increased from 10 to 100
                 
-                # Insert chunks in batches
-                for i in range(0, len(chunk_records), BATCH_SIZE):
-                    batch = chunk_records[i:i + BATCH_SIZE]
+                # Insert all chunks in larger batches
+                logger.info(f"Inserting {len(chunk_records)} chunks...")
+                for i in range(0, len(chunk_records), DB_BATCH_SIZE):
+                    batch = chunk_records[i:i + DB_BATCH_SIZE]
                     self.db.admin_client.table("lecture_chunk").insert(batch).execute()
-                    logger.info(f"Inserted chunk batch {i // BATCH_SIZE + 1} ({len(batch)} chunks) for lecture {lecture_id}")
                 
-                logger.info(f"Inserted total {len(chunk_records)} chunks for lecture {lecture_id}")
+                logger.info(f"Inserted {len(chunk_records)} chunks")
                 
-                # Insert embeddings in batches
-                for i in range(0, len(embedding_records), BATCH_SIZE):
-                    batch = embedding_records[i:i + BATCH_SIZE]
+                # Insert all embeddings in larger batches
+                logger.info(f"Inserting {len(embedding_records)} embeddings...")
+                for i in range(0, len(embedding_records), DB_BATCH_SIZE):
+                    batch = embedding_records[i:i + DB_BATCH_SIZE]
                     self.db.admin_client.table("lecture_embedding").insert(batch).execute()
-                    logger.info(f"Inserted embedding batch {i // BATCH_SIZE + 1} ({len(batch)} embeddings) for lecture {lecture_id}")
                 
-                logger.info(f"Inserted total {len(embedding_records)} embeddings for lecture {lecture_id}")
+                logger.info(f"Inserted {len(embedding_records)} embeddings")
                 
                 # Update lecture has_embeddings flag
                 self.db.admin_client.table("lecture").update({
                     "has_embeddings": True,
-                    "updated_at": datetime.utcnow().isoformat()
+                    "updated_at": now
                 }).eq("id", lecture_id).execute()
+            
+            logger.info(f"Completed embedding generation for lecture {lecture_id}")
             
             return {
                 "lecture_id": lecture_id,

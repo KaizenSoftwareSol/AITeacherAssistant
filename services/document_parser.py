@@ -176,13 +176,43 @@ class DocumentParser:
             toc_structure, chapter_ranges = DocumentParser._parse_toc(toc_lines)
             logger.info(f"✅ TOC Method: Found {len(toc_structure)} chapters")
 
-            # FALLBACK: If TOC parsing failed, detect chapters from content
-            if not toc_structure:
-                logger.warning("TOC parsing failed, using content-based detection...")
-                toc_structure, chapter_ranges = (
-                    DocumentParser._detect_chapters_from_content(pages_data)
-                )
-                logger.info(f"✅ Content Method: Found {len(toc_structure)} chapters")
+            # ALWAYS try content-based detection for comparison
+            # TOC page numbers are often BOOK pages, not PDF pages
+            content_toc_structure, content_chapter_ranges = (
+                DocumentParser._detect_chapters_from_content(pages_data)
+            )
+            logger.info(f"✅ Content Method: Found {len(content_toc_structure)} chapters")
+            
+            # Decide which method to use:
+            # 1. If content-based found more chapters, use it
+            # 2. If TOC page numbers look wrong (e.g., Chapter 1 on page 1 but PDF has 283 pages), use content
+            # 3. Otherwise use TOC
+            
+            use_content_method = False
+            
+            if len(content_toc_structure) > len(toc_structure):
+                logger.info("Content method found more chapters - using content-based detection")
+                use_content_method = True
+            elif toc_structure and content_toc_structure:
+                # Check if TOC page numbers look suspicious
+                # If Chapter 1 is supposedly on page 1-10 but we have 100+ pages, TOC pages are likely book pages
+                toc_chapter_1_range = chapter_ranges.get(1, (0, 0))
+                content_chapter_1_start = content_chapter_ranges.get(1, (0, 0))[0]
+                
+                # If TOC says Chapter 1 starts at page 1-10 but content says page 20+, 
+                # there's likely a front matter offset
+                if toc_chapter_1_range[0] <= 10 and content_chapter_1_start > 15:
+                    logger.info(
+                        f"TOC Chapter 1 at page {toc_chapter_1_range[0]}, but content found it at page {content_chapter_1_start}. "
+                        "Using content-based detection (likely book page numbers vs PDF page numbers)"
+                    )
+                    use_content_method = True
+            elif not toc_structure:
+                use_content_method = True
+            
+            if use_content_method:
+                toc_structure = content_toc_structure
+                chapter_ranges = content_chapter_ranges
 
             # STEP 3: Parse content using chapter ranges
             logger.info("📖 Parsing chapter content by page ranges...")
@@ -299,6 +329,47 @@ class DocumentParser:
         return None
 
     @staticmethod
+    def _split_concatenated_toc(text: str) -> list:
+        """
+        Split concatenated TOC entries like:
+        "1 Offer and Acceptance 12 Intention and Consideration 253 Privity 51..."
+        into individual entries.
+        
+        Pattern: number + title + page_number, where next chapter number follows page
+        """
+        entries = []
+        
+        # Pattern to find chapter boundaries: look for patterns like "25" followed by "3 Privity"
+        # where 25 is the page number of previous chapter, and 3 is next chapter number
+        # This regex finds: (chapter_num) (title words) (page_num)(next_chapter_num)
+        
+        # First, try to split on pattern: digit(s) + space + Capital letter word(s) + digit(s)
+        # Match format: "1 Offer and Acceptance 1" or "12 Remedies 209"
+        
+        # Find all potential chapter starts: number followed by space and capital letter
+        chapter_pattern = re.compile(
+            r'(?:^|(?<=\d))(\d{1,2})\s+([A-Z][A-Za-z\-]+(?:\s+(?:and|of|the|to|in|for|on|with|a|an|The|A|An|[A-Z][A-Za-z\-]+))*)\s+(\d{1,4})(?=\d{1,2}\s+[A-Z]|$|\s*Index)'
+        )
+        
+        matches = list(chapter_pattern.finditer(text))
+        
+        if matches:
+            for match in matches:
+                chapter_num = int(match.group(1))
+                title = match.group(2).strip()
+                page_num = int(match.group(3))
+                
+                # Validate
+                if 1 <= chapter_num <= 30 and 1 <= page_num <= 500 and len(title) >= 3:
+                    entries.append({
+                        'chapter_num': chapter_num,
+                        'title': title,
+                        'page_num': page_num
+                    })
+        
+        return entries
+
+    @staticmethod
     def _parse_toc(lines: list) -> tuple:
         """
         Parse the Table of Contents to extract chapter structure WITH PAGE NUMBERS.
@@ -309,6 +380,7 @@ class DocumentParser:
         toc_structure = {}
         chapter_pages = {}  # Track start pages from TOC
         in_toc = False
+        toc_text_buffer = []  # Buffer to collect potential concatenated TOC
 
         toc_start_patterns = ["table of contents", "contents"]
         stop_markers = ["appendix", "index", "glossary", "references", "bibliography"]
@@ -354,6 +426,10 @@ class DocumentParser:
                 ):
                     logger.debug(f"TOC end at Chapter 1 start")
                     break
+
+                # Collect lines that might be concatenated TOC
+                if re.search(r'\d{1,2}\s+[A-Z]', line_clean):
+                    toc_text_buffer.append(line_clean)
 
                 # Try all TOC patterns
                 match = None
@@ -409,6 +485,23 @@ class DocumentParser:
                         f"TOC: Chapter {chapter_num} '{chapter_title}' -> page {page_num}"
                     )
 
+        # If we didn't find enough chapters, try parsing concatenated TOC
+        if len(toc_structure) < 3 and toc_text_buffer:
+            logger.info("TOC parsing found few chapters, trying concatenated TOC parsing...")
+            concatenated_text = " ".join(toc_text_buffer)
+            
+            # Try to split concatenated TOC entries
+            entries = DocumentParser._split_concatenated_toc(concatenated_text)
+            
+            for entry in entries:
+                chapter_num = entry['chapter_num']
+                if chapter_num not in toc_structure:
+                    toc_structure[chapter_num] = entry['title']
+                    chapter_pages[chapter_num] = entry['page_num']
+                    logger.debug(
+                        f"TOC (concatenated): Chapter {chapter_num} '{entry['title']}' -> page {entry['page_num']}"
+                    )
+
         # Build chapter ranges (start_page to next_chapter_start - 1)
         chapter_ranges = {}
         sorted_chapters = sorted(chapter_pages.items())
@@ -432,12 +525,25 @@ class DocumentParser:
         Fallback method: Detect chapters by scanning actual content pages.
         STRICT validation to avoid false positives (like years: 1664, 1789).
         Returns (toc_dict, chapter_ranges)
+        
+        TWO-PASS approach:
+        1. First pass: Find high-confidence chapter markers (CHAPTER keyword)
+        2. Second pass: Fill in gaps with lower-confidence patterns
         """
         toc_structure = {}
         chapter_starts = {}
 
-        # FLEXIBLE patterns for content-based detection
-        chapter_patterns = [
+        # HIGH CONFIDENCE patterns - these almost certainly indicate chapters
+        high_confidence_patterns = [
+            # Handle page number prefix: "1CHAPTER 1" or "25CHAPTER 2"
+            (
+                r"^\d{1,4}CHAPTER\s+(\d+)\s*$",
+                "page_prefix_chapter_only",
+            ),  # "1CHAPTER 1" (title on next line)
+            (
+                r"^\d{1,4}CHAPTER\s+(\d+)[:\s\-]+(.+?)$",
+                "page_prefix_chapter",
+            ),  # "1CHAPTER 1: Title" or "25CHAPTER 2 TITLE"
             (
                 r"^Chapter\s+(\d+)[:\s\-]+(.+?)$",
                 "explicit_chapter",
@@ -447,73 +553,80 @@ class DocumentParser:
                 "explicit_chapter",
             ),  # "CHAPTER 1: Title"
             (
+                r"^CHAPTER\s+(\d+)\s*$",
+                "chapter_only",
+            ),  # "CHAPTER 1" (title on next line)
+            (
+                r"^Chapter\s+(\d+)\s*$",
+                "chapter_only",
+            ),  # "Chapter 1" (title on next line)
+        ]
+
+        # LOW CONFIDENCE patterns - only use if we didn't find enough with high confidence
+        low_confidence_patterns = [
+            (
                 r"^(\d{1,2})\.1\s+(.+)$",
                 "first_section",
             ),  # "1.1 Title" = Chapter 1 start
-            (
-                r"^(\d{1,2})\s*\n+([A-Z][A-Za-z\s]{5,})$",
-                "simple_number",
-            ),  # "5\nLaw and property"
-            (
-                r"^(\d{1,2})[\.\s]+([A-Z][^\.]{8,})$",
-                "numbered",
-            ),  # "5 Law and property" or "5. Title"
-            (r"^([IVX]{1,5})[\.\s]+([A-Z][A-Za-z\s]{8,})$", "roman"),  # Roman numerals
+            # DISABLED: Too many false positives
+            # (
+            #     r"^(\d{1,2})[\.\s]+([A-Z][^\.]{8,})$",
+            #     "numbered",
+            # ),  # "5 Law and property" or "5. Title"
+            # (r"^([IVX]{1,5})[\.\s]+([A-Z][A-Za-z\s]{8,})$", "roman"),  # Roman numerals
         ]
 
-        for page_data in pages_data:
-            if page_data["is_appendix"]:
-                continue
-
+        # Helper function to try matching patterns
+        def try_match_chapter(page_data, lines, patterns, strict=True):
             page_num = page_data["page_num"]
-            lines = page_data["lines"]
-
-            # Skip very early pages (first 10) to avoid TOC
-            # But don't skip too much - some books start early
-            if page_num < 10:
-                continue
-
-            # Check first 10 lines (chapter headings at page top)
-            for idx, line in enumerate(lines[:10]):
+            
+            # Check first 5 lines only for chapter headings (they're at top)
+            for idx, line in enumerate(lines[:5]):
                 line_clean = line.strip()
 
-                # Skip short lines
-                if len(line_clean) < 8:
+                # Skip short lines (but allow "CHAPTER 1")
+                if len(line_clean) < 6:
                     continue
 
-                for pattern, pattern_type in chapter_patterns:
+                for pattern, pattern_type in patterns:
                     match = re.match(pattern, line_clean, re.IGNORECASE)
                     if match:
                         chapter_num_raw = match.group(1)
-                        chapter_title = (
-                            match.group(2).strip() if len(match.groups()) >= 2 else ""
-                        )
+                        
+                        # Get title - may be in group 2 or on next line
+                        if pattern_type in ("page_prefix_chapter_only", "chapter_only"):
+                            # Title should be on the next line(s)
+                            chapter_title = ""
+                            for next_line in lines[idx + 1:idx + 4]:
+                                next_clean = next_line.strip()
+                                # Skip empty lines
+                                if not next_clean:
+                                    continue
+                                # Skip if it looks like another chapter
+                                if re.match(r"^\d*CHAPTER\s+\d+", next_clean, re.IGNORECASE):
+                                    break
+                                if re.match(r"^Chapter\s+\d+", next_clean, re.IGNORECASE):
+                                    break
+                                # Skip "Introduction" as title if there's more
+                                if next_clean.lower() == "introduction":
+                                    continue
+                                # Use this as title
+                                chapter_title = next_clean
+                                break
+                        elif len(match.groups()) >= 2:
+                            chapter_title = match.group(2).strip()
+                        else:
+                            chapter_title = ""
 
                         # Convert to integer
                         try:
                             if pattern_type == "roman":
                                 # Extended Roman numeral support
                                 roman_map = {
-                                    "I": 1,
-                                    "II": 2,
-                                    "III": 3,
-                                    "IV": 4,
-                                    "V": 5,
-                                    "VI": 6,
-                                    "VII": 7,
-                                    "VIII": 8,
-                                    "IX": 9,
-                                    "X": 10,
-                                    "XI": 11,
-                                    "XII": 12,
-                                    "XIII": 13,
-                                    "XIV": 14,
-                                    "XV": 15,
-                                    "XVI": 16,
-                                    "XVII": 17,
-                                    "XVIII": 18,
-                                    "XIX": 19,
-                                    "XX": 20,
+                                    "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5,
+                                    "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10,
+                                    "XI": 11, "XII": 12, "XIII": 13, "XIV": 14, "XV": 15,
+                                    "XVI": 16, "XVII": 17, "XVIII": 18, "XIX": 19, "XX": 20,
                                 }
                                 chapter_num = roman_map.get(chapter_num_raw.upper())
                                 if chapter_num is None:
@@ -524,7 +637,6 @@ class DocumentParser:
                             continue
 
                         # **VALIDATION**: Reject unreasonable chapter numbers
-                        # Chapters should be 1-30 typically, NOT years like 1664!
                         if chapter_num < 1 or chapter_num > 30:
                             continue
 
@@ -532,28 +644,47 @@ class DocumentParser:
                         chapter_title = re.sub(r"[\.\s]+\d+\s*$", "", chapter_title)
                         chapter_title = re.sub(r"\s{2,}", " ", chapter_title).strip()
 
-                        # Validate title - must be meaningful
-                        if len(chapter_title) < 3:
-                            continue
-
                         # Skip if already found this chapter
                         if chapter_num in chapter_starts:
                             continue
 
-                        # For first_section pattern, use generic chapter title
-                        # because "1.1 Title" will also be a section
-                        if pattern_type == "first_section":
-                            # Use just the topic from 1.1 as chapter title
-                            toc_structure[chapter_num] = chapter_title
-                        else:
-                            toc_structure[chapter_num] = chapter_title
-
+                        toc_structure[chapter_num] = chapter_title
                         chapter_starts[chapter_num] = page_num
                         logger.info(
                             f"Detected Chapter {chapter_num}: '{chapter_title}' "
                             f"at page {page_num} [{pattern_type}]"
                         )
-                        break
+                        return True  # Found a chapter on this page
+            return False
+
+        # PASS 1: High confidence patterns only
+        for page_data in pages_data:
+            if page_data["is_appendix"]:
+                continue
+
+            page_num = page_data["page_num"]
+            lines = page_data["lines"]
+
+            # Skip very early pages (first 10) to avoid TOC
+            if page_num < 10:
+                continue
+
+            try_match_chapter(page_data, lines, high_confidence_patterns)
+
+        # PASS 2: If we found very few chapters, try low confidence patterns
+        if len(toc_structure) < 3:
+            logger.warning(f"Only found {len(toc_structure)} chapters with high confidence, trying low confidence patterns...")
+            for page_data in pages_data:
+                if page_data["is_appendix"]:
+                    continue
+
+                page_num = page_data["page_num"]
+                lines = page_data["lines"]
+
+                if page_num < 10:
+                    continue
+
+                try_match_chapter(page_data, lines, low_confidence_patterns, strict=False)
 
         # Build chapter ranges
         chapter_ranges = {}

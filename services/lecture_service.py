@@ -620,6 +620,87 @@ BEGIN THE LECTURE NOW:
             )
 
     @staticmethod
+    def _normalize_text_for_pdf(text: str) -> str:
+        """
+        Normalize text for PDF rendering by replacing Unicode characters
+        that may not be supported by standard PDF fonts (like Helvetica).
+        
+        This prevents "black box" rendering issues with special characters.
+        """
+        if not text:
+            return text
+        
+        # Character replacements for PDF compatibility
+        replacements = {
+            # Dashes
+            '\u2013': '-',  # en-dash
+            '\u2014': '-',  # em-dash  
+            '\u2015': '-',  # horizontal bar
+            '\u2010': '-',  # hyphen
+            '\u2011': '-',  # non-breaking hyphen
+            '\u2012': '-',  # figure dash
+            '\u2212': '-',  # minus sign
+            
+            # Quotes
+            '\u2018': "'",  # left single quote
+            '\u2019': "'",  # right single quote (apostrophe)
+            '\u201A': "'",  # single low-9 quote
+            '\u201B': "'",  # single high-reversed-9 quote
+            '\u2032': "'",  # prime
+            '\u2035': "'",  # reversed prime
+            
+            '\u201C': '"',  # left double quote
+            '\u201D': '"',  # right double quote
+            '\u201E': '"',  # double low-9 quote
+            '\u201F': '"',  # double high-reversed-9 quote
+            '\u2033': '"',  # double prime
+            '\u2036': '"',  # reversed double prime
+            '\u00AB': '"',  # left-pointing double angle quote
+            '\u00BB': '"',  # right-pointing double angle quote
+            
+            # Spaces
+            '\u00A0': ' ',  # non-breaking space
+            '\u2002': ' ',  # en space
+            '\u2003': ' ',  # em space
+            '\u2004': ' ',  # three-per-em space
+            '\u2005': ' ',  # four-per-em space
+            '\u2006': ' ',  # six-per-em space
+            '\u2007': ' ',  # figure space
+            '\u2008': ' ',  # punctuation space
+            '\u2009': ' ',  # thin space
+            '\u200A': ' ',  # hair space
+            '\u200B': '',   # zero-width space
+            '\u202F': ' ',  # narrow no-break space
+            '\u205F': ' ',  # medium mathematical space
+            '\u3000': ' ',  # ideographic space
+            
+            # Ellipsis
+            '\u2026': '...',  # horizontal ellipsis
+            
+            # Bullets
+            '\u2022': '*',  # bullet
+            '\u2023': '>',  # triangular bullet
+            '\u2043': '-',  # hyphen bullet
+            '\u204C': '<',  # black leftwards bullet
+            '\u204D': '>',  # black rightwards bullet
+            '\u2219': '*',  # bullet operator
+            
+            # Other common problematic characters
+            '\u00B7': '*',  # middle dot
+            '\u2024': '.',  # one dot leader
+            '\u2027': '-',  # hyphenation point
+            '\u00AD': '',   # soft hyphen (remove)
+            '\uFEFF': '',   # BOM (remove)
+            '\u2028': '\n', # line separator
+            '\u2029': '\n\n', # paragraph separator
+        }
+        
+        for unicode_char, replacement in replacements.items():
+            text = text.replace(unicode_char, replacement)
+        
+        return text
+
+    @staticmethod
     def create_pdf(title: str, content: str) -> bytes:
         """
         Create a PDF from lecture content.
@@ -633,6 +714,10 @@ BEGIN THE LECTURE NOW:
         """
         try:
             logger.info("Creating PDF from lecture content")
+            
+            # Normalize text to prevent black box rendering of special characters
+            title = LectureService._normalize_text_for_pdf(title)
+            content = LectureService._normalize_text_for_pdf(content)
 
             # Create a BytesIO buffer
             buffer = BytesIO()

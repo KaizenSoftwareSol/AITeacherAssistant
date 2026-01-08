@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
     # Authentication
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440 # 1 day
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-here")
     JWT_ALGORITHM: str = "HS256"  # HMAC with SHA-256
 
@@ -26,13 +26,13 @@ class Settings(BaseSettings):
     REDIS_URL: str = os.getenv("REDIS_URL", "")
     
     # Cache TTL defaults (in seconds)
-    CACHE_TTL_AUTH: int = int(os.getenv("CACHE_TTL_AUTH", "600"))  # 10 min
-    CACHE_TTL_USER: int = int(os.getenv("CACHE_TTL_USER", "120"))   # 2 min
-    CACHE_TTL_COURSE: int = int(os.getenv("CACHE_TTL_COURSE", "600"))  # 10 min
-    CACHE_TTL_LECTURE: int = int(os.getenv("CACHE_TTL_LECTURE", "300"))  # 5 min
+    CACHE_TTL_AUTH: int = int(os.getenv("CACHE_TTL_AUTH", "1440"))  # 1 day
+    CACHE_TTL_USER: int = int(os.getenv("CACHE_TTL_USER", "1440"))   # 1 day
+    CACHE_TTL_COURSE: int = int(os.getenv("CACHE_TTL_COURSE", "1440"))  # 1 day
+    CACHE_TTL_LECTURE: int = int(os.getenv("CACHE_TTL_LECTURE", "1440"))  # 1 day
     
     # Cache size limits
-    CACHE_MAX_SIZE: int = int(os.getenv("CACHE_MAX_SIZE", "1000"))
+    CACHE_MAX_SIZE: int = int(os.getenv("CACHE_MAX_SIZE", "10000"))
 
     class Config:
         env_file = ".env"
