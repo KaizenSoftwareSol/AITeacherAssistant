@@ -57,6 +57,13 @@ class UserUpdate(BaseModel):
     role: Optional[UserRole] = None
 
 
+class PasswordChangeRequest(BaseModel):
+    """Model for changing password (requires old password)."""
+
+    old_password: str
+    new_password: str
+
+
 class Token(BaseModel):
     """Token response model."""
 

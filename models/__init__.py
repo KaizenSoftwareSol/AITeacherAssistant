@@ -14,6 +14,7 @@ from .job_queue import JobQueue, JobStatus, JobType
 from .lecture import (Lecture, LectureContent, LectureDownloadResponse,
                       LectureGenerationRequest, LectureGenerationResponse,
                       LectureRead, LectureStatus, LectureType, LectureUpdate)
+from .lecture_embedding import LectureChunk, LectureEmbedding
 from .notification import (Notification, NotificationCreate,
                            NotificationListResponse, NotificationRead,
                            NotificationSeverity, NotificationType,
@@ -35,6 +36,8 @@ __all__ = [
     # Lecture system
     "Lecture",
     "LectureContent",
+    "LectureChunk",
+    "LectureEmbedding",
     "LectureStatus",
     "LectureType",
     "LectureGenerationRequest",

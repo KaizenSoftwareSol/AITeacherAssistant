@@ -10,6 +10,13 @@ from auth.models import UserCreate, UserRead
 from models.user import User, UserRole
 from settings import settings
 
+# Import all models to ensure relationships are properly initialized
+# This prevents SQLAlchemy relationship errors when creating User objects
+try:
+    from models.lecture_embedding import LectureChunk, LectureEmbedding  # noqa: F401
+except ImportError:
+    pass  # Models may not be needed for user creation
+
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -151,7 +158,45 @@ class AuthService:
 
             db.create_record("student", student_payload)
 
-        return User(**user_result)
+        # Create User object without triggering full relationship initialization
+        # This avoids SQLAlchemy relationship errors when models aren't fully loaded
+        # Parse datetime strings if they exist
+        created_at_val = user_result.get("created_at")
+        if isinstance(created_at_val, str):
+            created_at_parsed = datetime.fromisoformat(
+                created_at_val.replace("Z", "+00:00")
+            )
+        elif created_at_val is None:
+            created_at_parsed = datetime.utcnow()
+        else:
+            created_at_parsed = created_at_val
+        
+        updated_at_val = user_result.get("updated_at")
+        if isinstance(updated_at_val, str):
+            updated_at_parsed = datetime.fromisoformat(
+                updated_at_val.replace("Z", "+00:00")
+            )
+        elif updated_at_val is None:
+            updated_at_parsed = datetime.utcnow()
+        else:
+            updated_at_parsed = updated_at_val
+        
+        # Create User with minimal initialization to avoid relationship errors
+        user = User(
+            id=user_result.get("id"),
+            email=user_result.get("email"),
+            username=user_result.get("username"),
+            first_name=user_result.get("first_name", ""),
+            last_name=user_result.get("last_name", ""),
+            is_active=user_result.get("is_active", True),
+            role=UserRole(user_result.get("role")),
+            hashed_password=user_result.get("hashed_password", ""),
+            university_id=user_result.get("university_id"),
+            created_at=created_at_parsed,
+            updated_at=updated_at_parsed,
+        )
+        
+        return user
 
     @staticmethod
     def to_user_read(db, user: User) -> UserRead:
