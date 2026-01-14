@@ -524,18 +524,43 @@ async def get_course_semesters(
     """
     Get all semesters for a specific course.
 
-    This endpoint is only accessible to teachers and admins.
+    This endpoint is accessible to teachers and admins.
     """
     try:
-        # Get teacher profile
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
+        # Get university_id - from teacher profile or admin's university_id
+        university_id = None
+        
+        if current_user.role == UserRole.ADMIN:
+            if not current_user.university_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Admin must be associated with a university.",
+                )
+            university_id = current_user.university_id
+        else:
+            teacher = current_user.teacher_profile
+            if not teacher:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher profile not found",
+                )
+            university_id = teacher.university_id
 
         logger.info(f"Fetching semesters for course {course_id}")
+
+        # Verify course belongs to user's university
+        course = db.get_record_by_id("course", course_id, use_cache=False)
+        if not course:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found",
+            )
+
+        if course.get("university_id") != university_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this course",
+            )
 
         # Get semesters for this course
         semesters = db.get_records(
