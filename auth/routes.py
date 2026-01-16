@@ -6,7 +6,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
-from auth.models import Token, UserCreate, UserRead, UniversityRead
+from auth.models import (
+    PasswordChangeRequest,
+    Token,
+    UserCreate,
+    UserRead,
+    UniversityRead,
+)
 from auth.service import AuthService
 from dependencies import get_current_user
 from models.user import User
@@ -24,7 +30,9 @@ async def register(user_data: UserCreate, db=Depends(get_db)):
         user = await AuthService.create_user(db, user_data)
         return AuthService.to_user_read(db, user)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
 
 
 @router.post("/login", response_model=Token)
@@ -66,13 +74,87 @@ async def update_user_me(
     current_user: Annotated[User, Depends(get_current_user)],
     db=Depends(get_db),
 ):
-    """Update current user information."""
+    """
+    Update current user information.
+    
+    Note: To change password, use /auth/change-password endpoint instead
+    for better security (requires old password verification).
+    """
+    # Prevent password changes through this endpoint
+    if "password" in user_update:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use /auth/change-password endpoint to change your password",
+        )
+    
     updated_user = AuthService.update_user(db, current_user.id, user_update)
     if not updated_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
     return UserRead.model_validate(updated_user)
+
+
+@router.post("/change-password")
+async def change_password(
+    password_data: PasswordChangeRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db=Depends(get_db),
+):
+    """
+    Change user password.
+    
+    Requires the old password for verification.
+    Available for all authenticated users (students, teachers, admins).
+    """
+    # Get current user data with password hash
+    user_data = db.get_user_by_id(current_user.id, use_cache=False)
+    if not user_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    
+    # Verify old password
+    hashed_password = user_data.get("hashed_password", "")
+    if not AuthService.verify_password(password_data.old_password, hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incorrect old password",
+        )
+    
+    # Validate new password (basic validation)
+    min_password_length = 6
+    if (
+        not password_data.new_password
+        or len(password_data.new_password) < min_password_length
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"New password must be at least {min_password_length} "
+                "characters long"
+            ),
+        )
+    
+    # Check if new password is same as old password
+    if AuthService.verify_password(password_data.new_password, hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from old password",
+        )
+    
+    # Update password (AuthService.update_user expects "password" field)
+    updated_user = AuthService.update_user(
+        db, current_user.id, {"password": password_data.new_password}
+    )
+    
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update password",
+        )
+    
+    return {"message": "Password changed successfully"}
 
 
 @router.get("/universities", response_model=list[UniversityRead])
@@ -88,7 +170,7 @@ async def list_universities(db=Depends(get_db), skip: int = 0, limit: int = 100)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load universities: {str(e)}",
+            detail=f"Failed to load universities: {e!s}",
         ) from e
 
 

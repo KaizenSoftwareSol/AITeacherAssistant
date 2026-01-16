@@ -10,9 +10,9 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
 
 from logger import logger
-from routes_config import (auth_router, course_router, document_router,
-                           lecture_router, notification_router, student_router,
-                           teacher_router, user_router)
+from routes_config import (admin_router, auth_router, course_router,
+                           document_router, lecture_router, notification_router,
+                           student_router, teacher_router, user_router)
 from services.cache_service import cache, periodic_cache_cleanup
 from utils.db import create_db_and_tables
 
@@ -165,3 +165,4 @@ app.include_router(lecture_router, prefix="/lectures")
 app.include_router(student_router, prefix="/student")
 app.include_router(teacher_router, prefix="/teacher")
 app.include_router(notification_router, prefix="/notifications")
+app.include_router(admin_router, prefix="/admin")

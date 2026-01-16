@@ -54,51 +54,116 @@ async def get_teacher_dashboard(
 
         logger.info(f"Fetching dashboard data for teacher {teacher.id}")
 
-        # Get all courses for the university
-        courses_result = (
+        # Get courses for this teacher from multiple sources (same logic as courses endpoint):
+        # 1. Courses created by this teacher (created_by_teacher_id)
+        # 2. Courses assigned to this teacher (via course_teacher table)
+        # 3. Courses where this teacher has created at least one lecture
+        
+        course_ids_set = set()
+        courses_dict = {}
+        
+        # 1. Get courses created by this teacher
+        created_courses_result = (
             db.admin_client.table("course")
-            .select("id, name, code, description, created_at")
-            .eq("university_id", str(teacher.university_id))
-            .order("created_at", desc=True)
+            .select("*")
+            .eq("university_id", teacher.university_id)
+            .eq("created_by_teacher_id", teacher.id)
             .execute()
         )
         
+        for course in created_courses_result.data or []:
+            course_id = course.get("id")
+            if course_id:
+                course_ids_set.add(course_id)
+                courses_dict[course_id] = course
+        
+        # 2. Get courses assigned to this teacher
+        assigned_courses_result = (
+            db.admin_client.table("course_teacher")
+            .select("course_id, course!inner(*)")
+            .eq("teacher_id", teacher.id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        for assignment in assigned_courses_result.data or []:
+            course_id = assignment.get("course_id")
+            if course_id:
+                course_ids_set.add(course_id)
+                course_data = assignment.get("course", {})
+                if course_data and course_id not in courses_dict:
+                    courses_dict[course_id] = course_data
+        
+        # 3. Get courses where this teacher has created at least one lecture
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("course_id, course!inner(*)")
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+        
+        for lecture in lectures_result.data or []:
+            course_id = lecture.get("course_id")
+            if course_id:
+                course_ids_set.add(course_id)
+                course_data = lecture.get("course", {})
+                if course_data and course_id not in courses_dict:
+                    courses_dict[course_id] = course_data
+        
+        # Convert to list and enrich with stats
         courses = []
         total_students = 0
+        course_ids = list(course_ids_set)
         
-        for course in (courses_result.data or []):
-            # Get enrollment count for this course
-            enrollment_result = (
+        # Batch fetch enrollment counts
+        if course_ids:
+            enrollments_result = (
                 db.admin_client.table("enrollment")
-                .select("id, student_id")
-                .eq("course_id", course["id"])
+                .select("course_id")
+                .in_("course_id", course_ids)
                 .eq("is_active", True)
                 .execute()
             )
-            enrollment_count = len(enrollment_result.data) if enrollment_result.data else 0
-            total_students += enrollment_count
-            
-            # Get lecture count for this course (by this teacher)
-            lectures_result = (
+            enrollment_counts = {}
+            for e in (enrollments_result.data or []):
+                cid = e.get("course_id")
+                enrollment_counts[cid] = enrollment_counts.get(cid, 0) + 1
+        
+        # Batch fetch lecture counts for this teacher
+        if course_ids:
+            teacher_lectures_result = (
                 db.admin_client.table("lecture")
-                .select("id, status")
-                .eq("course_id", course["id"])
+                .select("course_id, status")
+                .in_("course_id", course_ids)
                 .eq("teacher_id", teacher.id)
                 .execute()
             )
-            lecture_count = len(lectures_result.data) if lectures_result.data else 0
-            published_count = sum(1 for l in (lectures_result.data or []) if l.get("status") in ["PUBLISHED", "DELIVERED"])
+            lecture_counts = {}
+            published_counts = {}
+            for lec in (teacher_lectures_result.data or []):
+                cid = lec.get("course_id")
+                lecture_counts[cid] = lecture_counts.get(cid, 0) + 1
+                if lec.get("status") in ["PUBLISHED", "DELIVERED"]:
+                    published_counts[cid] = published_counts.get(cid, 0) + 1
+        
+        for course in courses_dict.values():
+            course_id = course.get("id")
+            enrollment_count = enrollment_counts.get(course_id, 0) if course_ids else 0
+            total_students += enrollment_count
             
             courses.append({
-                "id": course["id"],
-                "name": course["name"],
-                "code": course["code"],
+                "id": course_id,
+                "name": course.get("name"),
+                "code": course.get("code"),
                 "description": course.get("description"),
-                "created_at": course["created_at"],
+                "created_at": course.get("created_at"),
                 "enrollment_count": enrollment_count,
-                "lecture_count": lecture_count,
-                "published_lectures": published_count,
+                "lecture_count": lecture_counts.get(course_id, 0) if course_ids else 0,
+                "published_lectures": published_counts.get(course_id, 0) if course_ids else 0,
             })
+        
+        # Sort by created_at desc
+        courses.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         
         # Get all documents
         documents_result = (

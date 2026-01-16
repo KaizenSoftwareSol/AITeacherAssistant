@@ -20,6 +20,9 @@ class Course(SQLModel, table=True):
     description: Optional[str] = None
     curriculum_content: Optional[str] = None  # Full curriculum text
     university_id: str = Field(foreign_key="university.id")  # UUID
+    created_by_teacher_id: Optional[str] = Field(
+        default=None, foreign_key="teacher.id"
+    )  # UUID - teacher who created the course
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

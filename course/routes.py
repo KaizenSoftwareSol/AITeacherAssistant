@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationInfo
 
 from dependencies import require_teacher
 from logger import logger
-from models.user import User
+from models.user import User, UserRole
 from services.cache_service import cache
 from utils.db import get_db
 
@@ -71,12 +71,18 @@ async def get_teacher_courses(
     db=Depends(get_db),
 ):
     """
-    Get all courses for the current teacher's university.
+    Get all courses associated with the current teacher.
+
+    Returns courses where:
+    1. Teacher created the course (created_by_teacher_id)
+    2. Course was assigned to teacher by admin (via course_teacher table)
+    3. Teacher has created at least one lecture for the course
 
     Returns courses with extended stats: description, curriculum_content, 
-    total_students, published_lectures, total_documents, created_at, updated_at.
+    total_students, published_lectures (by this teacher), total_documents, 
+    created_at, updated_at.
 
-    This endpoint is only accessible to teachers and admins.
+    This endpoint is only accessible to teachers.
     Optimized with caching and batch queries.
     """
     try:
@@ -93,24 +99,74 @@ async def get_teacher_courses(
         )
         
         # Check cache first
-        cache_key = f"teacher_courses:{teacher.university_id}"
+        cache_key = f"teacher_courses:{teacher.id}"
         cached_courses = cache.get("courses", cache_key)
         if cached_courses is not None:
             return cached_courses
 
-        # Get courses for this teacher's university
-        courses = db.get_records(
-            "course",
-            filters={"university_id": teacher.university_id},
-            skip=0,
-            limit=1000,
-            use_cache=False,  # We're caching the enriched result
+        # Get courses for this teacher from multiple sources:
+        # 1. Courses created by this teacher (created_by_teacher_id)
+        # 2. Courses assigned to this teacher (via course_teacher table)
+        # 3. Courses where this teacher has created at least one lecture
+        
+        course_ids_set = set()
+        courses_dict = {}
+        
+        # 1. Get courses created by this teacher
+        created_courses_result = (
+            db.admin_client.table("course")
+            .select("*")
+            .eq("university_id", teacher.university_id)
+            .eq("created_by_teacher_id", teacher.id)
+            .execute()
         )
+        
+        for course in created_courses_result.data or []:
+            course_id = course.get("id")
+            if course_id:
+                course_ids_set.add(course_id)
+                courses_dict[course_id] = course
+        
+        # 2. Get courses assigned to this teacher
+        assigned_courses_result = (
+            db.admin_client.table("course_teacher")
+            .select("course_id, course!inner(*)")
+            .eq("teacher_id", teacher.id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        for assignment in assigned_courses_result.data or []:
+            course_id = assignment.get("course_id")
+            if course_id:
+                course_ids_set.add(course_id)
+                course_data = assignment.get("course", {})
+                if course_data and course_id not in courses_dict:
+                    courses_dict[course_id] = course_data
+        
+        # 3. Get courses where this teacher has created at least one lecture
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("course_id, course!inner(*)")
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+        
+        for lecture in lectures_result.data or []:
+            course_id = lecture.get("course_id")
+            if course_id:
+                course_ids_set.add(course_id)
+                course_data = lecture.get("course", {})
+                if course_data and course_id not in courses_dict:
+                    courses_dict[course_id] = course_data
+        
+        # Convert to list
+        courses = list(courses_dict.values())
         
         if not courses:
             return []
         
-        course_ids = [c["id"] for c in courses]
+        course_ids = list(course_ids_set)
         
         # Batch fetch all enrollment counts at once
         enrollments_result = (
@@ -125,18 +181,20 @@ async def get_teacher_courses(
             cid = e.get("course_id")
             enrollment_counts[cid] = enrollment_counts.get(cid, 0) + 1
         
-        # Batch fetch all lectures with status at once
-        lectures_result = (
+        # Batch fetch all lectures for this teacher with status at once
+        # Only count this teacher's lectures for stats
+        teacher_lectures_result = (
             db.admin_client.table("lecture")
             .select("course_id, status, document_id")
             .in_("course_id", course_ids)
+            .eq("teacher_id", teacher.id)
             .execute()
         )
         
-        # Process lecture data
+        # Process lecture data (only this teacher's lectures)
         published_counts = {}
         doc_ids_by_course = {}
-        for lec in (lectures_result.data or []):
+        for lec in (teacher_lectures_result.data or []):
             cid = lec.get("course_id")
             if lec.get("status") in ["PUBLISHED", "DELIVERED"]:
                 published_counts[cid] = published_counts.get(cid, 0) + 1
@@ -162,7 +220,7 @@ async def get_teacher_courses(
         cache.set("courses", enriched_courses, cache_key, ttl=120)
 
         logger.info(
-            f"Found {len(enriched_courses)} courses for university {teacher.university_id}"
+            f"Found {len(enriched_courses)} courses for teacher {teacher.id}"
         )
         return enriched_courses
 
@@ -182,14 +240,35 @@ async def create_course(
     current_user: Annotated[User, Depends(require_teacher)],
     db=Depends(get_db),
 ):
-    """Create a new course for the teacher's university."""
+    """
+    Create a new course for the user's university.
+    Available to both teachers and admins.
+    """
 
-    teacher = current_user.teacher_profile
-    if not teacher:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Teacher profile not found. Please complete your teacher profile before creating courses.",
-        )
+    # Get university_id - from teacher profile or admin's university_id
+    university_id = None
+    created_by_teacher_id = None
+
+    if current_user.role == UserRole.ADMIN:
+        # Admin creating course
+        if not current_user.university_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Admin must be associated with a university to create courses.",
+            )
+        university_id = current_user.university_id
+        # Admins don't have teacher profiles, so created_by_teacher_id will be NULL
+        created_by_teacher_id = None
+    else:
+        # Teacher creating course
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found. Please complete your teacher profile before creating courses.",
+            )
+        university_id = teacher.university_id
+        created_by_teacher_id = teacher.id
 
     try:
         code = request.code
@@ -220,7 +299,8 @@ async def create_course(
             "code": code,
             "description": request.description.strip() if request.description else None,
             "curriculum_content": request.curriculum_content,
-            "university_id": teacher.university_id,
+            "university_id": university_id,
+            "created_by_teacher_id": created_by_teacher_id,  # NULL for admin-created courses
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
         }
@@ -238,8 +318,16 @@ async def create_course(
         course_data = course_result.data[0]
         semester_data = None
         
-        # Invalidate courses cache for this university
-        cache.caches["courses"].delete_pattern(f"courses:teacher_courses:{teacher.university_id}")
+        # Invalidate courses cache
+        if created_by_teacher_id:
+            # Invalidate cache for the teacher who created it
+            cache.caches["courses"].delete_pattern(
+                f"courses:teacher_courses:{created_by_teacher_id}"
+            )
+        # Invalidate all course caches for this university
+        cache.caches["courses"].delete_pattern(f"courses:teacher_courses:*")
+        # Invalidate admin courses cache
+        cache.caches["courses"].delete_pattern(f"courses:admin_courses:{university_id}")
 
         if request.semester_name:
             semester_payload = {
@@ -265,8 +353,10 @@ async def create_course(
             "Course created",
             extra={
                 "course_id": course_data.get("id"),
-                "teacher_id": teacher.id,
-                "university_id": teacher.university_id,
+                "created_by": current_user.id,
+                "role": current_user.role.value,
+                "university_id": university_id,
+                "created_by_teacher_id": created_by_teacher_id,
             },
         )
 
@@ -310,13 +400,24 @@ async def get_course(
     Optimized with caching.
     """
     try:
-        # Get teacher profile
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
+        # Get university_id - from teacher profile or admin's university_id
+        university_id = None
+        
+        if current_user.role == UserRole.ADMIN:
+            if not current_user.university_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Admin must be associated with a university.",
+                )
+            university_id = current_user.university_id
+        else:
+            teacher = current_user.teacher_profile
+            if not teacher:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher profile not found",
+                )
+            university_id = teacher.university_id
 
         logger.info(f"Fetching course {course_id}")
         
@@ -325,7 +426,7 @@ async def get_course(
         cached_course = cache.get("courses", cache_key)
         if cached_course is not None:
             # Still verify access
-            if cached_course.get("university_id") == teacher.university_id:
+            if cached_course.get("university_id") == university_id:
                 return cached_course
 
         # Get course (cached)
@@ -336,8 +437,8 @@ async def get_course(
                 detail="Course not found",
             )
 
-        # Verify course belongs to teacher's university
-        if course.get("university_id") != teacher.university_id:
+        # Verify course belongs to user's university
+        if course.get("university_id") != university_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this course",
@@ -423,18 +524,43 @@ async def get_course_semesters(
     """
     Get all semesters for a specific course.
 
-    This endpoint is only accessible to teachers and admins.
+    This endpoint is accessible to teachers and admins.
     """
     try:
-        # Get teacher profile
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
+        # Get university_id - from teacher profile or admin's university_id
+        university_id = None
+        
+        if current_user.role == UserRole.ADMIN:
+            if not current_user.university_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Admin must be associated with a university.",
+                )
+            university_id = current_user.university_id
+        else:
+            teacher = current_user.teacher_profile
+            if not teacher:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher profile not found",
+                )
+            university_id = teacher.university_id
 
         logger.info(f"Fetching semesters for course {course_id}")
+
+        # Verify course belongs to user's university
+        course = db.get_record_by_id("course", course_id, use_cache=False)
+        if not course:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found",
+            )
+
+        if course.get("university_id") != university_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this course",
+            )
 
         # Get semesters for this course
         semesters = db.get_records(
@@ -812,6 +938,256 @@ async def get_course_lectures(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error while fetching course lectures",
         )
+
+
+@router.delete("/{course_id}", status_code=status.HTTP_200_OK)
+async def delete_course(
+    course_id: str,
+    current_user: Annotated[User, Depends(require_teacher)],
+    db=Depends(get_db),
+):
+    """
+    Delete a course and all associated data.
+    Available to both teachers and admins.
+    
+    Teachers can only delete courses they created.
+    Admins can delete any course in their university.
+    
+    This will cascade delete:
+    - Enrollments
+    - Semesters
+    - Lectures (and all lecture-related data)
+    - Course-teacher assignments
+    """
+    try:
+        # Get course
+        course = db.get_record_by_id("course", course_id, use_cache=False)
+        if not course:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found",
+            )
+
+        # Get university_id and verify access
+        university_id = None
+        can_delete = False
+
+        if current_user.role == UserRole.ADMIN:
+            # Admin can delete any course in their university
+            if not current_user.university_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Admin must be associated with a university.",
+                )
+            university_id = current_user.university_id
+            if course.get("university_id") != university_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only delete courses from your own university",
+                )
+            can_delete = True
+        else:
+            # Teacher can only delete courses they created
+            teacher = current_user.teacher_profile
+            if not teacher:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher profile not found",
+                )
+            university_id = teacher.university_id
+            
+            if course.get("university_id") != university_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this course",
+                )
+            
+            # Check if teacher created this course
+            if course.get("created_by_teacher_id") == teacher.id:
+                can_delete = True
+            else:
+                # Check if course is assigned to this teacher
+                assignment_result = (
+                    db.admin_client.table("course_teacher")
+                    .select("id")
+                    .eq("course_id", course_id)
+                    .eq("teacher_id", teacher.id)
+                    .eq("is_active", True)
+                    .limit(1)
+                    .execute()
+                )
+                if assignment_result.data:
+                    can_delete = True
+
+            if not can_delete:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only delete courses you created",
+                )
+
+        # Delete all related data in proper order (cascade delete)
+        logger.info(f"Starting cascade delete for course {course_id}")
+
+        # 1. Get all lectures for this course (need to delete them first)
+        lectures = db.get_records("lecture", {"course_id": course_id}, use_cache=False)
+        lecture_ids = [lec["id"] for lec in lectures]
+
+        # 2. For each lecture, delete all related data (similar to delete_lecture endpoint)
+        for lecture_id in lecture_ids:
+            # Get assessments for this lecture
+            assessments = db.get_records("assessment", {"lecture_id": lecture_id})
+            assessment_ids = [a["id"] for a in assessments]
+
+            # Delete assessment-related data
+            for assessment_id in assessment_ids:
+                # Delete questions
+                questions = db.get_records("question", {"assessment_id": assessment_id})
+                for question in questions:
+                    db.delete_record("question", question["id"])
+
+                # Delete assessment submissions
+                submissions = db.get_records(
+                    "assessment_submission", {"assessment_id": assessment_id}
+                )
+                for submission in submissions:
+                    db.delete_record("assessment_submission", submission["id"])
+
+                # Delete result view requests
+                result_requests = db.get_records(
+                    "result_view_request", {"assessment_id": assessment_id}
+                )
+                for request in result_requests:
+                    db.delete_record("result_view_request", request["id"])
+
+                # Delete assessment
+                db.delete_record("assessment", assessment_id)
+
+            # Delete lecture-related data
+            engagements = db.get_records("student_engagement", {"lecture_id": lecture_id})
+            for engagement in engagements:
+                db.delete_record("student_engagement", engagement["id"])
+
+            conversations = db.get_records("ai_conversation", {"lecture_id": lecture_id})
+            for conversation in conversations:
+                db.delete_record("ai_conversation", conversation["id"])
+
+            analytics = db.get_records("lecture_analytics", {"lecture_id": lecture_id})
+            for analytic in analytics:
+                db.delete_record("lecture_analytics", analytic["id"])
+
+            chunks = db.get_records("lecture_chunk", {"lecture_id": lecture_id})
+            for chunk in chunks:
+                db.delete_record("lecture_chunk", chunk["id"])
+
+            embeddings = db.get_records("lecture_embedding", {"lecture_id": lecture_id})
+            for embedding in embeddings:
+                db.delete_record("lecture_embedding", embedding["id"])
+
+            # Delete lecture content and files
+            lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+            for content in lecture_contents:
+                try:
+                    from supabase_config import supabase
+                    storage_bucket = content.get("storage_bucket")
+                    storage_path = content.get("storage_path")
+                    if storage_bucket and storage_path:
+                        supabase.delete_file(storage_bucket, storage_path)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to delete file {content.get('storage_path', 'unknown')}: {str(e)}"
+                    )
+                db.delete_record("lecture_content", content["id"])
+
+            # Delete flashcard
+            flashcards = db.get_records("flashcard", {"lecture_id": lecture_id})
+            for flashcard in flashcards:
+                db.delete_record("flashcard", flashcard["id"])
+
+            # Finally delete the lecture
+            db.delete_record("lecture", lecture_id)
+
+        logger.info(f"Deleted {len(lecture_ids)} lectures and related data")
+
+        # 3. Delete enrollments (references course_id and semester_id)
+        enrollments = db.get_records("enrollment", {"course_id": course_id}, use_cache=False)
+        for enrollment in enrollments:
+            db.delete_record("enrollment", enrollment["id"])
+        logger.info(f"Deleted {len(enrollments)} enrollments")
+
+        # 4. Delete assessments that reference course_id directly (not via lecture)
+        course_assessments = db.get_records("assessment", {"course_id": course_id}, use_cache=False)
+        for assessment in course_assessments:
+            # Delete questions
+            questions = db.get_records("question", {"assessment_id": assessment["id"]})
+            for question in questions:
+                db.delete_record("question", question["id"])
+
+            # Delete submissions
+            submissions = db.get_records(
+                "assessment_submission", {"assessment_id": assessment["id"]}
+            )
+            for submission in submissions:
+                db.delete_record("assessment_submission", submission["id"])
+
+            # Delete result view requests
+            result_requests = db.get_records(
+                "result_view_request", {"assessment_id": assessment["id"]}
+            )
+            for request in result_requests:
+                db.delete_record("result_view_request", request["id"])
+
+            db.delete_record("assessment", assessment["id"])
+        logger.info(f"Deleted {len(course_assessments)} course-level assessments")
+
+        # 5. Delete document assignments
+        doc_assignments = db.get_records(
+            "document_assignment", {"course_id": course_id}, use_cache=False
+        )
+        for assignment in doc_assignments:
+            db.delete_record("document_assignment", assignment["id"])
+        logger.info(f"Deleted {len(doc_assignments)} document assignments")
+
+        # 6. Delete course-teacher assignments
+        course_teachers = db.get_records(
+            "course_teacher", {"course_id": course_id}, use_cache=False
+        )
+        for assignment in course_teachers:
+            db.delete_record("course_teacher", assignment["id"])
+        logger.info(f"Deleted {len(course_teachers)} course-teacher assignments")
+
+        # 7. Delete semesters (must be last before course)
+        semesters = db.get_records("semester", {"course_id": course_id}, use_cache=False)
+        for semester in semesters:
+            db.delete_record("semester", semester["id"])
+        logger.info(f"Deleted {len(semesters)} semesters")
+
+        # 8. Finally, delete the course itself
+        success = db.delete_record("course", course_id)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete course",
+            )
+
+        # Invalidate caches
+        cache.caches["courses"].delete_pattern(f"courses:teacher_courses:*")
+        cache.caches["courses"].delete_pattern(f"courses:admin_courses:{university_id}")
+        cache.caches["courses"].delete_pattern(f"courses:course_detail:{course_id}")
+
+        logger.info(
+            f"Course {course_id} deleted by {current_user.role.value} {current_user.id}"
+        )
+
+        return {"message": "Course deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting course: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error deleting course",
+        ) from e
 
 
 # Import and include the router in the course_router from routes_config
