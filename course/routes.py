@@ -260,15 +260,15 @@ async def create_course(
         # Admins don't have teacher profiles, so created_by_teacher_id will be NULL
         created_by_teacher_id = None
     else:
-        # Teacher creating course
+            # Teacher creating course
         teacher = current_user.teacher_profile
         if not teacher:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Teacher profile not found. Please complete your teacher profile before creating courses.",
             )
-        university_id = teacher.university_id
-        created_by_teacher_id = teacher.id
+            university_id = teacher.university_id
+            created_by_teacher_id = teacher.id
 
     try:
         code = request.code
@@ -417,7 +417,7 @@ async def get_course(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Teacher profile not found",
                 )
-            university_id = teacher.university_id
+                university_id = teacher.university_id
 
         logger.info(f"Fetching course {course_id}")
         
@@ -545,8 +545,6 @@ async def get_course_semesters(
                     detail="Teacher profile not found",
                 )
             university_id = teacher.university_id
-
-        logger.info(f"Fetching semesters for course {course_id}")
 
         # Verify course belongs to user's university
         course = db.get_record_by_id("course", course_id, use_cache=False)

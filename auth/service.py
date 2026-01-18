@@ -66,9 +66,12 @@ class AuthService:
         if users:
             raise ValueError("User with this username already exists")
 
-        # Determine university
+        # Determine university (not required for SYSTEM users)
         university_id = None
-        if user_create.university_id:
+        if user_create.role == UserRole.SYSTEM:
+            # System users don't belong to any university
+            university_id = None
+        elif user_create.university_id:
             university = db.get_record_by_id("university", user_create.university_id)
             if not university:
                 raise ValueError("Selected university was not found")
@@ -95,7 +98,8 @@ class AuthService:
         else:
             raise ValueError("University selection is required")
 
-        if not university_id:
+        # Only validate university_id for non-SYSTEM users
+        if user_create.role != UserRole.SYSTEM and not university_id:
             raise ValueError("Unable to resolve university for the new user")
 
         # Create new user data

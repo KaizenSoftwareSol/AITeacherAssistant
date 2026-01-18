@@ -128,7 +128,7 @@ async def get_teacher_dashboard(
             for e in (enrollments_result.data or []):
                 cid = e.get("course_id")
                 enrollment_counts[cid] = enrollment_counts.get(cid, 0) + 1
-        
+            
         # Batch fetch lecture counts for this teacher
         if course_ids:
             teacher_lectures_result = (

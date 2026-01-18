@@ -11,9 +11,11 @@ student_router = APIRouter(tags=["Student Portal"])
 teacher_router = APIRouter(tags=["Teacher Resources"])
 notification_router = APIRouter(tags=["Notifications"])
 admin_router = APIRouter(tags=["Admin Management"])
+system_router = APIRouter(tags=["System Management"])
 
 
 import admin.routes
+import system.routes
 import auth.routes
 import course.routes
 import document.routes
