@@ -201,9 +201,11 @@ require_teacher = AuthDependency.check_roles([UserRole.TEACHER, UserRole.ADMIN])
 require_user = AuthDependency.check_roles(
     [UserRole.STUDENT, UserRole.TEACHER, UserRole.ADMIN]
 )
+require_system = AuthDependency.check_roles([UserRole.SYSTEM])
 
 # Type hints for dependency injection (remain the same)
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminUser = Annotated[User, Depends(require_admin)]
 TeacherUser = Annotated[User, Depends(require_teacher)]
 AnyUser = Annotated[User, Depends(require_user)]
+SystemUser = Annotated[User, Depends(require_system)]

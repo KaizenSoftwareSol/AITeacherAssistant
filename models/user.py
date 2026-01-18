@@ -20,6 +20,7 @@ class UserRole(str, Enum):
     STUDENT = "STUDENT"  # Match database values
     TEACHER = "TEACHER"
     ADMIN = "ADMIN"
+    SYSTEM = "SYSTEM"  # System administrator for onboarding universities
 
 
 class UserBase(SQLModel):
