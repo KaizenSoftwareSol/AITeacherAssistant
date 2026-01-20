@@ -52,6 +52,41 @@ class AuthService:
             to_encode, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM
         )
         return encoded_jwt
+    
+    @staticmethod
+    def create_activation_token(user_id: str) -> str:
+        """
+        Create a one-time activation token for password setup.
+        
+        Token expires in 48 hours and includes user_id and purpose.
+        """
+        expires_delta = timedelta(hours=48)
+        data = {
+            "sub": str(user_id),
+            "purpose": "activation",
+            "type": "activation_token"
+        }
+        return AuthService.create_access_token(data, expires_delta=expires_delta)
+    
+    @staticmethod
+    def verify_activation_token(token: str) -> Optional[str]:
+        """
+        Verify and extract user_id from activation token.
+        
+        Returns:
+            user_id if token is valid, None otherwise
+        """
+        try:
+            payload = jwt.decode(
+                token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+            )
+            # Verify token purpose
+            if payload.get("purpose") != "activation" or payload.get("type") != "activation_token":
+                return None
+            user_id: str = payload.get("sub")
+            return user_id
+        except JWTError:
+            return None
 
     @staticmethod
     async def create_user(db, user_create: UserCreate) -> User:
@@ -165,25 +200,13 @@ class AuthService:
         # Create User object without triggering full relationship initialization
         # This avoids SQLAlchemy relationship errors when models aren't fully loaded
         # Parse datetime strings if they exist
+        from utils.datetime_helpers import parse_datetime_safe
+        
         created_at_val = user_result.get("created_at")
-        if isinstance(created_at_val, str):
-            created_at_parsed = datetime.fromisoformat(
-                created_at_val.replace("Z", "+00:00")
-            )
-        elif created_at_val is None:
-            created_at_parsed = datetime.utcnow()
-        else:
-            created_at_parsed = created_at_val
+        created_at_parsed = parse_datetime_safe(created_at_val)
         
         updated_at_val = user_result.get("updated_at")
-        if isinstance(updated_at_val, str):
-            updated_at_parsed = datetime.fromisoformat(
-                updated_at_val.replace("Z", "+00:00")
-            )
-        elif updated_at_val is None:
-            updated_at_parsed = datetime.utcnow()
-        else:
-            updated_at_parsed = updated_at_val
+        updated_at_parsed = parse_datetime_safe(updated_at_val)
         
         # Create User with minimal initialization to avoid relationship errors
         user = User(

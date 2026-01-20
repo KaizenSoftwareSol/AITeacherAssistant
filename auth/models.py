@@ -64,6 +64,13 @@ class PasswordChangeRequest(BaseModel):
     new_password: str
 
 
+class TokenPasswordChangeRequest(BaseModel):
+    """Model for changing password using activation token (no old password required)."""
+
+    token: str
+    new_password: str
+
+
 class Token(BaseModel):
     """Token response model."""
 

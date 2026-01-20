@@ -1406,6 +1406,19 @@ async def publish_lecture(
                 if students_result.data:
                     student_user_ids = [s["user_id"] for s in students_result.data]
                     
+                    # Get teacher name for email
+                    teacher_name = None
+                    teacher_result = (
+                        db.admin_client.table("teacher")
+                        .select("user_id, users!inner(*)")
+                        .eq("user_id", current_user.id)
+                        .limit(1)
+                        .execute()
+                    )
+                    if teacher_result.data:
+                        teacher_user_data = teacher_result.data[0].get("users", {})
+                        teacher_name = f"{teacher_user_data.get('first_name', '')} {teacher_user_data.get('last_name', '')}".strip()
+                    
                     # Send notifications
                     notification_service = NotificationService(db)
                     await notification_service.notify_lecture_published(
@@ -1413,6 +1426,7 @@ async def publish_lecture(
                         lecture_title=lecture_title,
                         course_name=course_name,
                         lecture_id=lecture_id,
+                        teacher_name=teacher_name,
                     )
                     logger.info(f"Sent lecture published notifications to {len(student_user_ids)} students")
         except Exception as notify_error:
