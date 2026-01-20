@@ -8,6 +8,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from auth.models import (
     PasswordChangeRequest,
+    TokenPasswordChangeRequest,
     Token,
     UserCreate,
     UserRead,
@@ -155,6 +156,65 @@ async def change_password(
         )
     
     return {"message": "Password changed successfully"}
+
+
+@router.post("/activate-account")
+async def activate_account_with_token(
+    password_data: TokenPasswordChangeRequest,
+    db=Depends(get_db),
+):
+    """
+    Activate account and set password using activation token.
+    
+    This endpoint is used when a user clicks the activation link sent via email.
+    The token is a JWT that contains the user_id and expires in 48 hours.
+    """
+    # Verify token and get user_id
+    user_id = AuthService.verify_activation_token(password_data.token)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired activation token",
+        )
+    
+    # Get user data
+    user_data = db.get_user_by_id(user_id, use_cache=False)
+    if not user_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+    
+    # Validate new password
+    min_password_length = 6
+    if (
+        not password_data.new_password
+        or len(password_data.new_password) < min_password_length
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Password must be at least {min_password_length} "
+                "characters long"
+            ),
+        )
+    
+    # Update password
+    updated_user = AuthService.update_user(
+        db, user_id, {"password": password_data.new_password}
+    )
+    
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to set password",
+        )
+    
+    return {
+        "message": "Account activated and password set successfully",
+        "user_id": user_id,
+        "email": user_data.get("email"),
+    }
 
 
 @router.get("/universities", response_model=list[UniversityRead])

@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     
     # Cache size limits
     CACHE_MAX_SIZE: int = int(os.getenv("CACHE_MAX_SIZE", "10000"))
+    
+    # Email Configuration (SMTP)
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_SENDER_EMAIL: str = os.getenv("SMTP_SENDER_EMAIL", "aitaedu.org@gmail.com")
+    SMTP_SENDER_NAME: str = os.getenv("SMTP_SENDER_NAME", "AITA Platform")
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
     class Config:
         env_file = ".env"

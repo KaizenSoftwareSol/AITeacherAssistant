@@ -16,6 +16,7 @@ from models.notification import (
     NotificationSeverity,
     NotificationType,
 )
+from services.email_service import email_service
 
 
 class NotificationService:
@@ -83,6 +84,24 @@ class NotificationService:
             )
             
             logger.info(f"Created notification {notification_id} for user {user_id}: {title}")
+            
+            # Send email notification as well
+            try:
+                user_data = self.db.get_user_by_id(user_id, use_cache=False)
+                if user_data:
+                    user_email = user_data.get("email")
+                    user_name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or "User"
+                    if user_email:
+                        email_service.send_notification_email(
+                            to_email=user_email,
+                            to_name=user_name,
+                            notification_title=title,
+                            notification_description=description,
+                            action_url=action_url
+                        )
+            except Exception as email_error:
+                logger.warning(f"Failed to send email notification: {str(email_error)}")
+            
             return result.data[0] if result.data else notification_data
             
         except Exception as e:
@@ -136,6 +155,41 @@ class NotificationService:
                     .execute()
                 )
                 logger.info(f"Created {len(notifications)} notifications in bulk")
+                
+                # Send email notifications as well
+                try:
+                    # Get user emails for all user_ids
+                    user_ids_list = list(set(user_ids))
+                    users_result = (
+                        self.db.admin_client
+                        .table("users")
+                        .select("id, email, first_name, last_name")
+                        .in_("id", user_ids_list)
+                        .execute()
+                    )
+                    
+                    user_info_map = {}
+                    for user in users_result.data or []:
+                        user_info_map[user["id"]] = {
+                            "email": user.get("email"),
+                            "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User"
+                        }
+                    
+                    # Send emails
+                    for notification in notifications:
+                        user_id = notification["user_id"]
+                        user_info = user_info_map.get(user_id)
+                        if user_info and user_info["email"]:
+                            email_service.send_notification_email(
+                                to_email=user_info["email"],
+                                to_name=user_info["name"],
+                                notification_title=title,
+                                notification_description=description,
+                                action_url=action_url
+                            )
+                except Exception as email_error:
+                    logger.warning(f"Failed to send bulk email notifications: {str(email_error)}")
+                
                 return result.data
             
             return []
@@ -447,9 +501,10 @@ class NotificationService:
         student_name: str,
         course_name: str,
         course_id: str,
+        student_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Notify teacher when a student enrolls in their course."""
-        return await self.create(
+        notification = await self.create(
             user_id=teacher_user_id,
             title="New Student Enrolled",
             description=f"{student_name} enrolled in {course_name}",
@@ -459,6 +514,33 @@ class NotificationService:
             related_entity_id=course_id,
             action_url=f"/teacher/courses/{course_id}",
         )
+        
+        # Send email notification
+        try:
+            from settings import settings
+            from datetime import datetime
+            
+            teacher_data = self.db.get_user_by_id(teacher_user_id, use_cache=False)
+            if teacher_data:
+                teacher_email = teacher_data.get("email")
+                teacher_name = f"{teacher_data.get('first_name', '')} {teacher_data.get('last_name', '')}".strip() or "Teacher"
+                if teacher_email:
+                    course_link = f"{settings.FRONTEND_URL}/teacher/courses/{course_id}"
+                    enrollment_date = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p")
+                    
+                    email_service.send_student_enrolled_notification(
+                        to_email=teacher_email,
+                        teacher_name=teacher_name,
+                        student_name=student_name,
+                        student_id=student_id or "N/A",
+                        course_name=course_name,
+                        enrollment_date=enrollment_date,
+                        course_link=course_link
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send student enrolled email: {str(email_error)}")
+        
+        return notification
     
     async def notify_enrollment_confirmed(
         self,
@@ -484,9 +566,10 @@ class NotificationService:
         student_name: str,
         quiz_title: str,
         assessment_id: str,
+        course_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Notify teacher when a student submits a quiz."""
-        return await self.create(
+        notification = await self.create(
             user_id=teacher_user_id,
             title="Quiz Submitted",
             description=f"{student_name} submitted quiz '{quiz_title}'",
@@ -496,6 +579,33 @@ class NotificationService:
             related_entity_id=assessment_id,
             action_url=f"/teacher/assessments/{assessment_id}",
         )
+        
+        # Send email notification
+        try:
+            from settings import settings
+            from datetime import datetime
+            
+            teacher_data = self.db.get_user_by_id(teacher_user_id, use_cache=False)
+            if teacher_data:
+                teacher_email = teacher_data.get("email")
+                teacher_name = f"{teacher_data.get('first_name', '')} {teacher_data.get('last_name', '')}".strip() or "Teacher"
+                if teacher_email:
+                    assessment_link = f"{settings.FRONTEND_URL}/teacher/assessments/{assessment_id}"
+                    submission_date = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p")
+                    
+                    email_service.send_quiz_submitted_notification(
+                        to_email=teacher_email,
+                        teacher_name=teacher_name,
+                        student_name=student_name,
+                        quiz_title=quiz_title,
+                        course_name=course_name or "Course",
+                        submission_date=submission_date,
+                        assessment_link=assessment_link
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send quiz submitted email: {str(email_error)}")
+        
+        return notification
     
     async def notify_low_quiz_score(
         self,
@@ -504,9 +614,10 @@ class NotificationService:
         quiz_title: str,
         score_percentage: float,
         assessment_id: str,
+        course_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Notify teacher when a student scores below passing on a quiz."""
-        return await self.create(
+        notification = await self.create(
             user_id=teacher_user_id,
             title="Student Needs Help",
             description=f"{student_name} scored {score_percentage:.0f}% on '{quiz_title}'",
@@ -516,6 +627,31 @@ class NotificationService:
             related_entity_id=assessment_id,
             action_url=f"/teacher/assessments/{assessment_id}",
         )
+        
+        # Send email notification
+        try:
+            from settings import settings
+            
+            teacher_data = self.db.get_user_by_id(teacher_user_id, use_cache=False)
+            if teacher_data:
+                teacher_email = teacher_data.get("email")
+                teacher_name = f"{teacher_data.get('first_name', '')} {teacher_data.get('last_name', '')}".strip() or "Teacher"
+                if teacher_email:
+                    assessment_link = f"{settings.FRONTEND_URL}/teacher/assessments/{assessment_id}"
+                    
+                    email_service.send_low_quiz_score_notification(
+                        to_email=teacher_email,
+                        teacher_name=teacher_name,
+                        student_name=student_name,
+                        quiz_title=quiz_title,
+                        course_name=course_name or "Course",
+                        score_percentage=score_percentage,
+                        assessment_link=assessment_link
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send low quiz score email: {str(email_error)}")
+        
+        return notification
     
     async def notify_result_request(
         self,
@@ -523,9 +659,10 @@ class NotificationService:
         student_name: str,
         quiz_title: str,
         request_id: str,
+        course_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Notify teacher when a student requests to view results."""
-        return await self.create(
+        notification = await self.create(
             user_id=teacher_user_id,
             title="Result Request",
             description=f"{student_name} requested detailed results for '{quiz_title}'",
@@ -535,6 +672,33 @@ class NotificationService:
             related_entity_id=request_id,
             action_url=f"/teacher/result-requests",
         )
+        
+        # Send email notification
+        try:
+            from settings import settings
+            from datetime import datetime
+            
+            teacher_data = self.db.get_user_by_id(teacher_user_id, use_cache=False)
+            if teacher_data:
+                teacher_email = teacher_data.get("email")
+                teacher_name = f"{teacher_data.get('first_name', '')} {teacher_data.get('last_name', '')}".strip() or "Teacher"
+                if teacher_email:
+                    result_request_link = f"{settings.FRONTEND_URL}/teacher/result-requests"
+                    request_date = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p")
+                    
+                    email_service.send_result_request_notification(
+                        to_email=teacher_email,
+                        teacher_name=teacher_name,
+                        student_name=student_name,
+                        quiz_title=quiz_title,
+                        course_name=course_name or "Course",
+                        request_date=request_date,
+                        result_request_link=result_request_link
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send result request email: {str(email_error)}")
+        
+        return notification
     
     async def notify_lecture_published(
         self,
@@ -542,9 +706,10 @@ class NotificationService:
         lecture_title: str,
         course_name: str,
         lecture_id: str,
+        teacher_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Notify all enrolled students when a lecture is published."""
-        return await self.create_bulk(
+        notifications = await self.create_bulk(
             user_ids=student_user_ids,
             title="New Lecture Available",
             description=f"'{lecture_title}' is now available in {course_name}",
@@ -554,6 +719,41 @@ class NotificationService:
             related_entity_id=lecture_id,
             action_url=f"/student/lectures/{lecture_id}",
         )
+        
+        # Send email notifications with specific template
+        try:
+            from settings import settings
+            from datetime import datetime
+            
+            # Get user info for emails
+            users_result = (
+                self.db.admin_client
+                .table("users")
+                .select("id, email, first_name, last_name")
+                .in_("id", student_user_ids)
+                .execute()
+            )
+            
+            lecture_link = f"{settings.FRONTEND_URL}/student/lectures/{lecture_id}"
+            published_date = datetime.utcnow().strftime("%B %d, %Y")
+            
+            for user in users_result.data or []:
+                user_email = user.get("email")
+                user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "Student"
+                if user_email:
+                    email_service.send_lecture_published_notification(
+                        to_email=user_email,
+                        student_name=user_name,
+                        lecture_title=lecture_title,
+                        course_name=course_name,
+                        teacher_name=teacher_name or "Your instructor",
+                        lecture_link=lecture_link,
+                        published_date=published_date
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send lecture published emails: {str(email_error)}")
+        
+        return notifications
     
     async def notify_quiz_published(
         self,
@@ -561,13 +761,16 @@ class NotificationService:
         quiz_title: str,
         due_date: Optional[str],
         assessment_id: str,
+        course_name: Optional[str] = None,
+        teacher_name: Optional[str] = None,
+        max_points: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Notify all enrolled students when a quiz is published."""
         description = f"'{quiz_title}' is now available"
         if due_date:
             description += f". Due: {due_date}"
         
-        return await self.create_bulk(
+        notifications = await self.create_bulk(
             user_ids=student_user_ids,
             title="New Quiz Available",
             description=description,
@@ -577,15 +780,51 @@ class NotificationService:
             related_entity_id=assessment_id,
             action_url="/student/assessments",
         )
+        
+        # Send email notifications with specific template
+        try:
+            from settings import settings
+            
+            # Get user info for emails
+            users_result = (
+                self.db.admin_client
+                .table("users")
+                .select("id, email, first_name, last_name")
+                .in_("id", student_user_ids)
+                .execute()
+            )
+            
+            quiz_link = f"{settings.FRONTEND_URL}/student/assessments/{assessment_id}"
+            
+            for user in users_result.data or []:
+                user_email = user.get("email")
+                user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "Student"
+                if user_email:
+                    email_service.send_quiz_published_notification(
+                        to_email=user_email,
+                        student_name=user_name,
+                        quiz_title=quiz_title,
+                        course_name=course_name or "Course",
+                        teacher_name=teacher_name or "Your instructor",
+                        due_date=due_date,
+                        max_points=max_points,
+                        quiz_link=quiz_link
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send quiz published emails: {str(email_error)}")
+        
+        return notifications
     
     async def notify_result_approved(
         self,
         student_user_id: str,
         quiz_title: str,
         assessment_id: str,
+        course_name: Optional[str] = None,
+        teacher_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Notify student when their result request is approved."""
-        return await self.create(
+        notification = await self.create(
             user_id=student_user_id,
             title="Results Available",
             description=f"Your result request for '{quiz_title}' has been approved",
@@ -595,6 +834,30 @@ class NotificationService:
             related_entity_id=assessment_id,
             action_url="/student/assessments",
         )
+        
+        # Send email notification
+        try:
+            from settings import settings
+            
+            student_data = self.db.get_user_by_id(student_user_id, use_cache=False)
+            if student_data:
+                student_email = student_data.get("email")
+                student_name = f"{student_data.get('first_name', '')} {student_data.get('last_name', '')}".strip() or "Student"
+                if student_email:
+                    result_link = f"{settings.FRONTEND_URL}/student/assessments/{assessment_id}"
+                    
+                    email_service.send_result_approved_notification(
+                        to_email=student_email,
+                        student_name=student_name,
+                        quiz_title=quiz_title,
+                        course_name=course_name or "Course",
+                        teacher_name=teacher_name or "Your instructor",
+                        result_link=result_link
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send result approved email: {str(email_error)}")
+        
+        return notification
     
     async def notify_result_rejected(
         self,
@@ -602,13 +865,15 @@ class NotificationService:
         quiz_title: str,
         reason: Optional[str],
         assessment_id: str,
+        course_name: Optional[str] = None,
+        teacher_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Notify student when their result request is rejected."""
         description = f"Your result request for '{quiz_title}' was declined"
         if reason:
             description += f": {reason}"
         
-        return await self.create(
+        notification = await self.create(
             user_id=student_user_id,
             title="Request Declined",
             description=description,
@@ -617,6 +882,31 @@ class NotificationService:
             related_entity_type="assessment",
             related_entity_id=assessment_id,
         )
+        
+        # Send email notification
+        try:
+            from settings import settings
+            
+            student_data = self.db.get_user_by_id(student_user_id, use_cache=False)
+            if student_data:
+                student_email = student_data.get("email")
+                student_name = f"{student_data.get('first_name', '')} {student_data.get('last_name', '')}".strip() or "Student"
+                if student_email:
+                    assessment_link = f"{settings.FRONTEND_URL}/student/assessments"
+                    
+                    email_service.send_result_rejected_notification(
+                        to_email=student_email,
+                        student_name=student_name,
+                        quiz_title=quiz_title,
+                        course_name=course_name or "Course",
+                        teacher_name=teacher_name or "Your instructor",
+                        reason=reason,
+                        assessment_link=assessment_link
+                    )
+        except Exception as email_error:
+            logger.warning(f"Failed to send result rejected email: {str(email_error)}")
+        
+        return notification
     
     async def notify_quiz_deadline_reminder(
         self,

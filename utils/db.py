@@ -524,7 +524,7 @@ db = SupabaseDB()
 
 
 async def create_db_and_tables():
-    """Initialize database tables and admin user in Supabase."""
+    """Initialize database tables in Supabase."""
     if not db.admin_client:
         print(
             "⚠️  Warning: Supabase admin client not initialized. Cannot create tables."
@@ -534,32 +534,11 @@ async def create_db_and_tables():
         )
         return
 
-    try:
-        # Check if admin user exists
-        admin_user = db.get_user_by_email("admin@admin.com", use_cache=False)
-        if not admin_user:
-            # Create admin user
-            from auth.models import UserCreate, UserRole
-            from auth.service import AuthService
-
-            admin_user_data = {
-                "email": "admin@admin.com",
-                "username": "admin",
-                "hashed_password": AuthService.get_password_hash("123"),
-                "role": UserRole.ADMIN.value,
-                "first_name": "Admin",
-                "last_name": "User",
-                "is_active": True,
-            }
-
-            db.create_user(admin_user_data)
-            print("✓ Admin user created successfully in Supabase")
-        else:
-            print("✓ Admin user already exists in Supabase")
-
-    except Exception as e:
-        print(f"⚠️  Warning: Could not create admin user in Supabase: {e}")
-        print("   Please create admin user manually in Supabase dashboard")
+    # Note: Default admin user creation removed
+    # Admins should be created through the System User onboarding process
+    # or manually via the Supabase dashboard with a valid university_id
+    print("✓ Database initialization complete")
+    print("   Note: Use System User to create universities and admins, or create manually in Supabase")
 
 
 # Dependency for FastAPI

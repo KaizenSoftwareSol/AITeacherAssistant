@@ -300,6 +300,24 @@ async def create_teacher(
             f"for {teacher_data.email}"
         )
 
+        # Send activation email with one-time link
+        try:
+            from services.email_service import email_service
+            from settings import settings
+            
+            activation_token = AuthService.create_activation_token(new_user.id)
+            activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+            
+            teacher_name = f"{teacher_data.first_name} {teacher_data.last_name}".strip()
+            email_service.send_activation_email(
+                to_email=teacher_data.email,
+                activation_link=activation_link,
+                to_name=teacher_name
+            )
+            logger.info(f"Activation email sent to {teacher_data.email}")
+        except Exception as email_error:
+            logger.warning(f"Failed to send activation email: {str(email_error)}")
+
         return {
             "message": "Teacher account created successfully",
             "user_id": new_user.id,
@@ -364,12 +382,8 @@ async def list_students(
                 semester = enrollment.get("semester", {})
 
                 enrolled_at_str = enrollment.get("enrolled_at")
-                if enrolled_at_str:
-                    enrolled_at = datetime.fromisoformat(
-                        enrolled_at_str.replace("Z", "+00:00")
-                    )
-                else:
-                    enrolled_at = datetime.utcnow()
+                from utils.datetime_helpers import parse_datetime_safe
+                enrolled_at = parse_datetime_safe(enrolled_at_str)
 
                 enrollment_summaries.append(
                     EnrollmentSummary(
@@ -448,12 +462,8 @@ async def search_student_by_id(
             semester = enrollment.get("semester", {})
 
             enrolled_at_str = enrollment.get("enrolled_at")
-            if enrolled_at_str:
-                enrolled_at = datetime.fromisoformat(
-                    enrolled_at_str.replace("Z", "+00:00")
-                )
-            else:
-                enrolled_at = datetime.utcnow()
+            from utils.datetime_helpers import parse_datetime_safe
+            enrolled_at = parse_datetime_safe(enrolled_at_str)
 
             enrollment_summaries.append(
                 EnrollmentSummary(
@@ -537,6 +547,24 @@ async def create_student(
             f"Admin {admin_user.id} created student account "
             f"for {student_data.student_id}"
         )
+
+        # Send activation email with one-time link
+        try:
+            from services.email_service import email_service
+            from settings import settings
+            
+            activation_token = AuthService.create_activation_token(new_user.id)
+            activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+            
+            student_name = f"{student_data.first_name} {student_data.last_name}".strip()
+            email_service.send_activation_email(
+                to_email=student_data.email,
+                activation_link=activation_link,
+                to_name=student_name
+            )
+            logger.info(f"Activation email sent to {student_data.email}")
+        except Exception as email_error:
+            logger.warning(f"Failed to send activation email: {str(email_error)}")
 
         return {
             "message": "Student account created successfully",
@@ -687,6 +715,52 @@ async def enroll_student_in_course(
             f"{enrollment_request.course_id}"
         )
 
+        # Send enrollment confirmation email
+        try:
+            from services.email_service import email_service
+            
+            # Get student user info
+            student_user_result = (
+                db.admin_client.table("student")
+                .select("user_id, users!inner(*)")
+                .eq("id", str(student_db_id))
+                .execute()
+            )
+            
+            if student_user_result.data:
+                student_user_data = student_user_result.data[0].get("users", {})
+                student_email = student_user_data.get("email")
+                student_name = f"{student_user_data.get('first_name', '')} {student_user_data.get('last_name', '')}".strip()
+                
+                # Get teacher name
+                teacher_result = (
+                    db.admin_client.table("course")
+                    .select("teacher_id, teacher!inner(*, users!inner(*))")
+                    .eq("id", enrollment_request.course_id)
+                    .execute()
+                )
+                
+                teacher_name = None
+                if teacher_result.data:
+                    teacher_data = teacher_result.data[0].get("teacher", {})
+                    teacher_user_data = teacher_data.get("users", {})
+                    teacher_name = f"{teacher_user_data.get('first_name', '')} {teacher_user_data.get('last_name', '')}".strip()
+                
+                if student_email:
+                    from settings import settings
+                    dashboard_link = f"{settings.FRONTEND_URL}/student/dashboard"
+                    
+                    email_service.send_enrollment_confirmation(
+                        to_email=student_email,
+                        student_name=student_name or "Student",
+                        course_name=course["name"],
+                        teacher_name=teacher_name,
+                        dashboard_link=dashboard_link
+                    )
+                    logger.info(f"Enrollment confirmation email sent to {student_email}")
+        except Exception as email_error:
+            logger.warning(f"Failed to send enrollment confirmation email: {str(email_error)}")
+
         return {
             "message": "Student enrolled in course successfully",
             "enrollment_id": result.data[0]["id"],
@@ -759,12 +833,8 @@ async def get_course_enrollments(
                 semester = enr.get("semester", {})
 
                 enrolled_at_str = enr.get("enrolled_at")
-                if enrolled_at_str:
-                    enrolled_at = datetime.fromisoformat(
-                        enrolled_at_str.replace("Z", "+00:00")
-                    )
-                else:
-                    enrolled_at = datetime.utcnow()
+                from utils.datetime_helpers import parse_datetime_safe
+                enrolled_at = parse_datetime_safe(enrolled_at_str)
 
                 enrollment_summaries.append(
                     EnrollmentSummary(
