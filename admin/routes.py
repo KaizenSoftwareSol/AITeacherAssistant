@@ -21,6 +21,9 @@ from admin.models import (
     CourseSummary,
     DashboardStats,
     EnrollmentSummary,
+    SemesterCreateRequest,
+    SemesterResponse,
+    SemesterUpdateRequest,
     StudentCreateRequest,
     StudentEnrollmentRequest,
     StudentSearchResponse,
@@ -647,12 +650,12 @@ async def enroll_student_in_course(
 
         course = course_result.data[0]
 
-        # Verify semester belongs to this course
+        # Verify semester belongs to this university (university-level semesters)
         semester_result = (
             db.admin_client.table("semester")
-            .select("id, name")
+            .select("id, name, university_id")
             .eq("id", enrollment_request.semester_id)
-            .eq("course_id", enrollment_request.course_id)
+            .eq("university_id", university_id)
             .limit(1)
             .execute()
         )
@@ -660,7 +663,7 @@ async def enroll_student_in_course(
         if not semester_result.data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Semester not found for this course",
+                detail="Semester not found in your university",
             )
 
         # Check if already enrolled
@@ -1180,6 +1183,390 @@ async def assign_course_to_teacher(
         ) from e
 
 
+# ==================== Semester Management Routes ====================
+
+
+@router.post("/semesters", status_code=status.HTTP_201_CREATED, response_model=SemesterResponse)
+async def create_semester(
+    semester_request: SemesterCreateRequest,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Create a new semester for the admin's university.
+    Semesters are managed at the university level and can be used across multiple courses.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        # Validate dates
+        if semester_request.end_date < semester_request.start_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End date must be after start date",
+            )
+
+        # Check if semester name already exists in this university
+        existing_semester = (
+            db.admin_client.table("semester")
+            .select("id, name")
+            .eq("university_id", university_id)
+            .eq("name", semester_request.name)
+            .limit(1)
+            .execute()
+        )
+
+        if existing_semester.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Semester '{semester_request.name}' already exists in your university",
+            )
+
+        # Create semester
+        semester_data = {
+            "id": str(uuid4()),
+            "name": semester_request.name,
+            "start_date": semester_request.start_date.isoformat(),
+            "end_date": semester_request.end_date.isoformat(),
+            "university_id": university_id,
+            "course_id": None,  # University-level semester, not tied to specific course
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        result = (
+            db.admin_client.table("semester")
+            .insert(semester_data)
+            .execute()
+        )
+
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create semester",
+            )
+
+        created_semester = result.data[0]
+        from utils.datetime_helpers import parse_datetime_safe
+
+        logger.info(
+            f"Admin {admin_user.id} created semester '{semester_request.name}' "
+            f"for university {university_id}"
+        )
+
+        return SemesterResponse(
+            id=created_semester["id"],
+            name=created_semester["name"],
+            start_date=parse_datetime_safe(created_semester["start_date"]),
+            end_date=parse_datetime_safe(created_semester["end_date"]),
+            university_id=created_semester["university_id"],
+            course_id=created_semester.get("course_id"),
+            created_at=parse_datetime_safe(created_semester["created_at"]),
+            updated_at=parse_datetime_safe(created_semester["updated_at"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error creating semester",
+        ) from e
+
+
+@router.get("/semesters", response_model=list[SemesterResponse])
+async def list_semesters(
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Get all semesters for the admin's university.
+    Returns university-level semesters that can be used across courses.
+    """
+    _, university_id = admin_data
+
+    try:
+        # Get all semesters for this university (university-level semesters)
+        # Filter for semesters where university_id is set and course_id is NULL
+        semesters_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("university_id", university_id)
+            .is_("course_id", "null")  # Only university-level semesters
+            .order("start_date", desc=True)
+            .execute()
+        )
+        
+        # Fallback: if .is_() doesn't work, filter in Python
+        # This ensures we only return university-level semesters
+        if semesters_result.data:
+            semesters_result.data = [
+                s for s in semesters_result.data 
+                if s.get("course_id") is None
+            ]
+
+        semesters = []
+        from utils.datetime_helpers import parse_datetime_safe
+        for semester in semesters_result.data or []:
+            semesters.append(
+                SemesterResponse(
+                    id=semester["id"],
+                    name=semester["name"],
+                    start_date=parse_datetime_safe(semester["start_date"]),
+                    end_date=parse_datetime_safe(semester["end_date"]),
+                    university_id=semester["university_id"],
+                    course_id=semester.get("course_id"),
+                    created_at=parse_datetime_safe(semester["created_at"]),
+                    updated_at=parse_datetime_safe(semester["updated_at"]),
+                )
+            )
+
+        return semesters
+
+    except Exception as e:
+        logger.error(f"Error fetching semesters: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching semesters",
+        ) from e
+
+
+@router.get("/semesters/{semester_id}", response_model=SemesterResponse)
+async def get_semester(
+    semester_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Get a specific semester by ID.
+    """
+    _, university_id = admin_data
+
+    try:
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        semester = semester_result.data[0]
+        from utils.datetime_helpers import parse_datetime_safe
+
+        return SemesterResponse(
+            id=semester["id"],
+            name=semester["name"],
+            start_date=parse_datetime_safe(semester["start_date"]),
+            end_date=parse_datetime_safe(semester["end_date"]),
+            university_id=semester["university_id"],
+            course_id=semester.get("course_id"),
+            created_at=parse_datetime_safe(semester["created_at"]),
+            updated_at=parse_datetime_safe(semester["updated_at"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching semester",
+        ) from e
+
+
+@router.put("/semesters/{semester_id}", response_model=SemesterResponse)
+async def update_semester(
+    semester_id: str,
+    semester_request: SemesterUpdateRequest,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Update a semester.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        # Verify semester exists and belongs to this university
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        current_semester = semester_result.data[0]
+
+        # Build update data
+        update_data = {"updated_at": datetime.utcnow().isoformat()}
+
+        if semester_request.name is not None:
+            # Check if new name conflicts with existing semester
+            if semester_request.name != current_semester["name"]:
+                existing_check = (
+                    db.admin_client.table("semester")
+                    .select("id")
+                    .eq("university_id", university_id)
+                    .eq("name", semester_request.name)
+                    .neq("id", semester_id)
+                    .limit(1)
+                    .execute()
+                )
+                if existing_check.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Semester '{semester_request.name}' already exists in your university",
+                    )
+            update_data["name"] = semester_request.name
+
+        if semester_request.start_date is not None:
+            update_data["start_date"] = semester_request.start_date.isoformat()
+
+        if semester_request.end_date is not None:
+            update_data["end_date"] = semester_request.end_date.isoformat()
+
+        # Validate dates if both are being updated
+        from utils.datetime_helpers import parse_datetime_safe
+        start_date = (
+            parse_datetime_safe(update_data.get("start_date"))
+            if "start_date" in update_data
+            else parse_datetime_safe(current_semester["start_date"])
+        )
+        end_date = (
+            parse_datetime_safe(update_data.get("end_date"))
+            if "end_date" in update_data
+            else parse_datetime_safe(current_semester["end_date"])
+        )
+
+        if end_date < start_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End date must be after start date",
+            )
+
+        # Update semester
+        result = (
+            db.admin_client.table("semester")
+            .update(update_data)
+            .eq("id", semester_id)
+            .execute()
+        )
+
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update semester",
+            )
+
+        updated_semester = result.data[0]
+
+        logger.info(
+            f"Admin {admin_user.id} updated semester {semester_id} "
+            f"in university {university_id}"
+        )
+
+        return SemesterResponse(
+            id=updated_semester["id"],
+            name=updated_semester["name"],
+            start_date=parse_datetime_safe(updated_semester["start_date"]),
+            end_date=parse_datetime_safe(updated_semester["end_date"]),
+            university_id=updated_semester["university_id"],
+            course_id=updated_semester.get("course_id"),
+            created_at=parse_datetime_safe(updated_semester["created_at"]),
+            updated_at=parse_datetime_safe(updated_semester["updated_at"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating semester",
+        ) from e
+
+
+@router.delete("/semesters/{semester_id}")
+async def delete_semester(
+    semester_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Delete a semester.
+    Only allowed if the semester is not used in any enrollments.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        # Verify semester exists and belongs to this university
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        # Check if semester is used in any enrollments
+        enrollments_check = (
+            db.admin_client.table("enrollment")
+            .select("id")
+            .eq("semester_id", semester_id)
+            .limit(1)
+            .execute()
+        )
+
+        if enrollments_check.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete semester that is used in enrollments. Deactivate enrollments first.",
+            )
+
+        # Delete semester
+        db.admin_client.table("semester").delete().eq("id", semester_id).execute()
+
+        logger.info(
+            f"Admin {admin_user.id} deleted semester {semester_id} "
+            f"from university {university_id}"
+        )
+
+        return {"message": "Semester deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error deleting semester",
+        ) from e
+
+
 # ==================== Bulk Operations Routes ====================
 
 
@@ -1350,20 +1737,20 @@ async def bulk_student_enrollment(
         
         course = course_result.data[0]
         
-        # Verify semester belongs to this course
+        # Verify semester belongs to this university (university-level semesters)
         semester_result = (
             db.admin_client.table("semester")
-            .select("id, name, course_id")
+            .select("id, name, university_id")
             .eq("id", bulk_request.semester_id)
-            .eq("course_id", bulk_request.course_id)
+            .eq("university_id", university_id)
             .limit(1)
             .execute()
         )
-        
+
         if not semester_result.data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Semester not found for this course",
+                detail="Semester not found in your university",
             )
         
         semester = semester_result.data[0]

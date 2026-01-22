@@ -26,17 +26,9 @@ class CourseCreateRequest(BaseModel):
     code: str | None = Field(default=None, min_length=4, max_length=10)
     description: str | None = None
     curriculum_content: str | None = None
-    semester_name: str | None = Field(
-        default=None,
-        description="Name of the initial semester (optional)",
-        max_length=80,
-    )
-    semester_start_date: date | None = Field(
-        default=None, description="Start date of the initial semester"
-    )
-    semester_end_date: date | None = Field(
-        default=None, description="End date of the initial semester"
-    )
+    # Note: Semesters are now managed at university level by admins
+    # They are no longer created during course creation
+    # Use the admin API endpoints to create semesters separately
 
     @field_validator("code")
     @classmethod
@@ -44,14 +36,6 @@ class CourseCreateRequest(BaseModel):
         if value:
             value = value.strip().upper()
         return value or None
-
-    @field_validator("semester_end_date")
-    @classmethod
-    def validate_semester_dates(cls, end_date: date | None, info: ValidationInfo):
-        start_date = info.data.get("semester_start_date") if info.data else None
-        if end_date and start_date and end_date < start_date:
-            raise ValueError("Semester end date must be after the start date")
-        return end_date
 
 
 def _generate_course_code(db, length: int = 6) -> str:
@@ -329,25 +313,9 @@ async def create_course(
         # Invalidate admin courses cache
         cache.caches["courses"].delete_pattern(f"courses:admin_courses:{university_id}")
 
-        if request.semester_name:
-            semester_payload = {
-                "name": request.semester_name.strip(),
-                "course_id": course_data["id"],
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
-            }
-
-            if request.semester_start_date:
-                semester_payload["start_date"] = request.semester_start_date.isoformat()
-            if request.semester_end_date:
-                semester_payload["end_date"] = request.semester_end_date.isoformat()
-
-            semester_result = (
-                db.admin_client.table("semester").insert(semester_payload).execute()
-            )
-
-            if semester_result.data:
-                semester_data = semester_result.data[0]
+        # Note: Semesters are now managed at university level by admins
+        # They are no longer created during course creation
+        # Use the admin API endpoints to create semesters separately
 
         logger.info(
             "Course created",
@@ -364,8 +332,6 @@ async def create_course(
             "message": "Course created successfully",
             "course": course_data,
         }
-        if semester_data:
-            response["semester"] = semester_data
 
         return response
 
@@ -444,11 +410,13 @@ async def get_course(
                 detail="Access denied to this course",
             )
 
-        # Get semesters for this course
+        # Get university-level semesters for this course's university
+        # Semesters are now managed at university level, not course level
         semesters_result = (
             db.admin_client.table("semester")
             .select("id, name, start_date, end_date, created_at, updated_at")
-            .eq("course_id", course_id)
+            .eq("university_id", university_id)
+            .is_("course_id", None)  # Only university-level semesters
             .order("start_date", desc=True)
             .execute()
         )
@@ -560,12 +528,16 @@ async def get_course_semesters(
                 detail="Access denied to this course",
             )
 
-        # Get semesters for this course
+        # Get university-level semesters for this course's university
+        # Semesters are now managed at university level, not course level
         semesters = db.get_records(
-            "semester", filters={"course_id": course_id}, skip=0, limit=1000
+            "semester", 
+            filters={"university_id": university_id, "course_id": None}, 
+            skip=0, 
+            limit=1000
         )
 
-        logger.info(f"Found {len(semesters)} semesters for course {course_id}")
+        logger.info(f"Found {len(semesters)} university-level semesters for university {university_id}")
         return semesters
 
     except HTTPException:
@@ -1153,11 +1125,9 @@ async def delete_course(
             db.delete_record("course_teacher", assignment["id"])
         logger.info(f"Deleted {len(course_teachers)} course-teacher assignments")
 
-        # 7. Delete semesters (must be last before course)
-        semesters = db.get_records("semester", {"course_id": course_id}, use_cache=False)
-        for semester in semesters:
-            db.delete_record("semester", semester["id"])
-        logger.info(f"Deleted {len(semesters)} semesters")
+        # 7. Note: Semesters are now university-level and not tied to courses
+        # They are managed separately by admins and should not be deleted when deleting a course
+        # Legacy course-level semesters (if any) would be deleted here, but we now use university-level semesters
 
         # 8. Finally, delete the course itself
         success = db.delete_record("course", course_id)

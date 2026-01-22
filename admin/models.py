@@ -169,6 +169,35 @@ class BulkEnrollmentResponse(BaseModel):
     failed_students: List[dict] = []  # List of failed student info with errors
 
 
+class SemesterCreateRequest(BaseModel):
+    """Request model for creating a semester by admin."""
+    
+    name: str  # e.g., "Fall 2024", "Spring 2025"
+    start_date: datetime
+    end_date: datetime
+
+
+class SemesterUpdateRequest(BaseModel):
+    """Request model for updating a semester by admin."""
+    
+    name: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+
+
+class SemesterResponse(BaseModel):
+    """Response model for semester."""
+    
+    id: str
+    name: str
+    start_date: datetime
+    end_date: datetime
+    university_id: str
+    course_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # Update forward references
 TeacherSummary.model_rebuild()
 CourseSummary.model_rebuild()
