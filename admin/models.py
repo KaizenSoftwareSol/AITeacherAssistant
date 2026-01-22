@@ -111,6 +111,64 @@ class CourseAssignmentRequest(BaseModel):
     teacher_user_id: str  # User ID of the teacher (not teacher profile ID)
 
 
+class BulkStudentSignupItem(BaseModel):
+    """Individual student data for bulk signup."""
+    
+    email: EmailStr
+    username: str
+    first_name: str
+    last_name: str
+    student_id: str  # University student ID
+    year_of_study: Optional[int] = None
+
+
+class BulkStudentSignupRequest(BaseModel):
+    """Request model for bulk student signup with activation links."""
+    
+    students: List[BulkStudentSignupItem]
+    default_password: str  # Temporary password for all students (they'll change it via activation link)
+
+
+class BulkEnrollmentItem(BaseModel):
+    """Individual enrollment data for bulk enrollment."""
+    
+    student_id: str  # University student ID
+    email: Optional[EmailStr] = None  # Optional, will be fetched if not provided
+
+
+class BulkEnrollmentRequest(BaseModel):
+    """Request model for bulk student enrollment with enrollment links."""
+    
+    course_id: str
+    semester_id: str
+    students: List[BulkEnrollmentItem]
+
+
+class BulkOperationResult(BaseModel):
+    """Result of a bulk operation."""
+    
+    total: int
+    successful: int
+    failed: int
+    errors: List[str] = []
+
+
+class BulkSignupResponse(BaseModel):
+    """Response model for bulk signup operation."""
+    
+    result: BulkOperationResult
+    created_students: List[dict] = []  # List of created student info
+    failed_students: List[dict] = []  # List of failed student info with errors
+
+
+class BulkEnrollmentResponse(BaseModel):
+    """Response model for bulk enrollment operation."""
+    
+    result: BulkOperationResult
+    enrolled_students: List[dict] = []  # List of enrolled student info
+    failed_students: List[dict] = []  # List of failed student info with errors
+
+
 # Update forward references
 TeacherSummary.model_rebuild()
 CourseSummary.model_rebuild()
