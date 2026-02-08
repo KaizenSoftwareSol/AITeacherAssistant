@@ -383,7 +383,7 @@ async def get_course(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Teacher profile not found",
                 )
-                university_id = teacher.university_id
+            university_id = teacher.university_id
 
         logger.info(f"Fetching course {course_id}")
         
@@ -416,13 +416,15 @@ async def get_course(
             db.admin_client.table("semester")
             .select("id, name, start_date, end_date, created_at, updated_at")
             .eq("university_id", university_id)
-            .is_("course_id", None)  # Only university-level semesters
+            .is_("course_id", "null")  # Only university-level semesters
             .order("start_date", desc=True)
             .execute()
         )
         
         semesters = []
         for sem in (semesters_result.data or []):
+            if sem.get("course_id") is not None:
+                continue  # Skip course-level semesters (legacy)
             semesters.append({
                 "id": sem["id"],
                 "name": sem["name"],
@@ -531,11 +533,14 @@ async def get_course_semesters(
         # Get university-level semesters for this course's university
         # Semesters are now managed at university level, not course level
         semesters = db.get_records(
-            "semester", 
-            filters={"university_id": university_id, "course_id": None}, 
-            skip=0, 
+            "semester",
+            filters={"university_id": university_id, "course_id": None},
+            skip=0,
             limit=1000
         )
+
+        # Fallback filter: ensure only university-level semesters (course_id is None)
+        semesters = [s for s in semesters if s.get("course_id") is None]
 
         logger.info(f"Found {len(semesters)} university-level semesters for university {university_id}")
         return semesters
