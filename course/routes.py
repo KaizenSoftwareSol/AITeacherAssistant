@@ -244,15 +244,15 @@ async def create_course(
         # Admins don't have teacher profiles, so created_by_teacher_id will be NULL
         created_by_teacher_id = None
     else:
-            # Teacher creating course
+        # Teacher creating course
         teacher = current_user.teacher_profile
         if not teacher:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Teacher profile not found. Please complete your teacher profile before creating courses.",
             )
-            university_id = teacher.university_id
-            created_by_teacher_id = teacher.id
+        university_id = teacher.university_id
+        created_by_teacher_id = teacher.id
 
     try:
         code = request.code
@@ -532,12 +532,33 @@ async def get_course_semesters(
 
         # Get university-level semesters for this course's university
         # Semesters are now managed at university level, not course level
-        semesters = db.get_records(
-            "semester",
-            filters={"university_id": university_id, "course_id": None},
-            skip=0,
-            limit=1000
-        )
+        # Use direct query with .is_() for NULL check instead of get_records
+        try:
+            semesters_result = (
+                db.get_admin_client()
+                .table("semester")
+                .select("*")
+                .eq("university_id", university_id)
+                .is_("course_id", "null")  # Use .is_() for NULL check
+                .order("start_date", desc=True)
+                .execute()
+            )
+
+            semesters = semesters_result.data or []
+
+            # Fallback: filter in Python if .is_() doesn't work properly
+            semesters = [s for s in semesters if s.get("course_id") is None]
+
+        except Exception as e:
+            logger.error(f"Error fetching semesters with direct query: {e}")
+            # Fallback to get_records but filter None manually
+            all_semesters = db.get_records(
+                "semester",
+                filters={"university_id": university_id},
+                skip=0,
+                limit=1000
+            )
+            semesters = [s for s in all_semesters if s.get("course_id") is None]
 
         # Fallback filter: ensure only university-level semesters (course_id is None)
         semesters = [s for s in semesters if s.get("course_id") is None]

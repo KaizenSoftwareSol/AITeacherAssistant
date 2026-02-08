@@ -17,8 +17,6 @@ Structure:
 from typing import Dict, Optional, Callable, List, Tuple
 import re
 
-from logger import logger
-
 
 # ==============================================================================
 # SPECIALIZED PROMPTS - For specific well-known books
@@ -1068,12 +1066,13 @@ def get_prompt_for_book(pages_text: str, metadata: Dict = None) -> Tuple[str, st
     for pattern in BOOK_PATTERNS:
         try:
             if pattern["fingerprint"](pages_text, metadata):
-                logger.info(f"Detected book type: {pattern['name']} ({pattern['description']})")
+                print(f"   Detected book type: {pattern['name']}")
+                print(f"   Description: {pattern['description']}")
                 return pattern["prompt"], pattern["name"]
         except Exception as e:
             continue
 
-    logger.info("No specific pattern matched - using generalized prompt")
+    print("   No specific pattern matched - using generalized prompt")
     return GENERALIZED_PROMPT, "Generalized"
 
 
