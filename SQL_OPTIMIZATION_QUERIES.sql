@@ -97,15 +97,17 @@ ON enrollment(student_id, course_id);
 
 -- For active enrollments
 CREATE INDEX IF NOT EXISTS idx_enrollment_course_active 
-ON enrollment(course_id, status);
+ON enrollment(course_id, is_active);
 
 -- For lecture embedding lookups
 CREATE INDEX IF NOT EXISTS idx_lecture_embedding_lecture_id 
 ON lecture_embedding(lecture_id);
 
 -- For document queries
-CREATE INDEX IF NOT EXISTS idx_document_course_id 
-ON document(course_id);
+CREATE INDEX IF NOT EXISTS idx_documents_teacher_id 
+ON documents(teacher_id);
+CREATE INDEX IF NOT EXISTS idx_documents_university_id
+ON documents(university_id);
 
 -- For AI conversation tracking
 CREATE INDEX IF NOT EXISTS idx_ai_conversation_user_id 
