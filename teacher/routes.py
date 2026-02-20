@@ -2265,10 +2265,10 @@ async def get_all_teacher_assessments(
 
         logger.info(f"Fetching all assessments for teacher {teacher.id}")
 
-        # Get all lectures by this teacher
+        # Get all lectures by this teacher with course info in single query
         lectures_result = (
             db.admin_client.table("lecture")
-            .select("id, title, course_id, status, topic, lecture_number, created_at")
+            .select("id, title, course_id, status, topic, lecture_number, created_at, course!inner(name, code)")
             .eq("teacher_id", teacher.id)
             .order("created_at", desc=True)
             .execute()
@@ -2284,19 +2284,13 @@ async def get_all_teacher_assessments(
             }
         
         lecture_ids = [lec["id"] for lec in lectures_result.data]
-        lecture_map = {lec["id"]: lec for lec in lectures_result.data}
-        
-        # Get course IDs and fetch course info
-        course_ids = list(set(lec["course_id"] for lec in lectures_result.data if lec.get("course_id")))
-        course_map = {}
-        if course_ids:
-            courses_result = (
-                db.admin_client.table("course")
-                .select("id, name, code")
-                .in_("id", course_ids)
-                .execute()
-            )
-            course_map = {c["id"]: c for c in (courses_result.data or [])}
+        # Create lecture map with course info already included
+        lecture_map = {}
+        for lec in lectures_result.data:
+            lecture_map[lec["id"]] = {
+                **lec,
+                "course": lec.get("course", {})
+            }
         
         # Get all GRADED TEST assessments (is_default=False means graded test, not practice quiz)
         assessments_result = (
@@ -2318,7 +2312,7 @@ async def get_all_teacher_assessments(
         
         assessment_ids = [a["id"] for a in assessments_result.data]
         
-        # Get question counts
+        # Get question counts and submission stats in parallel
         questions_result = (
             db.admin_client.table("question")
             .select("assessment_id")
@@ -2362,7 +2356,7 @@ async def get_all_teacher_assessments(
         
         for assessment in assessments_result.data:
             lecture = lecture_map.get(assessment["lecture_id"], {})
-            course = course_map.get(lecture.get("course_id"), {})
+            course = lecture.get("course", {})
             stats = submission_stats.get(assessment["id"], {})
             
             is_published = lecture.get("status") in ["PUBLISHED", "DELIVERED"]
@@ -2946,10 +2940,10 @@ async def get_assessment_details(
 
         logger.info(f"Fetching assessment {assessment_id}, teacher {teacher.id}")
 
-        # Get assessment with lecture info
+        # Get assessment with lecture and course info in single query
         assessment_result = (
             db.admin_client.table("assessment")
-            .select("*, lecture!inner(id, title, course_id)")
+            .select("*, lecture!inner(id, title, course_id, course!inner(name, code))")
             .eq("id", assessment_id)
             .eq("teacher_id", str(teacher.id))
             .execute()
@@ -2963,6 +2957,7 @@ async def get_assessment_details(
 
         assessment = assessment_result.data[0]
         lecture = assessment.get("lecture", {})
+        course = lecture.get("course", {})
 
         # Get questions
         questions_result = (
@@ -3018,6 +3013,8 @@ async def get_assessment_details(
             "lecture_id": lecture.get("id"),
             "lecture_title": lecture.get("title"),
             "course_id": lecture.get("course_id"),
+            "course_name": course.get("name"),
+            "course_code": course.get("code"),
             "time_limit": assessment.get("time_limit"),
             "max_attempts": assessment.get("max_attempts", 1),
             "passing_score": assessment.get("passing_score", 60.0),
