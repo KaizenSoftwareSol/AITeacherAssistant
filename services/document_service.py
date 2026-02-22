@@ -152,6 +152,12 @@ class DocumentService:
             )
             logger.info(f"JSON uploaded successfully to Supabase")
 
+            # Use LLM-extracted book title if available (instead of filename-based title)
+            book_title = parsed_content.get("metadata", {}).get("title", "")
+            if book_title and len(book_title) > 3:
+                title = book_title
+                logger.info(f"Using LLM-extracted book title: {title}")
+
             # Create document record in database
             document_create = DocumentCreate(
                 title=title,
@@ -168,7 +174,11 @@ class DocumentService:
                         "original_file_size": file_size,
                         "parsed_at": datetime.utcnow().isoformat(),
                         "total_word_count": parsed_content.get("total_word_count", 0),
-                        "parser_version": "2.0",
+                        "parser_version": "3.0",
+                        "parser_method": parsed_content.get("parser_info", {}).get("method", "rule_based"),
+                        "detected_pattern": parsed_content.get("parser_info", {}).get("detected_pattern", ""),
+                        "parser_model": parsed_content.get("parser_info", {}).get("model", ""),
+                        "book_title": book_title,
                     }
                 ),
             )

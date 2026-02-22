@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Annotated, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from dependencies import get_current_user
@@ -98,6 +98,195 @@ async def require_student(
 
 
 # ==================== Course Enrollment Routes ====================
+
+
+@router.post("/enroll-by-token", status_code=status.HTTP_201_CREATED)
+async def enroll_by_token(
+    token: str = Query(..., description="Enrollment token from email link"),
+    user_student: Annotated[tuple[User, Student], Depends(require_student)] = None,
+    db=Depends(get_db),
+):
+    """
+    Enroll a student in a course using an enrollment token from email.
+    
+    Students click the enrollment link sent via email to automatically enroll.
+    This creates an enrollment record linking the student to the course.
+    """
+    user, student = user_student
+    
+    try:
+        from auth.service import AuthService
+        
+        # Verify enrollment token
+        enrollment_data = AuthService.verify_enrollment_token(token)
+        if not enrollment_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired enrollment token",
+            )
+        
+        token_student_id = enrollment_data.get("student_id")
+        course_id = enrollment_data.get("course_id")
+        semester_id = enrollment_data.get("semester_id")
+        
+        # Verify the token is for this student
+        if str(student.id) != token_student_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This enrollment link is not for your account",
+            )
+        
+        # Verify course exists and belongs to student's university
+        course_result = (
+            db.admin_client.table("course")
+            .select("id, name, code, university_id")
+            .eq("id", course_id)
+            .eq("university_id", str(student.university_id))
+            .limit(1)
+            .execute()
+        )
+        
+        if not course_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found",
+            )
+        
+        course = course_result.data[0]
+        
+        # Verify semester belongs to this course
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("id, name, course_id")
+            .eq("id", semester_id)
+            .eq("course_id", course_id)
+            .limit(1)
+            .execute()
+        )
+        
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found for this course",
+            )
+        
+        # Check if already enrolled
+        existing_enrollment = (
+            db.admin_client.table("enrollment")
+            .select("*")
+            .eq("student_id", str(student.id))
+            .eq("course_id", course_id)
+            .execute()
+        )
+        
+        if existing_enrollment.data and len(existing_enrollment.data) > 0:
+            enrollment = existing_enrollment.data[0]
+            if enrollment.get("is_active"):
+                return {
+                    "message": "Already enrolled in this course",
+                    "course_name": course["name"],
+                    "course_code": course["code"],
+                    "enrollment_id": enrollment["id"],
+                }
+            else:
+                # Reactivate the enrollment
+                db.admin_client.table("enrollment").update({
+                    "is_active": True,
+                    "semester_id": semester_id,
+                    "enrolled_at": datetime.utcnow().isoformat(),
+                }).eq("id", enrollment["id"]).execute()
+                
+                cache.invalidate_student(str(student.id))
+                
+                return {
+                    "message": "Re-enrolled in course successfully",
+                    "course_name": course["name"],
+                    "course_code": course["code"],
+                    "enrollment_id": enrollment["id"],
+                }
+        
+        # Create new enrollment
+        enrollment_data = {
+            "id": str(uuid4()),
+            "student_id": str(student.id),
+            "course_id": course_id,
+            "semester_id": semester_id,
+            "enrolled_at": datetime.utcnow().isoformat(),
+            "is_active": True,
+        }
+        
+        result = db.admin_client.table("enrollment").insert(enrollment_data).execute()
+        
+        # Invalidate enrollment caches for this student
+        cache.invalidate_student(str(student.id))
+        
+        logger.info(f"Student {student.id} successfully enrolled in course {course_id} via token")
+        
+        # Send notifications
+        notification_service = NotificationService(db)
+        
+        # Get student's full name for notification
+        student_name = f"{user.first_name} {user.last_name}".strip() or "A student"
+        
+        # Get teacher info to send notification
+        try:
+            # Find lectures for this course to get teacher_id
+            lecture_result = (
+                db.admin_client.table("lecture")
+                .select("teacher_id")
+                .eq("course_id", course_id)
+                .limit(1)
+                .execute()
+            )
+            
+            if lecture_result.data:
+                teacher_id = lecture_result.data[0]["teacher_id"]
+                # Get teacher's user_id
+                teacher_result = (
+                    db.admin_client.table("teacher")
+                    .select("user_id")
+                    .eq("id", teacher_id)
+                    .execute()
+                )
+                
+                if teacher_result.data:
+                    teacher_user_id = teacher_result.data[0]["user_id"]
+                    # Notify teacher about new enrollment
+                    await notification_service.notify_student_enrolled(
+                        teacher_user_id=teacher_user_id,
+                        student_name=student_name,
+                        course_name=course["name"],
+                        course_id=course_id,
+                    )
+        except Exception as notify_error:
+            # Don't fail enrollment if notification fails
+            logger.warning(f"Failed to send teacher notification: {notify_error}")
+        
+        # Notify student about successful enrollment
+        try:
+            await notification_service.notify_enrollment_confirmed(
+                student_user_id=str(user.id),
+                course_name=course["name"],
+                course_id=course_id,
+            )
+        except Exception as notify_error:
+            logger.warning(f"Failed to send student notification: {notify_error}")
+        
+        return {
+            "message": "Successfully enrolled in course",
+            "course_name": course["name"],
+            "course_code": course["code"],
+            "enrollment_id": result.data[0]["id"],
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error enrolling student by token: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error processing enrollment",
+        ) from e
 
 
 @router.post("/enroll", status_code=status.HTTP_201_CREATED)

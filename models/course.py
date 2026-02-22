@@ -34,13 +34,19 @@ class Course(SQLModel, table=True):
 
 
 class Semester(SQLModel, table=True):
-    """Academic semester/period."""
+    """Academic semester/period.
+    
+    Can be either:
+    - University-level: university_id set, course_id is None (managed by admin, shared across courses)
+    - Course-level: course_id set, university_id is None (legacy, tied to specific course)
+    """
 
     id: Optional[str] = Field(default=None, primary_key=True)  # UUID
     name: str  # e.g., "Fall 2024", "Spring 2025"
     start_date: datetime
     end_date: datetime
-    course_id: str = Field(foreign_key="course.id")  # UUID
+    university_id: Optional[str] = Field(default=None, foreign_key="university.id")  # UUID - for university-level semesters
+    course_id: Optional[str] = Field(default=None, foreign_key="course.id")  # UUID - for course-level semesters (legacy)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

@@ -8,14 +8,22 @@ from datetime import datetime
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 from admin.dependencies import require_admin
 from admin.models import (
+    BulkEnrollmentRequest,
+    BulkEnrollmentResponse,
+    BulkOperationResult,
+    BulkSignupResponse,
+    BulkStudentSignupRequest,
     CourseAssignmentRequest,
     CourseSummary,
     DashboardStats,
     EnrollmentSummary,
+    SemesterCreateRequest,
+    SemesterResponse,
+    SemesterUpdateRequest,
     StudentCreateRequest,
     StudentEnrollmentRequest,
     StudentSearchResponse,
@@ -501,6 +509,7 @@ async def search_student_by_id(
 @router.post("/students/create", status_code=status.HTTP_201_CREATED)
 async def create_student(
     student_data: StudentCreateRequest,
+    background_tasks: BackgroundTasks,
     admin_data: Annotated[tuple[User, str], Depends(require_admin)],
     db=Depends(get_db),
 ):
@@ -548,23 +557,21 @@ async def create_student(
             f"for {student_data.student_id}"
         )
 
-        # Send activation email with one-time link
-        try:
-            from services.email_service import email_service
-            from settings import settings
-            
-            activation_token = AuthService.create_activation_token(new_user.id)
-            activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
-            
-            student_name = f"{student_data.first_name} {student_data.last_name}".strip()
-            email_service.send_activation_email(
-                to_email=student_data.email,
-                activation_link=activation_link,
-                to_name=student_name
-            )
-            logger.info(f"Activation email sent to {student_data.email}")
-        except Exception as email_error:
-            logger.warning(f"Failed to send activation email: {str(email_error)}")
+        # Send activation email with one-time link in background (non-blocking)
+        from services.email_service import email_service
+        from settings import settings
+        
+        activation_token = AuthService.create_activation_token(new_user.id)
+        activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+        student_name = f"{student_data.first_name} {student_data.last_name}".strip()
+        
+        # Add email sending as background task (won't block the response)
+        background_tasks.add_task(
+            email_service.send_activation_email,
+            to_email=student_data.email,
+            activation_link=activation_link,
+            to_name=student_name
+        )
 
         return {
             "message": "Student account created successfully",
@@ -593,6 +600,7 @@ async def create_student(
 @router.post("/enrollments/create", status_code=status.HTTP_201_CREATED)
 async def enroll_student_in_course(
     enrollment_request: StudentEnrollmentRequest,
+    background_tasks: BackgroundTasks,
     admin_data: Annotated[tuple[User, str], Depends(require_admin)],
     db=Depends(get_db),
 ):
@@ -642,12 +650,12 @@ async def enroll_student_in_course(
 
         course = course_result.data[0]
 
-        # Verify semester belongs to this course
+        # Verify semester belongs to this university (university-level semesters)
         semester_result = (
             db.admin_client.table("semester")
-            .select("id, name")
+            .select("id, name, university_id")
             .eq("id", enrollment_request.semester_id)
-            .eq("course_id", enrollment_request.course_id)
+            .eq("university_id", university_id)
             .limit(1)
             .execute()
         )
@@ -655,7 +663,7 @@ async def enroll_student_in_course(
         if not semester_result.data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Semester not found for this course",
+                detail="Semester not found in your university",
             )
 
         # Check if already enrolled
@@ -715,51 +723,49 @@ async def enroll_student_in_course(
             f"{enrollment_request.course_id}"
         )
 
-        # Send enrollment confirmation email
-        try:
-            from services.email_service import email_service
+        # Send enrollment confirmation email in background (non-blocking)
+        from services.email_service import email_service
+        from settings import settings
+        
+        # Get student user info
+        student_user_result = (
+            db.admin_client.table("student")
+            .select("user_id, users!inner(*)")
+            .eq("id", str(student_db_id))
+            .execute()
+        )
+        
+        if student_user_result.data:
+            student_user_data = student_user_result.data[0].get("users", {})
+            student_email = student_user_data.get("email")
+            student_name = f"{student_user_data.get('first_name', '')} {student_user_data.get('last_name', '')}".strip()
             
-            # Get student user info
-            student_user_result = (
-                db.admin_client.table("student")
-                .select("user_id, users!inner(*)")
-                .eq("id", str(student_db_id))
+            # Get teacher name
+            teacher_result = (
+                db.admin_client.table("course")
+                .select("teacher_id, teacher!inner(*, users!inner(*))")
+                .eq("id", enrollment_request.course_id)
                 .execute()
             )
             
-            if student_user_result.data:
-                student_user_data = student_user_result.data[0].get("users", {})
-                student_email = student_user_data.get("email")
-                student_name = f"{student_user_data.get('first_name', '')} {student_user_data.get('last_name', '')}".strip()
+            teacher_name = None
+            if teacher_result.data:
+                teacher_data = teacher_result.data[0].get("teacher", {})
+                teacher_user_data = teacher_data.get("users", {})
+                teacher_name = f"{teacher_user_data.get('first_name', '')} {teacher_user_data.get('last_name', '')}".strip()
+            
+            if student_email:
+                dashboard_link = f"{settings.FRONTEND_URL}/student/dashboard"
                 
-                # Get teacher name
-                teacher_result = (
-                    db.admin_client.table("course")
-                    .select("teacher_id, teacher!inner(*, users!inner(*))")
-                    .eq("id", enrollment_request.course_id)
-                    .execute()
+                # Add email sending as background task (won't block the response)
+                background_tasks.add_task(
+                    email_service.send_enrollment_confirmation,
+                    to_email=student_email,
+                    student_name=student_name or "Student",
+                    course_name=course["name"],
+                    teacher_name=teacher_name,
+                    dashboard_link=dashboard_link
                 )
-                
-                teacher_name = None
-                if teacher_result.data:
-                    teacher_data = teacher_result.data[0].get("teacher", {})
-                    teacher_user_data = teacher_data.get("users", {})
-                    teacher_name = f"{teacher_user_data.get('first_name', '')} {teacher_user_data.get('last_name', '')}".strip()
-                
-                if student_email:
-                    from settings import settings
-                    dashboard_link = f"{settings.FRONTEND_URL}/student/dashboard"
-                    
-                    email_service.send_enrollment_confirmation(
-                        to_email=student_email,
-                        student_name=student_name or "Student",
-                        course_name=course["name"],
-                        teacher_name=teacher_name,
-                        dashboard_link=dashboard_link
-                    )
-                    logger.info(f"Enrollment confirmation email sent to {student_email}")
-        except Exception as email_error:
-            logger.warning(f"Failed to send enrollment confirmation email: {str(email_error)}")
 
         return {
             "message": "Student enrolled in course successfully",
@@ -1044,28 +1050,128 @@ async def assign_course_to_teacher(
             "is_active": True,
         }
 
-        result = (
-            db.admin_client.table("course_teacher")
-            .insert(assignment_data)
-            .execute()
-        )
+        try:
+            result = (
+                db.admin_client.table("course_teacher")
+                .insert(assignment_data)
+                .execute()
+            )
+            
+            # Verify the insert actually succeeded
+            if not result.data or len(result.data) == 0:
+                logger.error(
+                    f"Failed to create course assignment: Insert returned no data. "
+                    f"Course: {assignment_request.course_id}, Teacher: {teacher_id}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to create course assignment. The assignment may already exist or there was a database error.",
+                )
+            
+            assignment_id = result.data[0].get("id")
+            if not assignment_id:
+                logger.error(
+                    f"Failed to create course assignment: No ID returned. "
+                    f"Course: {assignment_request.course_id}, Teacher: {teacher_id}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to create course assignment. No assignment ID was returned.",
+                )
+            
+            # Verify the assignment was actually created by querying it back
+            verify_result = (
+                db.admin_client.table("course_teacher")
+                .select("id, is_active")
+                .eq("id", assignment_id)
+                .execute()
+            )
+            
+            if not verify_result.data or len(verify_result.data) == 0:
+                logger.error(
+                    f"Course assignment was not persisted: Assignment ID {assignment_id} not found after insert. "
+                    f"Course: {assignment_request.course_id}, Teacher: {teacher_id}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Course assignment was not saved. Please try again.",
+                )
+            
+            # Invalidate cache
+            cache.caches["courses"].delete_pattern(
+                f"courses:teacher_courses:{teacher_id}"
+            )
 
-        # Invalidate cache
-        cache.caches["courses"].delete_pattern(
-            f"courses:teacher_courses:{teacher_id}"
-        )
+            logger.info(
+                f"Admin {admin_user.id} assigned course {assignment_request.course_id} "
+                f"to teacher {teacher_id} (assignment_id: {assignment_id})"
+            )
 
-        logger.info(
-            f"Admin {admin_user.id} assigned course {assignment_request.course_id} "
-            f"to teacher {teacher_id}"
-        )
-
-        return {
-            "message": "Course assigned to teacher successfully",
-            "assignment_id": result.data[0]["id"],
-            "course_name": course["name"],
-            "course_code": course["code"],
-        }
+            return {
+                "message": "Course assigned to teacher successfully",
+                "assignment_id": assignment_id,
+                "course_name": course["name"],
+                "course_code": course["code"],
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as insert_error:
+            logger.error(
+                f"Error inserting course assignment: {insert_error!s}. "
+                f"Course: {assignment_request.course_id}, Teacher: {teacher_id}, "
+                f"Data: {assignment_data}"
+            )
+            # Check if it's a unique constraint violation
+            error_str = str(insert_error).lower()
+            if "unique" in error_str or "duplicate" in error_str:
+                # Try to get the existing assignment
+                existing_check = (
+                    db.admin_client.table("course_teacher")
+                    .select("*")
+                    .eq("course_id", assignment_request.course_id)
+                    .eq("teacher_id", teacher_id)
+                    .execute()
+                )
+                
+                if existing_check.data and len(existing_check.data) > 0:
+                    existing = existing_check.data[0]
+                    # If it exists but is inactive, reactivate it
+                    if not existing.get("is_active"):
+                        db.admin_client.table("course_teacher").update({
+                            "is_active": True,
+                            "assigned_by": admin_user.id,
+                            "assigned_at": datetime.utcnow().isoformat(),
+                        }).eq("id", existing["id"]).execute()
+                        
+                        cache.caches["courses"].delete_pattern(
+                            f"courses:teacher_courses:{teacher_id}"
+                        )
+                        
+                        logger.info(
+                            f"Admin {admin_user.id} reactivated course assignment: "
+                            f"course {assignment_request.course_id} -> teacher {teacher_id}"
+                        )
+                        
+                        return {
+                            "message": "Course assignment reactivated successfully",
+                            "assignment_id": existing["id"],
+                            "course_name": course["name"],
+                            "course_code": course["code"],
+                        }
+                    else:
+                        # Already active
+                        return {
+                            "message": "Course is already assigned to this teacher",
+                            "assignment_id": existing["id"],
+                            "course_name": course["name"],
+                            "course_code": course["code"],
+                        }
+            
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error creating course assignment: {str(insert_error)}",
+            ) from insert_error
 
     except HTTPException:
         raise
@@ -1074,6 +1180,739 @@ async def assign_course_to_teacher(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error assigning course to teacher",
+        ) from e
+
+
+# ==================== Semester Management Routes ====================
+
+
+@router.post("/semesters", status_code=status.HTTP_201_CREATED, response_model=SemesterResponse)
+async def create_semester(
+    semester_request: SemesterCreateRequest,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Create a new semester for the admin's university.
+    Semesters are managed at the university level and can be used across multiple courses.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        # Validate dates
+        if semester_request.end_date < semester_request.start_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End date must be after start date",
+            )
+
+        # Check if semester name already exists in this university
+        existing_semester = (
+            db.admin_client.table("semester")
+            .select("id, name")
+            .eq("university_id", university_id)
+            .eq("name", semester_request.name)
+            .limit(1)
+            .execute()
+        )
+
+        if existing_semester.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Semester '{semester_request.name}' already exists in your university",
+            )
+
+        # Create semester
+        semester_data = {
+            "id": str(uuid4()),
+            "name": semester_request.name,
+            "start_date": semester_request.start_date.isoformat(),
+            "end_date": semester_request.end_date.isoformat(),
+            "university_id": university_id,
+            "course_id": None,  # University-level semester, not tied to specific course
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        result = (
+            db.admin_client.table("semester")
+            .insert(semester_data)
+            .execute()
+        )
+
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create semester",
+            )
+
+        created_semester = result.data[0]
+        from utils.datetime_helpers import parse_datetime_safe
+
+        logger.info(
+            f"Admin {admin_user.id} created semester '{semester_request.name}' "
+            f"for university {university_id}"
+        )
+
+        return SemesterResponse(
+            id=created_semester["id"],
+            name=created_semester["name"],
+            start_date=parse_datetime_safe(created_semester["start_date"]),
+            end_date=parse_datetime_safe(created_semester["end_date"]),
+            university_id=created_semester["university_id"],
+            course_id=created_semester.get("course_id"),
+            created_at=parse_datetime_safe(created_semester["created_at"]),
+            updated_at=parse_datetime_safe(created_semester["updated_at"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error creating semester",
+        ) from e
+
+
+@router.get("/semesters", response_model=list[SemesterResponse])
+async def list_semesters(
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Get all semesters for the admin's university.
+    Returns university-level semesters that can be used across courses.
+    """
+    _, university_id = admin_data
+
+    try:
+        # Get all semesters for this university (university-level semesters)
+        # Filter for semesters where university_id is set and course_id is NULL
+        semesters_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("university_id", university_id)
+            .is_("course_id", "null")  # Only university-level semesters
+            .order("start_date", desc=True)
+            .execute()
+        )
+        
+        # Fallback: if .is_() doesn't work, filter in Python
+        # This ensures we only return university-level semesters
+        if semesters_result.data:
+            semesters_result.data = [
+                s for s in semesters_result.data 
+                if s.get("course_id") is None
+            ]
+
+        semesters = []
+        from utils.datetime_helpers import parse_datetime_safe
+        for semester in semesters_result.data or []:
+            semesters.append(
+                SemesterResponse(
+                    id=semester["id"],
+                    name=semester["name"],
+                    start_date=parse_datetime_safe(semester["start_date"]),
+                    end_date=parse_datetime_safe(semester["end_date"]),
+                    university_id=semester["university_id"],
+                    course_id=semester.get("course_id"),
+                    created_at=parse_datetime_safe(semester["created_at"]),
+                    updated_at=parse_datetime_safe(semester["updated_at"]),
+                )
+            )
+
+        return semesters
+
+    except Exception as e:
+        logger.error(f"Error fetching semesters: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching semesters",
+        ) from e
+
+
+@router.get("/semesters/{semester_id}", response_model=SemesterResponse)
+async def get_semester(
+    semester_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Get a specific semester by ID.
+    """
+    _, university_id = admin_data
+
+    try:
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        semester = semester_result.data[0]
+        from utils.datetime_helpers import parse_datetime_safe
+
+        return SemesterResponse(
+            id=semester["id"],
+            name=semester["name"],
+            start_date=parse_datetime_safe(semester["start_date"]),
+            end_date=parse_datetime_safe(semester["end_date"]),
+            university_id=semester["university_id"],
+            course_id=semester.get("course_id"),
+            created_at=parse_datetime_safe(semester["created_at"]),
+            updated_at=parse_datetime_safe(semester["updated_at"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching semester",
+        ) from e
+
+
+@router.put("/semesters/{semester_id}", response_model=SemesterResponse)
+async def update_semester(
+    semester_id: str,
+    semester_request: SemesterUpdateRequest,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Update a semester.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        # Verify semester exists and belongs to this university
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        current_semester = semester_result.data[0]
+
+        # Build update data
+        update_data = {"updated_at": datetime.utcnow().isoformat()}
+
+        if semester_request.name is not None:
+            # Check if new name conflicts with existing semester
+            if semester_request.name != current_semester["name"]:
+                existing_check = (
+                    db.admin_client.table("semester")
+                    .select("id")
+                    .eq("university_id", university_id)
+                    .eq("name", semester_request.name)
+                    .neq("id", semester_id)
+                    .limit(1)
+                    .execute()
+                )
+                if existing_check.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Semester '{semester_request.name}' already exists in your university",
+                    )
+            update_data["name"] = semester_request.name
+
+        if semester_request.start_date is not None:
+            update_data["start_date"] = semester_request.start_date.isoformat()
+
+        if semester_request.end_date is not None:
+            update_data["end_date"] = semester_request.end_date.isoformat()
+
+        # Validate dates if both are being updated
+        from utils.datetime_helpers import parse_datetime_safe
+        start_date = (
+            parse_datetime_safe(update_data.get("start_date"))
+            if "start_date" in update_data
+            else parse_datetime_safe(current_semester["start_date"])
+        )
+        end_date = (
+            parse_datetime_safe(update_data.get("end_date"))
+            if "end_date" in update_data
+            else parse_datetime_safe(current_semester["end_date"])
+        )
+
+        if end_date < start_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End date must be after start date",
+            )
+
+        # Update semester
+        result = (
+            db.admin_client.table("semester")
+            .update(update_data)
+            .eq("id", semester_id)
+            .execute()
+        )
+
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update semester",
+            )
+
+        updated_semester = result.data[0]
+
+        logger.info(
+            f"Admin {admin_user.id} updated semester {semester_id} "
+            f"in university {university_id}"
+        )
+
+        return SemesterResponse(
+            id=updated_semester["id"],
+            name=updated_semester["name"],
+            start_date=parse_datetime_safe(updated_semester["start_date"]),
+            end_date=parse_datetime_safe(updated_semester["end_date"]),
+            university_id=updated_semester["university_id"],
+            course_id=updated_semester.get("course_id"),
+            created_at=parse_datetime_safe(updated_semester["created_at"]),
+            updated_at=parse_datetime_safe(updated_semester["updated_at"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating semester",
+        ) from e
+
+
+@router.delete("/semesters/{semester_id}")
+async def delete_semester(
+    semester_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Delete a semester.
+    Only allowed if the semester is not used in any enrollments.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        # Verify semester exists and belongs to this university
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("*")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        # Check if semester is used in any enrollments
+        enrollments_check = (
+            db.admin_client.table("enrollment")
+            .select("id")
+            .eq("semester_id", semester_id)
+            .limit(1)
+            .execute()
+        )
+
+        if enrollments_check.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete semester that is used in enrollments. Deactivate enrollments first.",
+            )
+
+        # Delete semester
+        db.admin_client.table("semester").delete().eq("id", semester_id).execute()
+
+        logger.info(
+            f"Admin {admin_user.id} deleted semester {semester_id} "
+            f"from university {university_id}"
+        )
+
+        return {"message": "Semester deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting semester: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error deleting semester",
+        ) from e
+
+
+# ==================== Bulk Operations Routes ====================
+
+
+@router.post("/students/bulk-signup", status_code=status.HTTP_201_CREATED, response_model=BulkSignupResponse)
+async def bulk_student_signup(
+    bulk_request: BulkStudentSignupRequest,
+    background_tasks: BackgroundTasks,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Bulk create student accounts and send activation links via email.
+    Admin can create multiple students at once and send them activation emails.
+    """
+    admin_user, university_id = admin_data
+    
+    created_students = []
+    failed_students = []
+    errors = []
+    
+    try:
+        from services.email_service import email_service
+        from settings import settings
+        
+        for student_data in bulk_request.students:
+            try:
+                # Check if student_id already exists in this university
+                existing_student = db.get_records(
+                    "student",
+                    {
+                        "student_id": student_data.student_id,
+                        "university_id": university_id,
+                    },
+                )
+                if existing_student:
+                    failed_students.append({
+                        "email": student_data.email,
+                        "student_id": student_data.student_id,
+                        "error": f"Student with ID '{student_data.student_id}' already exists"
+                    })
+                    errors.append(f"Student {student_data.student_id}: Already exists")
+                    continue
+                
+                # Check if email already exists
+                existing_user = db.get_user_by_email(student_data.email)
+                if existing_user:
+                    failed_students.append({
+                        "email": student_data.email,
+                        "student_id": student_data.student_id,
+                        "error": f"Email '{student_data.email}' already exists"
+                    })
+                    errors.append(f"Student {student_data.student_id}: Email already exists")
+                    continue
+                
+                # Create user using AuthService
+                user_create = UserCreate(
+                    email=student_data.email,
+                    username=student_data.username,
+                    password=bulk_request.default_password,
+                    first_name=student_data.first_name,
+                    last_name=student_data.last_name,
+                    role=UserRole.STUDENT,
+                    university_id=university_id,
+                    student_id=student_data.student_id,
+                    year_of_study=student_data.year_of_study,
+                )
+                
+                new_user = await AuthService.create_user(db, user_create)
+                
+                # Generate activation token and link
+                activation_token = AuthService.create_activation_token(new_user.id)
+                activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+                
+                # Send activation email in background (non-blocking)
+                student_name = f"{student_data.first_name} {student_data.last_name}".strip()
+                background_tasks.add_task(
+                    email_service.send_bulk_signup_email,
+                    to_email=student_data.email,
+                    activation_link=activation_link,
+                    to_name=student_name,
+                    student_id=student_data.student_id,
+                    temporary_password=bulk_request.default_password
+                )
+                
+                created_students.append({
+                    "user_id": new_user.id,
+                    "email": student_data.email,
+                    "student_id": student_data.student_id,
+                    "username": student_data.username,
+                    "email_sent": True  # Queued for sending in background
+                })
+                
+                logger.info(
+                    f"Admin {admin_user.id} created student {student_data.student_id} "
+                    f"via bulk signup for {student_data.email}"
+                )
+                
+            except ValueError as e:
+                failed_students.append({
+                    "email": student_data.email,
+                    "student_id": student_data.student_id,
+                    "error": str(e)
+                })
+                errors.append(f"Student {student_data.student_id}: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error creating student {student_data.student_id}: {e!s}")
+                failed_students.append({
+                    "email": student_data.email,
+                    "student_id": student_data.student_id,
+                    "error": f"Internal error: {str(e)}"
+                })
+                errors.append(f"Student {student_data.student_id}: {str(e)}")
+        
+        result = BulkOperationResult(
+            total=len(bulk_request.students),
+            successful=len(created_students),
+            failed=len(failed_students),
+            errors=errors
+        )
+        
+        return BulkSignupResponse(
+            result=result,
+            created_students=created_students,
+            failed_students=failed_students
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in bulk student signup: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing bulk signup: {str(e)}",
+        ) from e
+
+
+@router.post("/enrollments/bulk-enroll", status_code=status.HTTP_201_CREATED, response_model=BulkEnrollmentResponse)
+async def bulk_student_enrollment(
+    bulk_request: BulkEnrollmentRequest,
+    background_tasks: BackgroundTasks,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Bulk enroll students in a course and send enrollment links via email.
+    Admin can enroll multiple students at once and send them enrollment emails.
+    """
+    admin_user, university_id = admin_data
+    
+    enrolled_students = []
+    failed_students = []
+    errors = []
+    
+    try:
+        # Verify course belongs to this university
+        course_result = (
+            db.admin_client.table("course")
+            .select("id, name, code, university_id")
+            .eq("id", bulk_request.course_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+        
+        if not course_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found in your university",
+            )
+        
+        course = course_result.data[0]
+        
+        # Verify semester belongs to this university (university-level semesters)
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("id, name, university_id")
+            .eq("id", bulk_request.semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+        
+        semester = semester_result.data[0]
+        
+        # Get teacher info for email
+        teacher_result = (
+            db.admin_client.table("course")
+            .select("teacher_id, teacher!inner(*, users!inner(*))")
+            .eq("id", bulk_request.course_id)
+            .execute()
+        )
+        
+        teacher_name = None
+        if teacher_result.data:
+            teacher_data = teacher_result.data[0].get("teacher", {})
+            teacher_user_data = teacher_data.get("users", {})
+            teacher_name = f"{teacher_user_data.get('first_name', '')} {teacher_user_data.get('last_name', '')}".strip()
+        
+        from services.email_service import email_service
+        from settings import settings
+        
+        for enrollment_item in bulk_request.students:
+            try:
+                # Find student by university student_id within this university
+                student_result = (
+                    db.admin_client.table("student")
+                    .select("id, student_id, user_id, users!inner(*)")
+                    .eq("student_id", enrollment_item.student_id)
+                    .eq("university_id", university_id)
+                    .limit(1)
+                    .execute()
+                )
+                
+                if not student_result.data:
+                    failed_students.append({
+                        "student_id": enrollment_item.student_id,
+                        "error": f"Student with ID '{enrollment_item.student_id}' not found in your university"
+                    })
+                    errors.append(f"Student {enrollment_item.student_id}: Not found")
+                    continue
+                
+                student_data = student_result.data[0]
+                student_db_id = student_data["id"]
+                user_data = student_data.get("users", {})
+                student_email = enrollment_item.email or user_data.get("email")
+                
+                if not student_email:
+                    failed_students.append({
+                        "student_id": enrollment_item.student_id,
+                        "error": "Student email not found"
+                    })
+                    errors.append(f"Student {enrollment_item.student_id}: Email not found")
+                    continue
+                
+                # Check if already enrolled
+                existing_enrollment = (
+                    db.admin_client.table("enrollment")
+                    .select("*")
+                    .eq("student_id", str(student_db_id))
+                    .eq("course_id", bulk_request.course_id)
+                    .execute()
+                )
+                
+                if existing_enrollment.data and len(existing_enrollment.data) > 0:
+                    enrollment = existing_enrollment.data[0]
+                    if enrollment.get("is_active"):
+                        # Already enrolled, skip but don't count as failed
+                        enrolled_students.append({
+                            "student_id": enrollment_item.student_id,
+                            "email": student_email,
+                            "enrollment_id": enrollment["id"],
+                            "status": "already_enrolled"
+                        })
+                        continue
+                    else:
+                        # Reactivate the enrollment
+                        db.admin_client.table("enrollment").update({
+                            "is_active": True,
+                            "semester_id": bulk_request.semester_id,
+                            "enrolled_at": datetime.utcnow().isoformat(),
+                        }).eq("id", enrollment["id"]).execute()
+                        
+                        cache.invalidate_student(str(student_db_id))
+                        
+                        enrollment_id = enrollment["id"]
+                else:
+                    # Create new enrollment
+                    enrollment_data = {
+                        "id": str(uuid4()),
+                        "student_id": str(student_db_id),
+                        "course_id": bulk_request.course_id,
+                        "semester_id": bulk_request.semester_id,
+                        "enrolled_at": datetime.utcnow().isoformat(),
+                        "is_active": True,
+                    }
+                    
+                    result = db.admin_client.table("enrollment").insert(enrollment_data).execute()
+                    enrollment_id = result.data[0]["id"]
+                    
+                    # Invalidate cache
+                    cache.invalidate_student(str(student_db_id))
+                
+                # Generate enrollment token and link
+                enrollment_token = AuthService.create_enrollment_token(
+                    student_id=str(student_db_id),
+                    course_id=bulk_request.course_id,
+                    semester_id=bulk_request.semester_id
+                )
+                enrollment_link = f"{settings.FRONTEND_URL}/enroll?token={enrollment_token}"
+                
+                # Send enrollment email in background (non-blocking)
+                student_name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or "Student"
+                background_tasks.add_task(
+                    email_service.send_bulk_enrollment_email,
+                    to_email=student_email,
+                    enrollment_link=enrollment_link,
+                    student_name=student_name,
+                    course_name=course["name"],
+                    teacher_name=teacher_name,
+                    semester_name=semester.get("name")
+                )
+                
+                enrolled_students.append({
+                    "student_id": enrollment_item.student_id,
+                    "email": student_email,
+                    "enrollment_id": enrollment_id,
+                    "email_sent": True  # Queued for sending in background
+                })
+                
+                logger.info(
+                    f"Admin {admin_user.id} enrolled student {enrollment_item.student_id} "
+                    f"in course {bulk_request.course_id} via bulk enrollment"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error enrolling student {enrollment_item.student_id}: {e!s}")
+                failed_students.append({
+                    "student_id": enrollment_item.student_id,
+                    "error": str(e)
+                })
+                errors.append(f"Student {enrollment_item.student_id}: {str(e)}")
+        
+        result = BulkOperationResult(
+            total=len(bulk_request.students),
+            successful=len(enrolled_students),
+            failed=len(failed_students),
+            errors=errors
+        )
+        
+        return BulkEnrollmentResponse(
+            result=result,
+            enrolled_students=enrolled_students,
+            failed_students=failed_students
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in bulk enrollment: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing bulk enrollment: {str(e)}",
         ) from e
 
 

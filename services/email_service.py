@@ -7,6 +7,8 @@ Handles sending emails using SMTP for notifications, account activation, and enr
 
 import os
 import smtplib
+import socket
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
@@ -18,14 +20,16 @@ from settings import settings
 
 
 class EmailService:
-    """Service for sending emails via SMTP."""
+    """Service for sending emails via SMTP or SendGrid API."""
     
     def __init__(self):
-        """Initialize email service with SMTP configuration."""
+        """Initialize email service with SMTP or API configuration."""
+        self.email_service_type = settings.EMAIL_SERVICE_TYPE.lower()
         self.smtp_host = settings.SMTP_HOST
         self.smtp_port = settings.SMTP_PORT
         self.smtp_user = settings.SMTP_USER
         self.smtp_password = settings.SMTP_PASSWORD
+        self.sendgrid_api_key = settings.SENDGRID_API_KEY
         self.sender_email = settings.SMTP_SENDER_EMAIL
         self.sender_name = settings.SMTP_SENDER_NAME
         self.frontend_url = settings.FRONTEND_URL
@@ -77,7 +81,7 @@ class EmailService:
         
         return content
     
-    def _send_email(
+    def _send_email_via_sendgrid(
         self,
         to_email: str,
         subject: str,
@@ -85,13 +89,85 @@ class EmailService:
         to_name: Optional[str] = None
     ) -> bool:
         """
-        Send an email via SMTP.
+        Send an email via SendGrid API (works on Render).
         
         Args:
             to_email: Recipient email address
             subject: Email subject
             html_content: HTML email content
             to_name: Optional recipient name
+            
+        Returns:
+            True if email sent successfully, False otherwise
+        """
+        if not self.sendgrid_api_key:
+            logger.warning("SendGrid API key not configured, skipping email send")
+            return False
+        
+        try:
+            url = "https://api.sendgrid.com/v3/mail/send"
+            headers = {
+                "Authorization": f"Bearer {self.sendgrid_api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "personalizations": [{
+                    "to": [{
+                        "email": to_email,
+                        "name": to_name or ""
+                    }]
+                }],
+                "from": {
+                    "email": self.sender_email,
+                    "name": self.sender_name
+                },
+                "subject": subject,
+                "content": [{
+                    "type": "text/html",
+                    "value": html_content
+                }]
+            }
+            
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            
+            if response.status_code == 202:
+                logger.info(f"Email sent successfully via SendGrid to {to_email}: {subject}")
+                return True
+            else:
+                logger.error(
+                    f"SendGrid API error for {to_email}: "
+                    f"Status {response.status_code}, Response: {response.text}"
+                )
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.error(f"SendGrid API timeout for {to_email}: {subject}")
+            return False
+        except requests.exceptions.RequestException as e:
+            logger.error(f"SendGrid API network error for {to_email}: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to send email via SendGrid to {to_email}: {str(e)}")
+            return False
+    
+    def _send_email_via_smtp(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        to_name: Optional[str] = None,
+        timeout: int = 10
+    ) -> bool:
+        """
+        Send an email via SMTP with timeout to prevent blocking.
+        
+        Args:
+            to_email: Recipient email address
+            subject: Email subject
+            html_content: HTML email content
+            to_name: Optional recipient name
+            timeout: Connection timeout in seconds (default: 10)
             
         Returns:
             True if email sent successfully, False otherwise
@@ -111,20 +187,60 @@ class EmailService:
             html_part = MIMEText(html_content, "html")
             msg.attach(html_part)
             
-            # Send email
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                if self.smtp_user and self.smtp_password:
-                    server.starttls()
-                    server.login(self.smtp_user, self.smtp_password)
-                
-                server.send_message(msg)
+            # Set socket timeout to prevent long blocking
+            socket.setdefaulttimeout(timeout)
             
-            logger.info(f"Email sent successfully to {to_email}: {subject}")
-            return True
+            # Send email with timeout
+            try:
+                with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=timeout) as server:
+                    if self.smtp_user and self.smtp_password:
+                        server.starttls()
+                        server.login(self.smtp_user, self.smtp_password)
+                    
+                    server.send_message(msg)
+                
+                logger.info(f"Email sent successfully via SMTP to {to_email}: {subject}")
+                return True
+            except socket.timeout:
+                logger.error(f"SMTP connection timeout after {timeout}s for {to_email}: {subject}")
+                return False
+            except socket.error as e:
+                logger.error(f"SMTP network error for {to_email}: {str(e)}")
+                return False
             
         except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {str(e)}")
+            logger.error(f"Failed to send email via SMTP to {to_email}: {str(e)}")
             return False
+        finally:
+            # Reset socket timeout to default
+            socket.setdefaulttimeout(None)
+    
+    def _send_email(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        to_name: Optional[str] = None,
+        timeout: int = 10
+    ) -> bool:
+        """
+        Send an email using the configured service (SMTP or SendGrid API).
+        
+        Args:
+            to_email: Recipient email address
+            subject: Email subject
+            html_content: HTML email content
+            to_name: Optional recipient name
+            timeout: Connection timeout in seconds (default: 10, only for SMTP)
+            
+        Returns:
+            True if email sent successfully, False otherwise
+        """
+        if self.email_service_type == "sendgrid":
+            return self._send_email_via_sendgrid(to_email, subject, html_content, to_name)
+        else:
+            # Default to SMTP
+            return self._send_email_via_smtp(to_email, subject, html_content, to_name, timeout)
     
     def send_activation_email(
         self,
@@ -621,6 +737,83 @@ class EmailService:
         
         subject = notification_title
         return self._send_email(to_email, subject, html_content, to_name)
+    
+    def send_bulk_signup_email(
+        self,
+        to_email: str,
+        activation_link: str,
+        to_name: Optional[str] = None,
+        student_id: Optional[str] = None,
+        temporary_password: Optional[str] = None
+    ) -> bool:
+        """
+        Send bulk signup email with activation link.
+        
+        Args:
+            to_email: Recipient email address
+            activation_link: One-time activation link with token
+            to_name: Optional recipient name
+            student_id: Student ID (optional)
+            temporary_password: Temporary password (optional)
+            
+        Returns:
+            True if email sent successfully
+        """
+        replacements = {
+            "ACTIVATION_LINK": activation_link,
+            "Student Name": to_name or "Student",
+            "Student ID": student_id or "N/A",
+            "Temporary Password": temporary_password or "Set via activation link",
+        }
+        
+        html_content = self._render_template("18_bulk_signup_activation.html", replacements)
+        
+        if not html_content:
+            logger.error("Failed to render bulk signup email template")
+            return False
+        
+        subject = "Welcome! Activate Your AITA Platform Account"
+        return self._send_email(to_email, subject, html_content, to_name)
+    
+    def send_bulk_enrollment_email(
+        self,
+        to_email: str,
+        enrollment_link: str,
+        student_name: str,
+        course_name: str,
+        teacher_name: Optional[str] = None,
+        semester_name: Optional[str] = None
+    ) -> bool:
+        """
+        Send bulk enrollment email with enrollment link.
+        
+        Args:
+            to_email: Student email address
+            enrollment_link: One-time enrollment link with token
+            student_name: Student's full name
+            course_name: Course name
+            teacher_name: Teacher's name (optional)
+            semester_name: Semester name (optional)
+            
+        Returns:
+            True if email sent successfully
+        """
+        replacements = {
+            "ENROLLMENT_LINK": enrollment_link,
+            "Student Name": student_name,
+            "Course Name": course_name,
+            "Teacher Name": teacher_name or "Your instructor",
+            "Semester": semester_name or "Current semester",
+        }
+        
+        html_content = self._render_template("19_bulk_enrollment.html", replacements)
+        
+        if not html_content:
+            logger.error("Failed to render bulk enrollment email template")
+            return False
+        
+        subject = f"Enroll in {course_name}"
+        return self._send_email(to_email, subject, html_content, student_name)
 
 
 # Global email service instance

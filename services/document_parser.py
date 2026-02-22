@@ -13,6 +13,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from logger import logger
 from models.document import DocumentType
+from services.llm_pdf_parser import LLMPDFParser
 
 
 class DocumentParser:
@@ -69,7 +70,26 @@ class DocumentParser:
 
     @staticmethod
     async def _parse_pdf(file_content: bytes, filename: str) -> Dict[str, Any]:
-        """Parse PDF content with chapter and section-based organization."""
+        """Parse PDF using LLM-based parser, with rule-based fallback."""
+        try:
+            parser = LLMPDFParser()
+            result = await parser.parse(file_content, filename)
+            if result and result.get("content"):
+                logger.info(
+                    f"LLM parser succeeded: {len(result['content'])} chapters, "
+                    f"pattern={result.get('parser_info', {}).get('detected_pattern', 'unknown')}"
+                )
+                return result
+            else:
+                logger.warning("LLM parser returned empty content, falling back to rule-based")
+                return await DocumentParser._parse_pdf_rule_based(file_content, filename)
+        except Exception as e:
+            logger.warning(f"LLM parser failed: {e}, falling back to rule-based")
+            return await DocumentParser._parse_pdf_rule_based(file_content, filename)
+
+    @staticmethod
+    async def _parse_pdf_rule_based(file_content: bytes, filename: str) -> Dict[str, Any]:
+        """Parse PDF content with chapter and section-based organization (legacy rule-based)."""
         try:
             pdf_file = io.BytesIO(file_content)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
