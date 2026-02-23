@@ -1383,25 +1383,35 @@ async def get_course_lectures_for_teacher(
                 "total_count": 0,
             }
 
-        # Get additional info for each lecture
+        # Get additional info for each lecture using batch queries
+        lecture_ids = [lec["id"] for lec in lectures_result.data]
+        
+        # Batch get assessments for all lectures
+        assessments_result = (
+            db.admin_client.table("assessment")
+            .select("lecture_id")
+            .eq("is_default", True)
+            .in_("lecture_id", lecture_ids)
+            .execute()
+        )
+        assessment_by_lecture = {}
+        for a in (assessments_result.data or []):
+            assessment_by_lecture[a["lecture_id"]] = True
+        
+        # Batch get flashcards for all lectures
+        flashcards_result = (
+            db.admin_client.table("flashcard")
+            .select("lecture_id")
+            .in_("lecture_id", lecture_ids)
+            .execute()
+        )
+        flashcards_by_lecture = {}
+        for f in (flashcards_result.data or []):
+            flashcards_by_lecture[f["lecture_id"]] = True
+        
+        # Build lectures array with batch-fetched data
         lectures = []
         for lec in lectures_result.data:
-            # Check for quiz and flashcards
-            assessment_result = (
-                db.admin_client.table("assessment")
-                .select("id")
-                .eq("lecture_id", lec["id"])
-                .eq("is_default", True)
-                .execute()
-            )
-            
-            flashcards_result = (
-                db.admin_client.table("flashcard")
-                .select("id")
-                .eq("lecture_id", lec["id"])
-                .execute()
-            )
-
             lectures.append({
                 "lecture_id": lec["id"],
                 "title": lec["title"],
@@ -1411,8 +1421,8 @@ async def get_course_lectures_for_teacher(
                 "lecture_number": lec.get("lecture_number"),
                 "created_at": lec["created_at"],
                 "updated_at": lec.get("updated_at"),
-                "has_quiz": len(assessment_result.data) > 0 if assessment_result.data else False,
-                "has_flashcards": len(flashcards_result.data) > 0 if flashcards_result.data else False,
+                "has_quiz": lec["id"] in assessment_by_lecture,
+                "has_flashcards": lec["id"] in flashcards_by_lecture,
             })
 
         # Group by status
@@ -1480,27 +1490,41 @@ async def get_course_quizzes(
             }
 
         lectures_with_quizzes = []
-        for lec in lectures_result.data:
-            # Get quiz for this lecture
-            assessment_result = (
-                db.admin_client.table("assessment")
-                .select("id, title, created_at")
-                .eq("lecture_id", lec["id"])
-                .eq("is_default", True)
+        
+        # Batch get assessments for all lectures
+        lecture_ids = [lec["id"] for lec in lectures_result.data]
+        assessments_result = (
+            db.admin_client.table("assessment")
+            .select("id, title, created_at, lecture_id")
+            .eq("is_default", True)
+            .in_("lecture_id", lecture_ids)
+            .execute()
+        )
+        
+        # Create assessment map by lecture_id
+        assessment_by_lecture = {}
+        assessment_ids = []
+        for a in (assessments_result.data or []):
+            assessment_by_lecture[a["lecture_id"]] = a
+            assessment_ids.append(a["id"])
+        
+        # Batch get question counts for all assessments
+        question_counts = {}
+        if assessment_ids:
+            questions_result = (
+                db.admin_client.table("question")
+                .select("assessment_id")
+                .in_("assessment_id", assessment_ids)
                 .execute()
             )
-
-            if assessment_result.data:
-                assessment = assessment_result.data[0]
-                
-                # Get question count
-                questions_result = (
-                    db.admin_client.table("question")
-                    .select("id")
-                    .eq("assessment_id", assessment["id"])
-                    .execute()
-                )
-
+            for q in (questions_result.data or []):
+                aid = q["assessment_id"]
+                question_counts[aid] = question_counts.get(aid, 0) + 1
+        
+        # Build lectures with quizzes using batch-fetched data
+        for lec in lectures_result.data:
+            assessment = assessment_by_lecture.get(lec["id"])
+            if assessment:
                 lectures_with_quizzes.append({
                     "lecture_id": lec["id"],
                     "lecture_title": lec["title"],
@@ -1510,7 +1534,7 @@ async def get_course_quizzes(
                     "quiz_id": assessment["id"],
                     "quiz_title": assessment["title"],
                     "quiz_created_at": assessment["created_at"],
-                    "questions_count": len(questions_result.data) if questions_result.data else 0,
+                    "questions_count": question_counts.get(assessment["id"], 0),
                 })
 
         return {

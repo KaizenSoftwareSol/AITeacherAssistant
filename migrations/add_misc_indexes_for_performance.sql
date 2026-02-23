@@ -79,6 +79,9 @@ ON course_teacher(teacher_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_course_teacher_course_active 
 ON course_teacher(course_id, is_active);
 
+-- For user queries (if not exist)
+CREATE INDEX  IF NOT EXISTS  idx_user_email ON users(email);
+
 -- ============================================================================
 -- MEDIUM PRIORITY: Optimize other common queries
 -- ============================================================================
