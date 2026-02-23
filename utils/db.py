@@ -388,7 +388,12 @@ class SupabaseDB:
             # Apply filters (convert values to strings for UUID support)
             if filters:
                 for key, value in filters.items():
-                    query = query.eq(key, str(value) if value is not None else value)
+                    if value is None:
+                        # Use .is_() for NULL checks
+                        query = query.is_(key, "null")
+                    else:
+                        # Convert to string for UUID support
+                        query = query.eq(key, str(value))
 
             result = query.range(skip, skip + limit - 1).execute()
             records = result.data

@@ -87,6 +87,46 @@ class AuthService:
             return user_id
         except JWTError:
             return None
+    
+    @staticmethod
+    def create_enrollment_token(student_id: str, course_id: str, semester_id: str) -> str:
+        """
+        Create a one-time enrollment token for course enrollment.
+        
+        Token expires in 30 days and includes student_id, course_id, and semester_id.
+        """
+        expires_delta = timedelta(days=30)
+        data = {
+            "student_id": str(student_id),
+            "course_id": str(course_id),
+            "semester_id": str(semester_id),
+            "purpose": "enrollment",
+            "type": "enrollment_token"
+        }
+        return AuthService.create_access_token(data, expires_delta=expires_delta)
+    
+    @staticmethod
+    def verify_enrollment_token(token: str) -> Optional[dict]:
+        """
+        Verify and extract enrollment data from token.
+        
+        Returns:
+            dict with student_id, course_id, semester_id if token is valid, None otherwise
+        """
+        try:
+            payload = jwt.decode(
+                token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+            )
+            # Verify token purpose
+            if payload.get("purpose") != "enrollment" or payload.get("type") != "enrollment_token":
+                return None
+            return {
+                "student_id": payload.get("student_id"),
+                "course_id": payload.get("course_id"),
+                "semester_id": payload.get("semester_id")
+            }
+        except JWTError:
+            return None
 
     @staticmethod
     async def create_user(db, user_create: UserCreate) -> User:

@@ -1,0 +1,59 @@
+# Virtual environment
+venv/
+.venv/
+
+# Git
+.git/
+.gitignore
+
+# Test PDFs (large book files)
+test_pdfs/
+
+# Database files
+*.db
+data_backup.sql
+schema_backup.sql
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Logs
+logs/
+*.log
+
+# Environment files
+.env
+.env.*
+
+# Documentation / schemas (not needed at runtime)
+docs/
+schema.txt
+schema_updated.txt
+README.md
+
+# Tests
+tests/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Node (if any)
+node_modules/
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
