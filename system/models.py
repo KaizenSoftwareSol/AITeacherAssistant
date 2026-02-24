@@ -10,6 +10,7 @@ class UniversityCreateRequest(BaseModel):
 
     name: str
     location: Optional[str] = None
+    type: Optional[str] = "GENERAL"  # MEDICAL, ENGINEERING, LAW, BUSINESS, ARTS, GENERAL
 
 
 class UniversityResponse(BaseModel):
@@ -18,6 +19,7 @@ class UniversityResponse(BaseModel):
     id: str
     name: str
     location: Optional[str] = None
+    type: str = "GENERAL"
     created_at: str
     updated_at: str
 
@@ -60,6 +62,7 @@ class UniversityDetail(BaseModel):
     id: str
     name: str
     location: Optional[str] = None
+    type: str = "GENERAL"
     created_at: str
     updated_at: str
     admin_count: int

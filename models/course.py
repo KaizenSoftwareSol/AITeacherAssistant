@@ -8,6 +8,7 @@ from sqlmodel import Field, Relationship, SQLModel
 if TYPE_CHECKING:
     from models.enrollment import Enrollment
     from models.lecture import Lecture
+    from models.module import Module
     from models.university import University
 
 
@@ -54,3 +55,4 @@ class Semester(SQLModel, table=True):
     course: Optional["Course"] = Relationship(back_populates="semesters")
     lectures: List["Lecture"] = Relationship(back_populates="semester")
     enrollments: List["Enrollment"] = Relationship(back_populates="semester")
+    modules: List["Module"] = Relationship(back_populates="semester")

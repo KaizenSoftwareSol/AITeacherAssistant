@@ -158,6 +158,8 @@ class StudentCourseInfo(SQLModel):
     enrolled_at: datetime
     total_lectures: int = 0
     published_lectures: int = 0
+    semester_name: Optional[str] = None  # Populated for MEDICAL universities
+    modules: Optional[list] = None  # Populated for MEDICAL universities
 
 
 class StudentLectureInfo(SQLModel):

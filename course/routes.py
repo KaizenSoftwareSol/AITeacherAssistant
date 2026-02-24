@@ -49,7 +49,7 @@ def _generate_course_code(db, length: int = 6) -> str:
     raise ValueError("Unable to generate unique course code. Please try again with a custom code.")
 
 
-@router.get("/", response_model=list[dict])
+@router.get("/", response_model=dict)
 async def get_teacher_courses(
     current_user: Annotated[User, Depends(require_teacher)],
     db=Depends(get_db),
@@ -148,7 +148,10 @@ async def get_teacher_courses(
         courses = list(courses_dict.values())
         
         if not courses:
-            return []
+            # Still need university_type for the wrapper
+            uni = db.get_record_by_id("university", teacher.university_id)
+            uni_type = uni.get("type", "GENERAL") if uni else "GENERAL"
+            return {"university_type": uni_type, "courses": []}
         
         course_ids = list(course_ids_set)
         
@@ -191,7 +194,7 @@ async def get_teacher_courses(
         enriched_courses = []
         for course in courses:
             course_id = course.get("id")
-            
+
             enriched_course = {
                 **course,
                 "total_students": enrollment_counts.get(course_id, 0),
@@ -200,13 +203,79 @@ async def get_teacher_courses(
             }
             enriched_courses.append(enriched_course)
 
+        # Get university type
+        university = db.get_record_by_id("university", teacher.university_id)
+        university_type = university.get("type", "GENERAL") if university else "GENERAL"
+
+        # Enrich courses with module info
+        if course_ids:
+            # Batch fetch module_course mappings for all courses
+            mc_result = (
+                db.admin_client.table("module_course")
+                .select("course_id, module_id")
+                .in_("course_id", course_ids)
+                .execute()
+            )
+            course_module_map = {}
+            all_module_ids = set()
+            for mc in (mc_result.data or []):
+                cid = mc["course_id"]
+                mid = mc["module_id"]
+                course_module_map.setdefault(cid, []).append(mid)
+                all_module_ids.add(mid)
+
+            # Batch fetch all modules
+            modules_map = {}
+            if all_module_ids:
+                modules_result = (
+                    db.admin_client.table("module")
+                    .select("id, name, semester_id, display_order")
+                    .in_("id", list(all_module_ids))
+                    .execute()
+                )
+                for mod in (modules_result.data or []):
+                    modules_map[mod["id"]] = mod
+
+            # Batch fetch all semesters referenced by modules
+            all_semester_ids = set(m["semester_id"] for m in modules_map.values())
+            semesters_map = {}
+            if all_semester_ids:
+                semesters_result = (
+                    db.admin_client.table("semester")
+                    .select("id, name")
+                    .in_("id", list(all_semester_ids))
+                    .execute()
+                )
+                for sem in (semesters_result.data or []):
+                    semesters_map[sem["id"]] = sem
+
+            # Attach modules array to each course
+            for ec in enriched_courses:
+                cid = ec.get("id")
+                module_ids = course_module_map.get(cid, [])
+                if module_ids:
+                    ec["modules"] = []
+                    for mid in module_ids:
+                        mod = modules_map.get(mid, {})
+                        sem = semesters_map.get(mod.get("semester_id", ""), {})
+                        ec["modules"].append({
+                            "module_id": mid,
+                            "module_name": mod.get("name"),
+                            "module_display_order": mod.get("display_order", 0),
+                            "semester_id": sem.get("id"),
+                            "semester_name": sem.get("name"),
+                        })
+
+        # Wrap response with university_type
+        result = {"university_type": university_type, "courses": enriched_courses}
+
         # Cache the result for 2 minutes
-        cache.set("courses", enriched_courses, cache_key, ttl=120)
+        cache.set("courses", result, cache_key, ttl=120)
 
         logger.info(
             f"Found {len(enriched_courses)} courses for teacher {teacher.id}"
         )
-        return enriched_courses
+        return result
 
     except HTTPException:
         raise
@@ -313,9 +382,26 @@ async def create_course(
         # Invalidate admin courses cache
         cache.caches["courses"].delete_pattern(f"courses:admin_courses:{university_id}")
 
-        # Note: Semesters are now managed at university level by admins
-        # They are no longer created during course creation
-        # Use the admin API endpoints to create semesters separately
+        # Auto-assign course to all Default Modules for this university
+        try:
+            default_modules = (
+                db.admin_client.table("module")
+                .select("id, semester_id")
+                .eq("university_id", university_id)
+                .eq("name", "Default Module")
+                .execute()
+            )
+            if default_modules.data:
+                mc_rows = [
+                    {
+                        "module_id": dm["id"],
+                        "course_id": course_data["id"],
+                    }
+                    for dm in default_modules.data
+                ]
+                db.admin_client.table("module_course").insert(mc_rows).execute()
+        except Exception as mc_err:
+            logger.warning(f"Failed to auto-assign course to default modules: {mc_err}")
 
         logger.info(
             "Course created",
@@ -460,6 +546,25 @@ async def get_course(
                 unique_doc_ids.add(lec["document_id"])
         total_documents = len(unique_doc_ids)
 
+        # Include module info for this course
+        modules_info = []
+        module_courses_result = (
+            db.admin_client.table("module_course")
+            .select("module_id")
+            .eq("course_id", course_id)
+            .execute()
+        )
+        module_ids = [mc["module_id"] for mc in (module_courses_result.data or [])]
+        if module_ids:
+            for mid in module_ids:
+                mod = db.get_record_by_id("module", mid)
+                if mod:
+                    modules_info.append({
+                        "id": mod["id"],
+                        "name": mod["name"],
+                        "semester_id": mod["semester_id"],
+                    })
+
         # Build response
         response = {
             **course,
@@ -468,6 +573,8 @@ async def get_course(
             "published_lectures": published_lectures,
             "total_documents": total_documents,
         }
+        if modules_info:
+            response["modules"] = modules_info
 
         # Cache the result for 3 minutes
         cache.set("courses", response, cache_key, ttl=180)
