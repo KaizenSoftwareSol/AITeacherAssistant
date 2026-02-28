@@ -22,6 +22,8 @@ from dependencies import require_teacher
 from logger import logger
 from models.user import User
 from services.notification_service import NotificationService
+from services.cache_service import cache_response, cache
+from services.performance_monitor import track_endpoint
 from utils.db import get_db
 
 router = APIRouter()
@@ -31,6 +33,7 @@ router = APIRouter()
 
 
 @router.get("/dashboard")
+@track_endpoint
 async def get_teacher_dashboard(
     current_user: Annotated[User, Depends(require_teacher)],
     db=Depends(get_db),
@@ -244,6 +247,333 @@ async def get_teacher_dashboard(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error fetching dashboard data",
+        )
+
+
+# ==================== DIVIDED DASHBOARD ENDPOINTS ====================
+
+
+@router.get("/dashboard/stats")
+@cache_response(ttl=120, region="teachers")
+@track_endpoint
+async def get_teacher_dashboard_stats(
+    current_user: Annotated[User, Depends(require_teacher)],
+    db=Depends(get_db),
+):
+    """
+    Get teacher dashboard statistics only.
+    
+    Returns:
+    - stats: Overall statistics (courses, documents, lectures, students)
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching dashboard stats for teacher {teacher.id}")
+
+        # Get course IDs for this teacher (same logic as dashboard)
+        course_ids_set = set()
+        
+        # 1. Courses created by this teacher
+        created_courses_result = (
+            db.admin_client.table("course")
+            .select("id")
+            .eq("university_id", teacher.university_id)
+            .eq("created_by_teacher_id", teacher.id)
+            .execute()
+        )
+        
+        for course in created_courses_result.data or []:
+            course_id = course.get("id")
+            if course_id:
+                course_ids_set.add(course_id)
+        
+        # 2. Courses assigned to this teacher
+        assigned_courses_result = (
+            db.admin_client.table("course_teacher")
+            .select("course_id")
+            .eq("teacher_id", teacher.id)
+            .eq("is_active", True)
+            .execute()
+        )
+        
+        for assignment in assigned_courses_result.data or []:
+            course_id = assignment.get("course_id")
+            if course_id:
+                course_ids_set.add(course_id)
+        
+        # 3. Courses where this teacher has created lectures
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("course_id")
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+        
+        for lecture in lectures_result.data or []:
+            course_id = lecture.get("course_id")
+            if course_id:
+                course_ids_set.add(course_id)
+        
+        course_ids = list(course_ids_set)
+        
+        # Count students (batch query)
+        total_students = 0
+        if course_ids:
+            enrollments_result = (
+                db.admin_client.table("enrollment")
+                .select("course_id")
+                .in_("course_id", course_ids)
+                .eq("is_active", True)
+                .execute()
+            )
+            total_students = len(enrollments_result.data or [])
+        
+        # Count documents
+        documents_result = (
+            db.admin_client.table("documents")
+            .select("id, status")
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+        
+        documents = documents_result.data or []
+        completed_documents = sum(1 for d in documents if d["status"] == "COMPLETED")
+        
+        # Count lectures
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("id, status")
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+        
+        lectures = lectures_result.data or []
+        published_lectures = sum(1 for l in lectures if l["status"] in ["PUBLISHED", "DELIVERED"])
+        
+        stats = {
+            "total_courses": len(course_ids),
+            "total_documents": len(documents),
+            "completed_documents": completed_documents,
+            "total_lectures": len(lectures),
+            "published_lectures": published_lectures,
+            "total_students": total_students,
+        }
+
+        return stats
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching dashboard stats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching dashboard stats",
+        )
+
+
+@router.get("/dashboard/recent-documents")
+@cache_response(ttl=60, region="teachers")
+@track_endpoint
+async def get_teacher_recent_documents(
+    current_user: Annotated[User, Depends(require_teacher)],
+    limit: int = 5,
+    db=Depends(get_db),
+):
+    """
+    Get recent documents for teacher dashboard.
+    
+    Returns:
+    - documents: List of recent documents with basic info
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching recent documents for teacher {teacher.id}")
+
+        documents_result = (
+            db.admin_client.table("documents")
+            .select("id, title, document_type, status, created_at")
+            .eq("teacher_id", teacher.id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        
+        documents = []
+        for doc in documents_result.data or []:
+            documents.append({
+                "id": doc["id"],
+                "title": doc["title"],
+                "document_type": doc["document_type"],
+                "status": doc["status"],
+                "created_at": doc["created_at"],
+            })
+
+        return {"documents": documents}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching recent documents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching recent documents",
+        )
+
+
+@router.get("/dashboard/recent-lectures")
+@cache_response(ttl=60, region="teachers")
+@track_endpoint
+async def get_teacher_recent_lectures(
+    current_user: Annotated[User, Depends(require_teacher)],
+    limit: int = 5,
+    db=Depends(get_db),
+):
+    """
+    Get recent lectures for teacher dashboard.
+    
+    Returns:
+    - lectures: List of recent lectures with course info
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching recent lectures for teacher {teacher.id}")
+
+        lectures_result = (
+            db.admin_client.table("lecture")
+            .select("id, title, status, course_id, topic, lecture_number, created_at")
+            .eq("teacher_id", teacher.id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        
+        lectures = []
+        course_ids = set()
+        
+        for lec in lectures_result.data or []:
+            course_id = lec.get("course_id")
+            if course_id:
+                course_ids.add(course_id)
+            
+            lectures.append({
+                "id": lec["id"],
+                "lecture_id": lec["id"],
+                "title": lec["title"],
+                "status": lec["status"],
+                "course_id": course_id,
+                "topic": lec.get("topic"),
+                "lecture_number": lec.get("lecture_number"),
+                "created_at": lec["created_at"],
+            })
+        
+        # Batch fetch course info
+        course_map = {}
+        if course_ids:
+            courses_result = (
+                db.admin_client.table("course")
+                .select("id, name")
+                .in_("id", list(course_ids))
+                .execute()
+            )
+            course_map = {c["id"]: c for c in (courses_result.data or [])}
+        
+        # Enrich lectures with course names
+        for lecture in lectures:
+            course_info = course_map.get(lecture["course_id"])
+            lecture["course_name"] = course_info.get("name") if course_info else None
+
+        return {"lectures": lectures}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching recent lectures: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching recent lectures",
+        )
+
+
+# ==================== PERFORMANCE MONITORING ENDPOINTS ====================
+
+
+@router.get("/dashboard/performance")
+@track_endpoint
+async def get_dashboard_performance_metrics(
+    current_user: Annotated[User, Depends(require_teacher)],
+):
+    """
+    Get performance metrics for dashboard endpoints.
+    
+    Returns:
+    - Performance data for dashboard API calls
+    - Cache hit rates
+    - Response time statistics
+    """
+    try:
+        # Get cache statistics for teacher region
+        cache_stats = cache.caches["teachers"].stats()
+        
+        # Get recent performance logs (this would typically come from a metrics store)
+        # For now, return cache stats and basic endpoint info
+        
+        endpoints = [
+            {
+                "path": "/teacher/dashboard/stats",
+                "description": "Dashboard statistics endpoint",
+                "cache_ttl": "2 minutes",
+                "cache_region": "teachers"
+            },
+            {
+                "path": "/teacher/dashboard/recent-documents", 
+                "description": "Recent documents endpoint",
+                "cache_ttl": "1 minute",
+                "cache_region": "teachers"
+            },
+            {
+                "path": "/teacher/dashboard/recent-lectures",
+                "description": "Recent lectures endpoint", 
+                "cache_ttl": "1 minute",
+                "cache_region": "teachers"
+            },
+            {
+                "path": "/teacher/dashboard",
+                "description": "Original consolidated dashboard endpoint",
+                "cache_ttl": "None",
+                "cache_region": "None"
+            }
+        ]
+        
+        return {
+            "cache_stats": cache_stats,
+            "endpoints": endpoints,
+            "monitoring_active": True,
+            "note": "Performance logs are available in application logs"
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching performance metrics: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching performance metrics",
         )
 
 
