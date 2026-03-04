@@ -194,8 +194,31 @@ class SemesterResponse(BaseModel):
     end_date: datetime
     university_id: str
     course_id: Optional[str] = None
+    module_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class LogoUploadResponse(BaseModel):
+    """Response model for logo upload."""
+    
+    message: str
+    logo_url: str
+    logo_path: Optional[str] = None
+
+
+class LogoGetResponse(BaseModel):
+    """Response model for getting logo."""
+    
+    logo_url: Optional[str] = None
+    has_custom_logo: bool
+    default_logo_url: Optional[str] = None
+
+
+class LogoDeleteResponse(BaseModel):
+    """Response model for logo deletion."""
+    
+    message: str
 
 
 # Update forward references

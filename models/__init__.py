@@ -7,6 +7,7 @@ from .analytics import AIProcessingLog, LectureAnalytics, StudentEngagement
 from .assessment import (Assessment, AssessmentSubmission, AssessmentType,
                          Question, QuestionType)
 from .course import Course, Semester
+from .module import Module, ModuleCourse
 from .document import (Document, DocumentCreate, DocumentRead, DocumentStatus,
                        DocumentType, DocumentUpdate)
 from .enrollment import Enrollment
@@ -19,13 +20,16 @@ from .notification import (Notification, NotificationCreate,
                            NotificationListResponse, NotificationRead,
                            NotificationSeverity, NotificationType,
                            NotificationUpdate, UnreadCountResponse)
-from .university import University
+from .university import University, UniversityType
 from .user import Student, Teacher, User, UserRole
 
 # Export all models
 __all__ = [
     # Core entities
     "University",
+    "UniversityType",
+    "Module",
+    "ModuleCourse",
     "Course",
     "Semester",
     "User",

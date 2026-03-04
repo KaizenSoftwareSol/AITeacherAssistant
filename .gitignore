@@ -154,3 +154,6 @@ test.py
 chroma_store/
 logs/
 *.txt
+
+test_pdfs/
+

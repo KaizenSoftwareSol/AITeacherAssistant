@@ -456,7 +456,7 @@ async def enroll_in_course(
         )
 
 
-@router.get("/my-courses", response_model=List[StudentCourseInfo])
+@router.get("/my-courses", response_model=dict)
 async def get_my_courses(
     user_student: Annotated[tuple[User, Student], Depends(require_student)],
     db=Depends(get_db),
@@ -485,7 +485,9 @@ async def get_my_courses(
         
         if not enrollments:
             logger.info(f"No enrollments found for student {student.id}")
-            return []
+            uni = db.get_record_by_id("university", student.university_id)
+            uni_type = uni.get("type", "GENERAL") if uni else "GENERAL"
+            return {"university_type": uni_type, "courses": []}
         
         # Collect all course IDs for batch queries
         course_ids = [e.get("course", {}).get("id") for e in enrollments if e.get("course", {}).get("id")]
@@ -558,12 +560,87 @@ async def get_my_courses(
                 published_lectures=published_lectures,
             )
             courses.append(course_info)
-        
+
+        # Get university type
+        university = db.get_record_by_id("university", student.university_id)
+        university_type = university.get("type", "GENERAL") if university else "GENERAL"
+
+        # Convert to dicts for the wrapper response
+        courses_data = [c.dict() for c in courses]
+
+        # Enrich with module + semester info
+        if course_ids:
+            # Map course_id → enrollment semester_id
+            enrollment_semesters = {}
+            for enrollment in enrollments:
+                cid = enrollment.get("course", {}).get("id")
+                sid = enrollment.get("semester_id")
+                if cid and sid:
+                    enrollment_semesters[cid] = sid
+
+            all_semester_ids = list(set(enrollment_semesters.values()))
+
+            # Batch fetch semester names
+            semester_names = {}
+            if all_semester_ids:
+                semesters_result = (
+                    db.admin_client.table("semester")
+                    .select("id, name")
+                    .in_("id", all_semester_ids)
+                    .execute()
+                )
+                semester_names = {s["id"]: s["name"] for s in (semesters_result.data or [])}
+
+            # Batch fetch modules for these semesters
+            modules_by_id = {}
+            all_module_ids = []
+            if all_semester_ids:
+                modules_result = (
+                    db.admin_client.table("module")
+                    .select("id, name, semester_id, display_order")
+                    .in_("semester_id", all_semester_ids)
+                    .execute()
+                )
+                modules_by_id = {m["id"]: m for m in (modules_result.data or [])}
+                all_module_ids = list(modules_by_id.keys())
+
+            # Batch fetch module_course for these modules + courses
+            course_modules = {}
+            if all_module_ids:
+                mc_result = (
+                    db.admin_client.table("module_course")
+                    .select("course_id, module_id")
+                    .in_("module_id", all_module_ids)
+                    .in_("course_id", course_ids)
+                    .execute()
+                )
+                for mc in (mc_result.data or []):
+                    cid = mc["course_id"]
+                    mid = mc["module_id"]
+                    mod = modules_by_id.get(mid, {})
+                    # Only include if module's semester matches enrollment semester
+                    if mod.get("semester_id") == enrollment_semesters.get(cid):
+                        course_modules.setdefault(cid, []).append({
+                            "module_id": mid,
+                            "module_name": mod.get("name"),
+                            "module_display_order": mod.get("display_order", 0),
+                            "semester_id": mod.get("semester_id"),
+                        })
+
+            # Attach module + semester info to each course
+            for cd in courses_data:
+                cid = cd.get("course_id")
+                cd["semester_name"] = semester_names.get(enrollment_semesters.get(cid, ""))
+                cd["modules"] = course_modules.get(cid, [])
+
+        # Wrap response
+        result = {"university_type": university_type, "courses": courses_data}
+
         # Cache the result for 2 minutes
-        cache.set("enrollments", courses, cache_key, ttl=120)
-        
-        logger.info(f"Found {len(courses)} courses for student {student.id}")
-        return courses
+        cache.set("enrollments", result, cache_key, ttl=120)
+
+        logger.info(f"Found {len(courses_data)} courses for student {student.id}")
+        return result
     
     except Exception as e:
         logger.error(f"Error fetching student courses: {str(e)}")

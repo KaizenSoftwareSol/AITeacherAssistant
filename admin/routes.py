@@ -8,9 +8,10 @@ from datetime import datetime
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, status, UploadFile
 
 from admin.dependencies import require_admin
+from dependencies import get_current_user
 from admin.models import (
     BulkEnrollmentRequest,
     BulkEnrollmentResponse,
@@ -21,6 +22,9 @@ from admin.models import (
     CourseSummary,
     DashboardStats,
     EnrollmentSummary,
+    LogoDeleteResponse,
+    LogoGetResponse,
+    LogoUploadResponse,
     SemesterCreateRequest,
     SemesterResponse,
     SemesterUpdateRequest,
@@ -1249,6 +1253,20 @@ async def create_semester(
         created_semester = result.data[0]
         from utils.datetime_helpers import parse_datetime_safe
 
+        # Auto-create a "Default Module" for the new semester
+        try:
+            db.admin_client.table("module").insert({
+                "id": str(uuid4()),
+                "name": "Default Module",
+                "university_id": university_id,
+                "semester_id": created_semester["id"],
+                "display_order": 1,
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }).execute()
+        except Exception as mod_err:
+            logger.warning(f"Failed to auto-create default module for semester {created_semester['id']}: {mod_err}")
+
         logger.info(
             f"Admin {admin_user.id} created semester '{semester_request.name}' "
             f"for university {university_id}"
@@ -1261,6 +1279,7 @@ async def create_semester(
             end_date=parse_datetime_safe(created_semester["end_date"]),
             university_id=created_semester["university_id"],
             course_id=created_semester.get("course_id"),
+            module_count=1,
             created_at=parse_datetime_safe(created_semester["created_at"]),
             updated_at=parse_datetime_safe(created_semester["updated_at"]),
         )
@@ -1306,6 +1325,18 @@ async def list_semesters(
                 if s.get("course_id") is None
             ]
 
+        # Batch-fetch module counts per semester
+        module_counts = {}
+        modules_result = (
+            db.admin_client.table("module")
+            .select("id, semester_id")
+            .eq("university_id", university_id)
+            .execute()
+        )
+        for mod in (modules_result.data or []):
+            sid = mod["semester_id"]
+            module_counts[sid] = module_counts.get(sid, 0) + 1
+
         semesters = []
         from utils.datetime_helpers import parse_datetime_safe
         for semester in semesters_result.data or []:
@@ -1317,6 +1348,7 @@ async def list_semesters(
                     end_date=parse_datetime_safe(semester["end_date"]),
                     university_id=semester["university_id"],
                     course_id=semester.get("course_id"),
+                    module_count=module_counts.get(semester["id"], 0),
                     created_at=parse_datetime_safe(semester["created_at"]),
                     updated_at=parse_datetime_safe(semester["updated_at"]),
                 )
@@ -1916,6 +1948,548 @@ async def bulk_student_enrollment(
         ) from e
 
 
+# ==================== Module Management Routes ====================
+
+
+@router.post("/modules", status_code=status.HTTP_201_CREATED)
+async def create_module(
+    request: dict,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Create a module within a semester.
+    Hierarchy: Semester → Module → Courses
+
+    Request body: { "name": "Urology", "description": "...", "semester_id": "uuid", "display_order": 0 }
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        name = (request.get("name") or "").strip()
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Module name is required",
+            )
+
+        semester_id = request.get("semester_id")
+        if not semester_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="semester_id is required",
+            )
+
+        # Verify semester belongs to this university
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("id")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        # Check for duplicate module name in this semester
+        existing = (
+            db.admin_client.table("module")
+            .select("id")
+            .eq("semester_id", semester_id)
+            .eq("name", name)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Module '{name}' already exists in this semester",
+            )
+
+        module_data = {
+            "id": str(uuid4()),
+            "name": name,
+            "description": (request.get("description") or "").strip() or None,
+            "semester_id": semester_id,
+            "university_id": university_id,
+            "display_order": request.get("display_order", 0),
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        result = db.admin_client.table("module").insert(module_data).execute()
+
+        if not result.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create module",
+            )
+
+        logger.info(f"Admin {admin_user.id} created module '{name}' in semester {semester_id}")
+        return result.data[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating module: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error creating module",
+        ) from e
+
+
+@router.get("/modules", response_model=list[dict])
+async def list_modules(
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+    semester_id: str = None,
+):
+    """
+    List all modules for the admin's university.
+    Optional filter: ?semester_id= to get modules for a specific semester.
+    Each module includes its courses.
+    """
+    _, university_id = admin_data
+
+    try:
+        query = (
+            db.admin_client.table("module")
+            .select("*")
+            .eq("university_id", university_id)
+        )
+        if semester_id:
+            query = query.eq("semester_id", semester_id)
+
+        modules_result = query.order("display_order").order("created_at").execute()
+
+        modules = []
+        for module in modules_result.data or []:
+            # Get courses for this module
+            courses_result = (
+                db.admin_client.table("module_course")
+                .select("course_id, display_order, course!inner(id, name, code)")
+                .eq("module_id", module["id"])
+                .order("display_order")
+                .execute()
+            )
+
+            courses = []
+            for mc in courses_result.data or []:
+                course = mc.get("course", {})
+                courses.append({
+                    "course_id": course.get("id"),
+                    "course_name": course.get("name"),
+                    "course_code": course.get("code"),
+                    "display_order": mc.get("display_order", 0),
+                })
+
+            modules.append({**module, "courses": courses})
+
+        return modules
+
+    except Exception as e:
+        logger.error(f"Error listing modules: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching modules",
+        ) from e
+
+
+@router.get("/modules/{module_id}", response_model=dict)
+async def get_module(
+    module_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """Get a specific module with its courses."""
+    _, university_id = admin_data
+
+    try:
+        module_result = (
+            db.admin_client.table("module")
+            .select("*")
+            .eq("id", module_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not module_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Module not found",
+            )
+
+        module = module_result.data[0]
+
+        # Get courses
+        courses_result = (
+            db.admin_client.table("module_course")
+            .select("course_id, display_order, course!inner(id, name, code, description)")
+            .eq("module_id", module_id)
+            .order("display_order")
+            .execute()
+        )
+
+        courses = []
+        for mc in courses_result.data or []:
+            course = mc.get("course", {})
+            courses.append({
+                "course_id": course.get("id"),
+                "course_name": course.get("name"),
+                "course_code": course.get("code"),
+                "course_description": course.get("description"),
+                "display_order": mc.get("display_order", 0),
+            })
+
+        return {**module, "courses": courses}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching module: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching module",
+        ) from e
+
+
+@router.put("/modules/{module_id}", response_model=dict)
+async def update_module(
+    module_id: str,
+    request: dict,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """Update a module's name, description, or display_order."""
+    admin_user, university_id = admin_data
+
+    try:
+        # Verify module exists
+        module_result = (
+            db.admin_client.table("module")
+            .select("*")
+            .eq("id", module_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not module_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Module not found",
+            )
+
+        update_data = {"updated_at": datetime.utcnow().isoformat()}
+
+        if "name" in request and request["name"]:
+            update_data["name"] = request["name"].strip()
+        if "description" in request:
+            update_data["description"] = (request["description"] or "").strip() or None
+        if "display_order" in request:
+            update_data["display_order"] = request["display_order"]
+
+        result = (
+            db.admin_client.table("module")
+            .update(update_data)
+            .eq("id", module_id)
+            .execute()
+        )
+
+        if not result.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update module",
+            )
+
+        logger.info(f"Admin {admin_user.id} updated module {module_id}")
+        return result.data[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating module: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating module",
+        ) from e
+
+
+@router.delete("/modules/{module_id}")
+async def delete_module(
+    module_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Delete a module. This removes the module and its course associations,
+    but does NOT delete the courses themselves.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        module_result = (
+            db.admin_client.table("module")
+            .select("id, name")
+            .eq("id", module_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not module_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Module not found",
+            )
+
+        module_name = module_result.data[0]["name"]
+
+        # Delete module (module_course entries cascade-delete via FK)
+        db.admin_client.table("module").delete().eq("id", module_id).execute()
+
+        logger.info(f"Admin {admin_user.id} deleted module '{module_name}' ({module_id})")
+        return {"message": f"Module '{module_name}' deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting module: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error deleting module",
+        ) from e
+
+
+@router.post("/modules/{module_id}/courses")
+async def assign_courses_to_module(
+    module_id: str,
+    request: dict,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Assign courses to a module.
+    Request body: { "course_ids": ["uuid1", "uuid2"] }
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        # Verify module exists
+        module_result = (
+            db.admin_client.table("module")
+            .select("id, name")
+            .eq("id", module_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not module_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Module not found",
+            )
+
+        course_ids = request.get("course_ids", [])
+        if not course_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="course_ids list is required",
+            )
+
+        # Verify all courses belong to this university
+        courses_result = (
+            db.admin_client.table("course")
+            .select("id, name")
+            .in_("id", course_ids)
+            .eq("university_id", university_id)
+            .execute()
+        )
+
+        found_ids = {c["id"] for c in (courses_result.data or [])}
+        missing = set(course_ids) - found_ids
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Courses not found in your university: {list(missing)}",
+            )
+
+        # Get existing assignments to avoid duplicates
+        existing_result = (
+            db.admin_client.table("module_course")
+            .select("course_id")
+            .eq("module_id", module_id)
+            .in_("course_id", course_ids)
+            .execute()
+        )
+        existing_ids = {mc["course_id"] for mc in (existing_result.data or [])}
+
+        # Insert new assignments
+        new_assignments = []
+        for course_id in course_ids:
+            if course_id not in existing_ids:
+                new_assignments.append({
+                    "id": str(uuid4()),
+                    "module_id": module_id,
+                    "course_id": course_id,
+                    "display_order": 0,
+                    "created_at": datetime.utcnow().isoformat(),
+                })
+
+        if new_assignments:
+            db.admin_client.table("module_course").insert(new_assignments).execute()
+
+        logger.info(
+            f"Admin {admin_user.id} assigned {len(new_assignments)} courses to module {module_id} "
+            f"({len(existing_ids)} already assigned)"
+        )
+
+        return {
+            "message": f"Assigned {len(new_assignments)} courses to module",
+            "newly_assigned": len(new_assignments),
+            "already_assigned": len(existing_ids),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error assigning courses to module: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error assigning courses to module",
+        ) from e
+
+
+@router.delete("/modules/{module_id}/courses/{course_id}")
+async def remove_course_from_module(
+    module_id: str,
+    course_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """Remove a course from a module. Does NOT delete the course."""
+    admin_user, university_id = admin_data
+
+    try:
+        # Verify module belongs to this university
+        module_result = (
+            db.admin_client.table("module")
+            .select("id")
+            .eq("id", module_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not module_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Module not found",
+            )
+
+        # Delete the junction entry
+        db.admin_client.table("module_course").delete().eq(
+            "module_id", module_id
+        ).eq("course_id", course_id).execute()
+
+        logger.info(f"Admin {admin_user.id} removed course {course_id} from module {module_id}")
+        return {"message": "Course removed from module"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing course from module: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error removing course from module",
+        ) from e
+
+
+@router.get("/semesters/{semester_id}/modules", response_model=list[dict])
+async def get_semester_modules(
+    semester_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Get all modules for a specific semester, each with its courses.
+    Used by frontend to display the Semester → Module → Course hierarchy.
+    """
+    _, university_id = admin_data
+
+    try:
+        # Verify semester belongs to this university
+        semester_result = (
+            db.admin_client.table("semester")
+            .select("id, name")
+            .eq("id", semester_id)
+            .eq("university_id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not semester_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Semester not found in your university",
+            )
+
+        # Get modules for this semester
+        modules_result = (
+            db.admin_client.table("module")
+            .select("*")
+            .eq("semester_id", semester_id)
+            .order("display_order")
+            .order("created_at")
+            .execute()
+        )
+
+        modules = []
+        for module in modules_result.data or []:
+            # Get courses for this module
+            courses_result = (
+                db.admin_client.table("module_course")
+                .select("course_id, display_order, course!inner(id, name, code, description)")
+                .eq("module_id", module["id"])
+                .order("display_order")
+                .execute()
+            )
+
+            courses = []
+            for mc in courses_result.data or []:
+                course = mc.get("course", {})
+                courses.append({
+                    "id": course.get("id"),
+                    "name": course.get("name"),
+                    "code": course.get("code"),
+                    "description": course.get("description"),
+                    "display_order": mc.get("display_order", 0),
+                })
+
+            modules.append({
+                **module,
+                "courses": courses,
+                "course_count": len(courses),
+            })
+
+        return modules
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching semester modules: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching semester modules",
+        ) from e
+
+
 # ==================== Delete Management Routes ====================
 
 
@@ -2074,6 +2648,191 @@ async def delete_student(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error deleting student",
+        ) from e
+
+
+# ==================== Branding Routes ====================
+
+
+@router.post(
+    "/branding/logo",
+    response_model=LogoUploadResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def upload_institute_logo(
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    file: UploadFile = File(...),
+    db=Depends(get_db),
+):
+    """
+    Upload a logo for the admin's university/institute.
+    This logo will be displayed in the sidebar replacing the default AITA logo.
+    
+    Accepts: PNG, JPG, JPEG, SVG, WEBP
+    Max size: 5MB
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        from services.branding_service import BrandingService
+
+        # Get existing logo URL from database (for cleanup)
+        existing_university = (
+            db.admin_client.table("university")
+            .select("logo_url")
+            .eq("id", university_id)
+            .limit(1)
+            .execute()
+        )
+        existing_logo_url = None
+        if existing_university.data and existing_university.data[0].get("logo_url"):
+            existing_logo_url = existing_university.data[0]["logo_url"]
+
+        # Upload new logo (this will delete the old one)
+        logo_url = await BrandingService.upload_logo(university_id, file, existing_logo_url)
+
+        # Update university record with new logo URL
+        update_result = (
+            db.admin_client.table("university")
+            .update({"logo_url": logo_url, "updated_at": datetime.utcnow().isoformat()})
+            .eq("id", university_id)
+            .execute()
+        )
+
+        if not update_result.data:
+            logger.warning(
+                f"Logo uploaded but failed to update university record for {university_id}"
+            )
+
+        logger.info(
+            f"Admin {admin_user.id} uploaded logo for university {university_id}"
+        )
+
+        # Extract path from URL for response
+        logo_path = None
+        if logo_url:
+            # Extract path from public URL (e.g., extract from full URL)
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(logo_url)
+                logo_path = parsed.path.lstrip("/")
+            except Exception:
+                pass
+
+        return LogoUploadResponse(
+            message="Logo uploaded successfully",
+            logo_url=logo_url,
+            logo_path=logo_path,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading logo: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error uploading logo",
+        ) from e
+
+
+@router.get("/branding/logo", response_model=LogoGetResponse)
+async def get_institute_logo(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db=Depends(get_db),
+):
+    """
+    Get the current logo for the user's university/institute.
+    Returns the logo URL if a custom logo exists, or null if using default.
+    
+    This endpoint can be accessed by all authenticated users (not just admins)
+    to display the logo in the sidebar. The logo is scoped to the user's university.
+    """
+    # Get university_id from user
+    university_id = current_user.university_id
+    if not university_id:
+        # If user has no university, return no logo
+        return LogoGetResponse(
+            logo_url=None,
+            has_custom_logo=False,
+            default_logo_url=None,
+        )
+
+    try:
+        # Get university record
+        university_result = (
+            db.admin_client.table("university")
+            .select("logo_url")
+            .eq("id", university_id)
+            .limit(1)
+            .execute()
+        )
+
+        logo_url = None
+        if university_result.data and university_result.data[0].get("logo_url"):
+            logo_url = university_result.data[0]["logo_url"]
+
+        # Default logo URL (can be configured in settings)
+        default_logo_url = None  # Frontend should handle default logo display
+
+        return LogoGetResponse(
+            logo_url=logo_url,
+            has_custom_logo=logo_url is not None,
+            default_logo_url=default_logo_url,
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching logo: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching logo",
+        ) from e
+
+
+@router.delete("/branding/logo", response_model=LogoDeleteResponse)
+async def delete_institute_logo(
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """
+    Delete the custom logo for the admin's university/institute.
+    This will restore the default AITA logo.
+    """
+    admin_user, university_id = admin_data
+
+    try:
+        from services.branding_service import BrandingService
+
+        # Delete logo file from storage
+        await BrandingService.delete_logo(university_id)
+
+        # Update university record to remove logo URL
+        update_result = (
+            db.admin_client.table("university")
+            .update({"logo_url": None, "updated_at": datetime.utcnow().isoformat()})
+            .eq("id", university_id)
+            .execute()
+        )
+
+        if not update_result.data:
+            logger.warning(
+                f"Logo deleted but failed to update university record for {university_id}"
+            )
+
+        logger.info(
+            f"Admin {admin_user.id} deleted logo for university {university_id}"
+        )
+
+        return LogoDeleteResponse(
+            message="Logo removed successfully, default logo restored"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting logo: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error deleting logo",
         ) from e
 
 

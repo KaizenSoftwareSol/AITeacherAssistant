@@ -68,9 +68,18 @@ async def create_university(
             )
 
         # Create university
+        uni_type = (university_data.type or "GENERAL").upper()
+        valid_types = {"MEDICAL", "ENGINEERING", "LAW", "BUSINESS", "ARTS", "GENERAL"}
+        if uni_type not in valid_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid university type '{uni_type}'. Must be one of: {', '.join(sorted(valid_types))}",
+            )
+
         university_payload = {
             "id": str(uuid4()),
             "name": university_data.name.strip(),
+            "type": uni_type,
         }
         if university_data.location:
             university_payload["location"] = university_data.location.strip()
@@ -86,6 +95,7 @@ async def create_university(
             id=new_university["id"],
             name=new_university["name"],
             location=new_university.get("location"),
+            type=new_university.get("type", "GENERAL"),
             created_at=str(new_university.get("created_at", "")),
             updated_at=str(new_university.get("updated_at", "")),
         )
@@ -170,6 +180,7 @@ async def list_universities(
                     id=univ_id,
                     name=university["name"],
                     location=university.get("location"),
+                    type=university.get("type", "GENERAL"),
                     created_at=str(university.get("created_at", "")),
                     updated_at=str(university.get("updated_at", "")),
                     admin_count=admin_counts.get(univ_id, 0),
@@ -235,6 +246,7 @@ async def get_university(
             id=university["id"],
             name=university["name"],
             location=university.get("location"),
+            type=university.get("type", "GENERAL"),
             created_at=str(university.get("created_at", "")),
             updated_at=str(university.get("updated_at", "")),
             admin_count=len(admin_users),
@@ -284,6 +296,14 @@ async def delete_university(
             f"System user {current_user.id} initiating cascade delete for university "
             f"{university_id} ({university_name})"
         )
+
+        # Delete modules and module_course entries for this university
+        modules = db.get_records("module", {"university_id": university_id}, use_cache=False)
+        for module in modules:
+            # module_course entries cascade-delete via FK
+            db.delete_record("module", module["id"])
+        if modules:
+            logger.info(f"Deleted {len(modules)} modules")
 
         # Get all courses for this university
         courses = db.get_records(
