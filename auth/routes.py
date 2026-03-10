@@ -53,8 +53,10 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db=Depends(get
         )
 
     access_token_expires = timedelta(minutes=30)
+    # Use UUID for token security (not integer ID)
+    user_uuid = user.uuid if hasattr(user, "uuid") and user.uuid else str(user.id)
     access_token = AuthService.create_access_token(
-        data={"sub": str(user.id)}, expires_delta=access_token_expires
+        data={"sub": user_uuid}, expires_delta=access_token_expires
     )
 
     return {"access_token": access_token, "token_type": "bearer"}

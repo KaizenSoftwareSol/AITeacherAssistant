@@ -13,14 +13,15 @@ if TYPE_CHECKING:
 class Enrollment(SQLModel, table=True):
     """Student enrollment in courses."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    student_id: str = Field(foreign_key="student.id")  # UUID
-    course_id: str = Field(foreign_key="course.id")  # UUID
-    semester_id: str = Field(foreign_key="semester.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    student_id: int = Field(foreign_key="student.id")  # Integer FK for performance
+    course_id: int = Field(foreign_key="course.id")  # Integer FK for performance
+    semester_id: int = Field(foreign_key="semester.id")  # Integer FK for performance
     enrolled_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = Field(default=True)
 
     # Relationships
-    student: Optional["Student"] = Relationship(back_populates="enrollments")
-    course: Optional["Course"] = Relationship(back_populates="enrollments")
-    semester: Optional["Semester"] = Relationship(back_populates="enrollments")
+    student: "Student" = Relationship(back_populates="enrollments")
+    course: "Course" = Relationship(back_populates="enrollments")
+    semester: "Semester" = Relationship(back_populates="enrollments")

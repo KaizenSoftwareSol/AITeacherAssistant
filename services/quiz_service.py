@@ -292,12 +292,43 @@ For SHORT_ANSWER questions, omit the options field and provide a sample correct 
             Dictionary with performance analytics
         """
         try:
+            # Convert UUIDs to integer IDs for database queries
+            from utils.id_converter import IDConverter
+            
+            student_int_id = student_id
+            if isinstance(student_id, str):
+                if IDConverter.is_uuid(student_id):
+                    student_int_id = await IDConverter.uuid_to_int(self.db, "student", student_id)
+                else:
+                    try:
+                        student_int_id = int(student_id)
+                    except ValueError:
+                        student_int_id = None
+            
+            lecture_int_id = lecture_id
+            if isinstance(lecture_id, str):
+                if IDConverter.is_uuid(lecture_id):
+                    lecture_int_id = await IDConverter.uuid_to_int(self.db, "lecture", lecture_id)
+                else:
+                    try:
+                        lecture_int_id = int(lecture_id)
+                    except ValueError:
+                        lecture_int_id = None
+            
+            if not student_int_id or not lecture_int_id:
+                return {
+                    "total_attempts": 0,
+                    "best_score": 0,
+                    "average_score": 0,
+                    "improvement": 0,
+                }
+            
             # Get all quiz submissions for this student and lecture
             submissions = (
                 self.db.admin_client.table("assessment_submission")
                 .select("*, assessment!inner(lecture_id)")
-                .eq("student_id", student_id)
-                .eq("assessment.lecture_id", lecture_id)
+                .eq("student_id", student_int_id)  # Use integer ID
+                .eq("assessment.lecture_id", lecture_int_id)  # Use integer ID
                 .eq("is_graded", True)
                 .order("submitted_at", desc=True)
                 .execute()

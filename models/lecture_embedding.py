@@ -17,8 +17,9 @@ class LectureChunk(SQLModel, table=True):
 
     __tablename__ = "lecture_chunk"
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    lecture_id: int = Field(foreign_key="lecture.id")  # Integer FK for performance
     chunk_index: int = Field(default=0)  # Order of chunk in the lecture
     content: str  # The actual text content of this chunk
     chunk_type: str = Field(default="CONTENT")  # CONTENT, SUMMARY, HEADING, etc.
@@ -28,8 +29,8 @@ class LectureChunk(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    lecture: Optional["Lecture"] = Relationship(back_populates="chunks")
-    embedding: Optional["LectureEmbedding"] = Relationship(
+    lecture: "Lecture" = Relationship(back_populates="chunks")
+    embedding: "LectureEmbedding" = Relationship(
         back_populates="chunk", sa_relationship_kwargs={"uselist": False}
     )
 
@@ -42,9 +43,10 @@ class LectureEmbedding(SQLModel, table=True):
 
     __tablename__ = "lecture_embedding"
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
-    chunk_id: Optional[str] = Field(default=None, foreign_key="lecture_chunk.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    lecture_id: int = Field(foreign_key="lecture.id")  # Integer FK for performance
+    chunk_id: Optional[int] = Field(default=None, foreign_key="lecture_chunk.id")  # Integer FK for performance
     # Note: embedding is stored as a PostgreSQL vector type (requires pgvector extension)
     # In Python, we'll handle it as a list of floats
     # The actual vector column is defined in the database migration
@@ -54,8 +56,8 @@ class LectureEmbedding(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    lecture: Optional["Lecture"] = Relationship(sa_relationship_kwargs={"overlaps": "embeddings"})
-    chunk: Optional["LectureChunk"] = Relationship(back_populates="embedding")
+    lecture: "Lecture" = Relationship(sa_relationship_kwargs={"overlaps": "embeddings"})
+    chunk: "LectureChunk" = Relationship(back_populates="embedding")
 
 
 # ==================== Request/Response Models ====================

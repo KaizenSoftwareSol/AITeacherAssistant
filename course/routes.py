@@ -17,6 +17,7 @@ from logger import logger
 from models.user import User, UserRole
 from services.cache_service import cache
 from utils.db import get_db
+from utils.id_converter import IDConverter
 
 router = APIRouter()
 
@@ -180,26 +181,41 @@ async def get_teacher_courses(
         
         # Process lecture data (only this teacher's lectures)
         published_counts = {}
-        doc_ids_by_course = {}
         for lec in (teacher_lectures_result.data or []):
             cid = lec.get("course_id")
             if lec.get("status") in ["PUBLISHED", "DELIVERED"]:
                 published_counts[cid] = published_counts.get(cid, 0) + 1
-            if lec.get("document_id"):
-                if cid not in doc_ids_by_course:
-                    doc_ids_by_course[cid] = set()
-                doc_ids_by_course[cid].add(lec["document_id"])
 
-        # Enrich each course with aggregate stats
+        # Count documents from document_assignment table (not from lectures)
+        # This matches what the frontend expects when querying /courses/{id}/documents
+        doc_assignment_counts = {}
+        if course_ids:
+            try:
+                doc_assignments_result = (
+                    db.admin_client.table("document_assignment")
+                    .select("course_id, document_id")
+                    .in_("course_id", course_ids)
+                    .execute()
+                )
+                # Count unique documents per course
+                for assignment in (doc_assignments_result.data or []):
+                    cid = assignment.get("course_id")
+                    if cid not in doc_assignment_counts:
+                        doc_assignment_counts[cid] = set()
+                    doc_assignment_counts[cid].add(assignment.get("document_id"))
+            except Exception as e:
+                logger.warning(f"Could not fetch document assignments for course stats: {e}")
+
+        # Enrich each course with aggregate stats (keep integer IDs for now)
         enriched_courses = []
         for course in courses:
-            course_id = course.get("id")
+            course_id = course.get("id")  # Integer ID
 
             enriched_course = {
                 **course,
                 "total_students": enrollment_counts.get(course_id, 0),
                 "published_lectures": published_counts.get(course_id, 0),
-                "total_documents": len(doc_ids_by_course.get(course_id, set())),
+                "total_documents": len(doc_assignment_counts.get(course_id, set())),
             }
             enriched_courses.append(enriched_course)
 
@@ -207,7 +223,7 @@ async def get_teacher_courses(
         university = db.get_record_by_id("university", teacher.university_id)
         university_type = university.get("type", "GENERAL") if university else "GENERAL"
 
-        # Enrich courses with module info
+        # Enrich courses with module info (using integer IDs)
         if course_ids:
             # Batch fetch module_course mappings for all courses
             mc_result = (
@@ -237,7 +253,7 @@ async def get_teacher_courses(
                     modules_map[mod["id"]] = mod
 
             # Batch fetch all semesters referenced by modules
-            all_semester_ids = set(m["semester_id"] for m in modules_map.values())
+            all_semester_ids = set(m["semester_id"] for m in modules_map.values() if m.get("semester_id"))
             semesters_map = {}
             if all_semester_ids:
                 semesters_result = (
@@ -249,22 +265,44 @@ async def get_teacher_courses(
                 for sem in (semesters_result.data or []):
                     semesters_map[sem["id"]] = sem
 
-            # Attach modules array to each course
+            # Attach modules array to each course (still using integer IDs)
             for ec in enriched_courses:
-                cid = ec.get("id")
-                module_ids = course_module_map.get(cid, [])
+                course_id = ec.get("id")  # Still integer at this point
+                module_ids = course_module_map.get(course_id, [])
                 if module_ids:
                     ec["modules"] = []
                     for mid in module_ids:
                         mod = modules_map.get(mid, {})
                         sem = semesters_map.get(mod.get("semester_id", ""), {})
                         ec["modules"].append({
-                            "module_id": mid,
+                            "module_id": mid,  # Will convert to UUID later
                             "module_name": mod.get("name"),
                             "module_display_order": mod.get("display_order", 0),
-                            "semester_id": sem.get("id"),
+                            "semester_id": sem.get("id") if sem.get("id") else None,  # Will convert to UUID later
                             "semester_name": sem.get("name"),
                         })
+        
+        # Now convert all IDs to UUIDs for response
+        for ec in enriched_courses:
+            course_id = ec.get("id")
+            if isinstance(course_id, int):
+                # Convert course integer ID to UUID
+                course_uuid = await IDConverter.int_to_uuid(db, "course", course_id)
+                if course_uuid:
+                    ec["id"] = course_uuid
+                    ec["uuid"] = course_uuid
+            
+            # Convert module and semester IDs in modules array
+            if "modules" in ec:
+                for module in ec["modules"]:
+                    if "module_id" in module and isinstance(module["module_id"], int):
+                        module_uuid = await IDConverter.int_to_uuid(db, "module", module["module_id"])
+                        if module_uuid:
+                            module["module_id"] = module_uuid
+                    if "semester_id" in module and isinstance(module["semester_id"], int):
+                        semester_uuid = await IDConverter.int_to_uuid(db, "semester", module["semester_id"])
+                        if semester_uuid:
+                            module["semester_id"] = semester_uuid
 
         # Wrap response with university_type
         result = {"university_type": university_type, "courses": enriched_courses}
@@ -865,11 +903,21 @@ async def get_course_enrollments(
                 detail="Teacher profile not found",
             )
         
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+        
         # Verify course belongs to teacher's university
         course_result = (
             db.admin_client.table("course")
             .select("id, name, code")
-            .eq("id", course_id)
+            .eq("id", course_int_id)
             .eq("university_id", teacher.university_id)
             .execute()
         )
@@ -886,7 +934,7 @@ async def get_course_enrollments(
         enrollments_result = (
             db.admin_client.table("enrollment")
             .select("*, student!inner(*, users!inner(first_name, last_name, email))")
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("is_active", True)
             .order("enrolled_at", desc=True)
             .execute()
@@ -897,9 +945,22 @@ async def get_course_enrollments(
             student_data = enrollment.get("student", {})
             user_data = student_data.get("users", {})
             
+            # Convert integer IDs to UUIDs for response
+            enrollment_id = enrollment["id"]
+            if isinstance(enrollment_id, int):
+                enrollment_uuid = await IDConverter.int_to_uuid(db, "enrollment", enrollment_id)
+                if enrollment_uuid:
+                    enrollment_id = enrollment_uuid
+            
+            student_id = student_data.get("id")
+            if isinstance(student_id, int):
+                student_uuid = await IDConverter.int_to_uuid(db, "student", student_id)
+                if student_uuid:
+                    student_id = student_uuid
+            
             students.append({
-                "enrollment_id": enrollment["id"],
-                "student_id": student_data.get("id"),
+                "enrollment_id": enrollment_id if isinstance(enrollment_id, str) else str(enrollment_id),
+                "student_id": student_id if isinstance(student_id, str) else str(student_id),
                 "name": f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip(),
                 "email": user_data.get("email"),
                 "enrolled_at": enrollment["enrolled_at"],
@@ -1131,18 +1192,30 @@ async def delete_course(
         # Delete all related data in proper order (cascade delete)
         logger.info(f"Starting cascade delete for course {course_id}")
 
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+
         # 1. Get all lectures for this course (need to delete them first)
-        lectures = db.get_records("lecture", {"course_id": course_id}, use_cache=False)
+        lectures = db.get_records("lecture", {"course_id": course_int_id}, use_cache=False)
         lecture_ids = [lec["id"] for lec in lectures]
 
         # 2. For each lecture, delete all related data (similar to delete_lecture endpoint)
         for lecture_id in lecture_ids:
+            # lecture_id from database is already an integer
             # Get assessments for this lecture
             assessments = db.get_records("assessment", {"lecture_id": lecture_id})
             assessment_ids = [a["id"] for a in assessments]
 
             # Delete assessment-related data
             for assessment_id in assessment_ids:
+                # assessment_id from database is already an integer
                 # Delete questions
                 questions = db.get_records("question", {"assessment_id": assessment_id})
                 for question in questions:
@@ -1212,13 +1285,13 @@ async def delete_course(
         logger.info(f"Deleted {len(lecture_ids)} lectures and related data")
 
         # 3. Delete enrollments (references course_id and semester_id)
-        enrollments = db.get_records("enrollment", {"course_id": course_id}, use_cache=False)
+        enrollments = db.get_records("enrollment", {"course_id": course_int_id}, use_cache=False)
         for enrollment in enrollments:
             db.delete_record("enrollment", enrollment["id"])
         logger.info(f"Deleted {len(enrollments)} enrollments")
 
         # 4. Delete assessments that reference course_id directly (not via lecture)
-        course_assessments = db.get_records("assessment", {"course_id": course_id}, use_cache=False)
+        course_assessments = db.get_records("assessment", {"course_id": course_int_id}, use_cache=False)
         for assessment in course_assessments:
             # Delete questions
             questions = db.get_records("question", {"assessment_id": assessment["id"]})

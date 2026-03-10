@@ -11,7 +11,6 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, status, UploadFile
 
 from admin.dependencies import require_admin
-from dependencies import get_current_user
 from admin.models import (
     BulkEnrollmentRequest,
     BulkEnrollmentResponse,
@@ -37,10 +36,17 @@ from admin.models import (
 )
 from auth.models import UserCreate
 from auth.service import AuthService
+from dependencies import get_current_user
 from logger import logger
 from models.user import User, UserRole
+from services.branding_service import BrandingService
 from services.cache_service import cache
+from services.email_service import email_service
+from settings import settings
+from urllib.parse import urlparse
 from utils.db import get_db
+from utils.datetime_helpers import parse_datetime_safe
+from utils.id_converter import IDConverter
 from utils.query_helpers import EnrollmentQueryHelper
 
 router = APIRouter()
@@ -156,11 +162,21 @@ async def list_teachers(
     _, university_id = admin_data
 
     try:
-        # Get all teachers for this university
+        # Convert university_id UUID to integer for database query
+        university_int_id = university_id
+        if IDConverter.is_uuid(university_id):
+            university_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not university_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="University not found",
+                )
+        
+        # Get all teachers for this university using integer ID
         teachers_result = (
             db.admin_client.table("teacher")
             .select("*, users!inner(*)")
-            .eq("university_id", university_id)
+            .eq("university_id", university_int_id)
             .range(skip, skip + limit - 1)
             .execute()
         )
@@ -168,14 +184,23 @@ async def list_teachers(
         teachers = []
         for teacher_data in teachers_result.data or []:
             user_data = teacher_data.get("users", {})
-            teacher_id = teacher_data["id"]
-            user_id = teacher_data["user_id"]
+            teacher_id_int = teacher_data["id"]  # Integer ID from database
+            user_id_int = teacher_data["user_id"]  # Integer ID from database
+            
+            # Convert integer IDs to UUIDs for API response
+            teacher_id_uuid = await IDConverter.int_to_uuid(db, "teacher", teacher_id_int) if teacher_id_int else None
+            if not teacher_id_uuid:
+                teacher_id_uuid = str(teacher_id_int)  # Fallback
+            
+            user_id_uuid = await IDConverter.int_to_uuid(db, "users", user_id_int) if user_id_int else None
+            if not user_id_uuid:
+                user_id_uuid = str(user_id_int)  # Fallback
 
-            # Get courses for this teacher (via lectures)
+            # Get courses for this teacher (via lectures) using integer teacher_id
             courses_result = (
                 db.admin_client.table("lecture")
                 .select("course_id, course!inner(id, name, code)")
-                .eq("teacher_id", teacher_id)
+                .eq("teacher_id", teacher_id_int)  # Use integer ID for query
                 .execute()
             )
 
@@ -199,11 +224,16 @@ async def list_teachers(
 
             # Get enrollment counts for each course
             course_summaries = []
-            for course_id, course_info in course_details.items():
+            for course_id_int, course_info in course_details.items():
+                # Convert course_id to UUID for API response
+                course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_id_int) if course_id_int else None
+                if not course_id_uuid:
+                    course_id_uuid = str(course_id_int)  # Fallback
+                
                 enrollments_result = (
                     db.admin_client.table("enrollment")
                     .select("id", count="exact")
-                    .eq("course_id", course_id)
+                    .eq("course_id", course_id_int)  # Use integer ID for query
                     .eq("is_active", True)
                     .execute()
                 )
@@ -213,12 +243,12 @@ async def list_teachers(
                     else len(enrollments_result.data or [])
                 )
 
-                # Count lectures for this course
+                # Count lectures for this course using integer IDs
                 lectures_for_course = (
                     db.admin_client.table("lecture")
                     .select("id", count="exact")
-                    .eq("course_id", course_id)
-                    .eq("teacher_id", teacher_id)
+                    .eq("course_id", course_id_int)  # Use integer ID
+                    .eq("teacher_id", teacher_id_int)  # Use integer ID
                     .execute()
                 )
                 course_lecture_count = (
@@ -229,7 +259,7 @@ async def list_teachers(
 
                 course_summaries.append(
                     CourseSummary(
-                        course_id=course_info["id"],
+                        course_id=course_id_uuid,  # Use UUID for API
                         course_name=course_info["name"],
                         course_code=course_info["code"],
                         total_lectures=course_lecture_count,
@@ -239,8 +269,8 @@ async def list_teachers(
 
             teachers.append(
                 TeacherSummary(
-                    teacher_id=teacher_id,
-                    user_id=user_id,
+                    teacher_id=teacher_id_uuid,  # Use UUID for API
+                    user_id=user_id_uuid,  # Use UUID for API
                     first_name=user_data.get("first_name", ""),
                     last_name=user_data.get("last_name", ""),
                     email=user_data.get("email", ""),
@@ -314,11 +344,10 @@ async def create_teacher(
 
         # Send activation email with one-time link
         try:
-            from services.email_service import email_service
-            from settings import settings
-            
             activation_token = AuthService.create_activation_token(new_user.id)
-            activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+            activation_link = (
+                f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+            )
             
             teacher_name = f"{teacher_data.first_name} {teacher_data.last_name}".strip()
             email_service.send_activation_email(
@@ -328,7 +357,7 @@ async def create_teacher(
             )
             logger.info(f"Activation email sent to {teacher_data.email}")
         except Exception as email_error:
-            logger.warning(f"Failed to send activation email: {str(email_error)}")
+            logger.warning(f"Failed to send activation email: {email_error!s}")
 
         return {
             "message": "Teacher account created successfully",
@@ -394,7 +423,6 @@ async def list_students(
                 semester = enrollment.get("semester", {})
 
                 enrolled_at_str = enrollment.get("enrolled_at")
-                from utils.datetime_helpers import parse_datetime_safe
                 enrolled_at = parse_datetime_safe(enrolled_at_str)
 
                 enrollment_summaries.append(
@@ -474,7 +502,6 @@ async def search_student_by_id(
             semester = enrollment.get("semester", {})
 
             enrolled_at_str = enrollment.get("enrolled_at")
-            from utils.datetime_helpers import parse_datetime_safe
             enrolled_at = parse_datetime_safe(enrolled_at_str)
 
             enrollment_summaries.append(
@@ -562,11 +589,10 @@ async def create_student(
         )
 
         # Send activation email with one-time link in background (non-blocking)
-        from services.email_service import email_service
-        from settings import settings
-        
         activation_token = AuthService.create_activation_token(new_user.id)
-        activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+        activation_link = (
+            f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+        )
         student_name = f"{student_data.first_name} {student_data.last_name}".strip()
         
         # Add email sending as background task (won't block the response)
@@ -636,11 +662,30 @@ async def enroll_student_in_course(
 
         student_db_id = student_result.data[0]["id"]
 
+        # Convert course_id and semester_id from UUIDs to integer IDs if needed
+        course_int_id = enrollment_request.course_id
+        if IDConverter.is_uuid(enrollment_request.course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", enrollment_request.course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found in your university",
+                )
+
+        semester_int_id = enrollment_request.semester_id
+        if IDConverter.is_uuid(enrollment_request.semester_id):
+            semester_int_id = await IDConverter.uuid_to_int(db, "semester", enrollment_request.semester_id)
+            if not semester_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Semester not found in your university",
+                )
+
         # Verify course belongs to this university
         course_result = (
             db.admin_client.table("course")
             .select("id, name, code")
-            .eq("id", enrollment_request.course_id)
+            .eq("id", course_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -658,7 +703,7 @@ async def enroll_student_in_course(
         semester_result = (
             db.admin_client.table("semester")
             .select("id, name, university_id")
-            .eq("id", enrollment_request.semester_id)
+            .eq("id", semester_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -675,7 +720,7 @@ async def enroll_student_in_course(
             db.admin_client.table("enrollment")
             .select("*")
             .eq("student_id", str(student_db_id))
-            .eq("course_id", enrollment_request.course_id)
+            .eq("course_id", course_int_id)
             .execute()
         )
 
@@ -692,7 +737,7 @@ async def enroll_student_in_course(
                 # Reactivate the enrollment
                 db.admin_client.table("enrollment").update({
                     "is_active": True,
-                    "semester_id": enrollment_request.semester_id,
+                    "semester_id": semester_int_id,
                     "enrolled_at": datetime.utcnow().isoformat(),
                 }).eq("id", enrollment["id"]).execute()
 
@@ -710,8 +755,8 @@ async def enroll_student_in_course(
         enrollment_data = {
             "id": str(uuid4()),
             "student_id": str(student_db_id),
-            "course_id": enrollment_request.course_id,
-            "semester_id": enrollment_request.semester_id,
+            "course_id": course_int_id,
+            "semester_id": semester_int_id,
             "enrolled_at": datetime.utcnow().isoformat(),
             "is_active": True,
         }
@@ -728,9 +773,6 @@ async def enroll_student_in_course(
         )
 
         # Send enrollment confirmation email in background (non-blocking)
-        from services.email_service import email_service
-        from settings import settings
-        
         # Get student user info
         student_user_result = (
             db.admin_client.table("student")
@@ -748,7 +790,7 @@ async def enroll_student_in_course(
             teacher_result = (
                 db.admin_client.table("course")
                 .select("teacher_id, teacher!inner(*, users!inner(*))")
-                .eq("id", enrollment_request.course_id)
+                .eq("id", course_int_id)
                 .execute()
             )
             
@@ -801,11 +843,21 @@ async def get_course_enrollments(
     _, university_id = admin_data
 
     try:
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found in your university",
+                )
+
         # Verify course belongs to this university
         course_result = (
             db.admin_client.table("course")
             .select("id, name, code")
-            .eq("id", course_id)
+            .eq("id", course_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -821,7 +873,7 @@ async def get_course_enrollments(
         enrollments_result = (
             db.admin_client.table("enrollment")
             .select("*, student!inner(*, users!inner(*))")
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("is_active", True)
             .execute()
         )
@@ -843,7 +895,6 @@ async def get_course_enrollments(
                 semester = enr.get("semester", {})
 
                 enrolled_at_str = enr.get("enrolled_at")
-                from utils.datetime_helpers import parse_datetime_safe
                 enrolled_at = parse_datetime_safe(enrolled_at_str)
 
                 enrollment_summaries.append(
@@ -899,21 +950,34 @@ async def list_university_courses(
     _, university_id = admin_data
 
     try:
-        # Get all courses for this university
-        courses = db.get_records(
-            "course",
-            filters={"university_id": university_id},
-            skip=0,
-            limit=1000,
-            use_cache=True,
+        # Convert university_id UUID to integer for database query
+        university_int_id = university_id
+        if IDConverter.is_uuid(university_id):
+            university_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not university_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="University not found",
+                )
+        
+        # Get all courses for this university using integer ID
+        # Use direct query instead of get_records to ensure integer ID is used correctly
+        courses_result = (
+            db.admin_client.table("course")
+            .select("*")
+            .eq("university_id", university_int_id)  # Use integer ID directly
+            .range(0, 999)
+            .execute()
         )
+        courses_raw = courses_result.data if courses_result.data else []
 
-        if not courses:
+        if not courses_raw:
             return []
 
-        course_ids = [c["id"] for c in courses]
+        # Extract integer course IDs for enrollment query
+        course_ids = [c["id"] for c in courses_raw]  # These are integer IDs
 
-        # Batch fetch enrollment counts for all courses
+        # Batch fetch enrollment counts for all courses using integer IDs
         enrollments_result = (
             db.admin_client.table("enrollment")
             .select("course_id")
@@ -927,14 +991,25 @@ async def list_university_courses(
             cid = e.get("course_id")
             enrollment_counts[cid] = enrollment_counts.get(cid, 0) + 1
 
-        # Enrich courses with enrollment counts
+        # Enrich courses with enrollment counts and convert IDs to UUIDs
         enriched_courses = []
-        for course in courses:
-            course_id = course.get("id")
+        for course in courses_raw:
+            course_id_int = course.get("id")
+            # Convert integer course_id to UUID for API response
+            course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_id_int) if course_id_int else None
+            if not course_id_uuid:
+                course_id_uuid = course.get("uuid") or str(course_id_int)  # Use existing uuid or fallback
+            
+            # Convert all IDs in course dict to UUIDs
+            course_dict = dict(course)
+            course_dict["id"] = course_id_uuid
+            if "uuid" not in course_dict:
+                course_dict["uuid"] = course_id_uuid
+            
             enriched_courses.append(
                 {
-                    **course,
-                    "total_enrollments": enrollment_counts.get(course_id, 0),
+                    **course_dict,
+                    "total_enrollments": enrollment_counts.get(course_id_int, 0),
                 }
             )
 
@@ -964,11 +1039,21 @@ async def assign_course_to_teacher(
     admin_user, university_id = admin_data
 
     try:
+        # Convert course_id from UUID to integer ID if needed
+        course_int_id = assignment_request.course_id
+        if IDConverter.is_uuid(assignment_request.course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", assignment_request.course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found in your university",
+                )
+
         # Verify course belongs to admin's university
         course_result = (
             db.admin_client.table("course")
             .select("id, name, code, university_id")
-            .eq("id", assignment_request.course_id)
+            .eq("id", course_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -982,12 +1067,32 @@ async def assign_course_to_teacher(
 
         course = course_result.data[0]
 
-        # Get teacher profile for the user
+        # Convert teacher_user_id from UUID to integer if needed
+        teacher_user_int_id = assignment_request.teacher_user_id
+        if IDConverter.is_uuid(assignment_request.teacher_user_id):
+            teacher_user_int_id = await IDConverter.uuid_to_int(db, "users", assignment_request.teacher_user_id)
+            if not teacher_user_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Teacher user not found",
+                )
+        
+        # Convert university_id UUID to integer for query
+        university_int_id = university_id
+        if IDConverter.is_uuid(university_id):
+            university_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not university_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="University not found",
+                )
+        
+        # Get teacher profile for the user using integer IDs
         teacher_result = (
             db.admin_client.table("teacher")
             .select("id, user_id, university_id")
-            .eq("user_id", assignment_request.teacher_user_id)
-            .eq("university_id", university_id)
+            .eq("user_id", teacher_user_int_id)  # Use integer ID
+            .eq("university_id", university_int_id)  # Use integer ID
             .limit(1)
             .execute()
         )
@@ -999,13 +1104,23 @@ async def assign_course_to_teacher(
             )
 
         teacher = teacher_result.data[0]
-        teacher_id = teacher["id"]
+        teacher_id = teacher["id"]  # Already an integer
+
+        # Convert admin_user.id from UUID to integer for assigned_by
+        admin_user_int_id = admin_user.id
+        if IDConverter.is_uuid(admin_user.id):
+            admin_user_int_id = await IDConverter.uuid_to_int(db, "users", admin_user.id)
+            if not admin_user_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Admin user ID conversion failed",
+                )
 
         # Check if assignment already exists
         existing_assignment = (
             db.admin_client.table("course_teacher")
             .select("*")
-            .eq("course_id", assignment_request.course_id)
+            .eq("course_id", course_int_id)
             .eq("teacher_id", teacher_id)
             .execute()
         )
@@ -1016,7 +1131,7 @@ async def assign_course_to_teacher(
             if not assignment.get("is_active"):
                 db.admin_client.table("course_teacher").update({
                     "is_active": True,
-                    "assigned_by": admin_user.id,
+                    "assigned_by": admin_user_int_id,  # Use integer ID
                     "assigned_at": datetime.utcnow().isoformat(),
                 }).eq("id", assignment["id"]).execute()
 
@@ -1030,26 +1145,38 @@ async def assign_course_to_teacher(
                     f"course {assignment_request.course_id} -> teacher {teacher_id}"
                 )
 
+                # Convert assignment ID to UUID for response
+                assignment_id_uuid = await IDConverter.int_to_uuid(db, "course_teacher", assignment["id"]) if assignment.get("id") else None
+                if not assignment_id_uuid:
+                    assignment_id_uuid = assignment.get("uuid") or str(assignment["id"])
+                
                 return {
                     "message": "Course assignment reactivated successfully",
-                    "assignment_id": assignment["id"],
+                    "assignment_id": assignment_id_uuid,  # Use UUID for API
                     "course_name": course["name"],
                     "course_code": course["code"],
                 }
             else:
+                # Convert assignment ID to UUID for response
+                assignment_id_uuid = await IDConverter.int_to_uuid(db, "course_teacher", assignment["id"]) if assignment.get("id") else None
+                if not assignment_id_uuid:
+                    assignment_id_uuid = assignment.get("uuid") or str(assignment["id"])
+                
                 return {
                     "message": "Course is already assigned to this teacher",
-                    "assignment_id": assignment["id"],
+                    "assignment_id": assignment_id_uuid,  # Use UUID for API
                     "course_name": course["name"],
                     "course_code": course["code"],
                 }
 
         # Create new assignment
+        # Don't set 'id' - let database auto-generate integer PK
+        # Generate UUID for external API compatibility
         assignment_data = {
-            "id": str(uuid4()),
-            "course_id": assignment_request.course_id,
-            "teacher_id": teacher_id,
-            "assigned_by": admin_user.id,
+            "uuid": str(uuid4()),  # UUID for external APIs
+            "course_id": course_int_id,  # Integer FK
+            "teacher_id": teacher_id,  # Integer FK
+            "assigned_by": admin_user_int_id,  # Integer FK
             "assigned_at": datetime.utcnow().isoformat(),
             "is_active": True,
         }
@@ -1106,14 +1233,20 @@ async def assign_course_to_teacher(
                 f"courses:teacher_courses:{teacher_id}"
             )
 
+            # Convert assignment ID to UUID for API response
+            assignment_id_uuid = await IDConverter.int_to_uuid(db, "course_teacher", assignment_id) if assignment_id else None
+            if not assignment_id_uuid:
+                # Try to get UUID from the result data
+                assignment_id_uuid = result.data[0].get("uuid") or str(assignment_id)
+            
             logger.info(
                 f"Admin {admin_user.id} assigned course {assignment_request.course_id} "
-                f"to teacher {teacher_id} (assignment_id: {assignment_id})"
+                f"to teacher {teacher_id} (assignment_id: {assignment_id_uuid})"
             )
 
             return {
                 "message": "Course assigned to teacher successfully",
-                "assignment_id": assignment_id,
+                "assignment_id": assignment_id_uuid,  # Use UUID for API
                 "course_name": course["name"],
                 "course_code": course["code"],
             }
@@ -1133,7 +1266,7 @@ async def assign_course_to_teacher(
                 existing_check = (
                     db.admin_client.table("course_teacher")
                     .select("*")
-                    .eq("course_id", assignment_request.course_id)
+                    .eq("course_id", course_int_id)
                     .eq("teacher_id", teacher_id)
                     .execute()
                 )
@@ -1144,13 +1277,18 @@ async def assign_course_to_teacher(
                     if not existing.get("is_active"):
                         db.admin_client.table("course_teacher").update({
                             "is_active": True,
-                            "assigned_by": admin_user.id,
+                            "assigned_by": admin_user_int_id,  # Use integer ID
                             "assigned_at": datetime.utcnow().isoformat(),
                         }).eq("id", existing["id"]).execute()
                         
                         cache.caches["courses"].delete_pattern(
                             f"courses:teacher_courses:{teacher_id}"
                         )
+                        
+                        # Convert assignment ID to UUID for response
+                        existing_id_uuid = await IDConverter.int_to_uuid(db, "course_teacher", existing["id"]) if existing.get("id") else None
+                        if not existing_id_uuid:
+                            existing_id_uuid = existing.get("uuid") or str(existing["id"])
                         
                         logger.info(
                             f"Admin {admin_user.id} reactivated course assignment: "
@@ -1159,22 +1297,26 @@ async def assign_course_to_teacher(
                         
                         return {
                             "message": "Course assignment reactivated successfully",
-                            "assignment_id": existing["id"],
+                            "assignment_id": existing_id_uuid,  # Use UUID for API
                             "course_name": course["name"],
                             "course_code": course["code"],
                         }
                     else:
-                        # Already active
+                        # Already active - convert ID to UUID for response
+                        existing_id_uuid = await IDConverter.int_to_uuid(db, "course_teacher", existing["id"]) if existing.get("id") else None
+                        if not existing_id_uuid:
+                            existing_id_uuid = existing.get("uuid") or str(existing["id"])
+                        
                         return {
                             "message": "Course is already assigned to this teacher",
-                            "assignment_id": existing["id"],
+                            "assignment_id": existing_id_uuid,  # Use UUID for API
                             "course_name": course["name"],
                             "course_code": course["code"],
                         }
             
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error creating course assignment: {str(insert_error)}",
+                detail=f"Error creating course assignment: {insert_error!s}",
             ) from insert_error
 
     except HTTPException:
@@ -1251,7 +1393,6 @@ async def create_semester(
             )
 
         created_semester = result.data[0]
-        from utils.datetime_helpers import parse_datetime_safe
 
         # Auto-create a "Default Module" for the new semester
         try:
@@ -1338,7 +1479,6 @@ async def list_semesters(
             module_counts[sid] = module_counts.get(sid, 0) + 1
 
         semesters = []
-        from utils.datetime_helpers import parse_datetime_safe
         for semester in semesters_result.data or []:
             semesters.append(
                 SemesterResponse(
@@ -1392,7 +1532,6 @@ async def get_semester(
             )
 
         semester = semester_result.data[0]
-        from utils.datetime_helpers import parse_datetime_safe
 
         return SemesterResponse(
             id=semester["id"],
@@ -1428,11 +1567,21 @@ async def update_semester(
     admin_user, university_id = admin_data
 
     try:
+        # Convert UUID to integer ID if needed
+        semester_int_id = semester_id
+        if IDConverter.is_uuid(semester_id):
+            semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id)
+            if not semester_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Semester not found in your university",
+                )
+
         # Verify semester exists and belongs to this university
         semester_result = (
             db.admin_client.table("semester")
             .select("*")
-            .eq("id", semester_id)
+            .eq("id", semester_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -1475,7 +1624,6 @@ async def update_semester(
             update_data["end_date"] = semester_request.end_date.isoformat()
 
         # Validate dates if both are being updated
-        from utils.datetime_helpers import parse_datetime_safe
         start_date = (
             parse_datetime_safe(update_data.get("start_date"))
             if "start_date" in update_data
@@ -1497,7 +1645,7 @@ async def update_semester(
         result = (
             db.admin_client.table("semester")
             .update(update_data)
-            .eq("id", semester_id)
+            .eq("id", semester_int_id)
             .execute()
         )
 
@@ -1548,11 +1696,21 @@ async def delete_semester(
     admin_user, university_id = admin_data
 
     try:
+        # Convert UUID to integer ID if needed
+        semester_int_id = semester_id
+        if IDConverter.is_uuid(semester_id):
+            semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id)
+            if not semester_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Semester not found in your university",
+                )
+
         # Verify semester exists and belongs to this university
         semester_result = (
             db.admin_client.table("semester")
             .select("*")
-            .eq("id", semester_id)
+            .eq("id", semester_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -1568,7 +1726,7 @@ async def delete_semester(
         enrollments_check = (
             db.admin_client.table("enrollment")
             .select("id")
-            .eq("semester_id", semester_id)
+            .eq("semester_id", semester_int_id)
             .limit(1)
             .execute()
         )
@@ -1580,7 +1738,7 @@ async def delete_semester(
             )
 
         # Delete semester
-        db.admin_client.table("semester").delete().eq("id", semester_id).execute()
+        db.admin_client.table("semester").delete().eq("id", semester_int_id).execute()
 
         logger.info(
             f"Admin {admin_user.id} deleted semester {semester_id} "
@@ -1620,9 +1778,6 @@ async def bulk_student_signup(
     errors = []
     
     try:
-        from services.email_service import email_service
-        from settings import settings
-        
         for student_data in bulk_request.students:
             try:
                 # Check if student_id already exists in this university
@@ -1702,15 +1857,15 @@ async def bulk_student_signup(
                     "student_id": student_data.student_id,
                     "error": str(e)
                 })
-                errors.append(f"Student {student_data.student_id}: {str(e)}")
+                errors.append(f"Student {student_data.student_id}: {e!s}")
             except Exception as e:
                 logger.error(f"Error creating student {student_data.student_id}: {e!s}")
                 failed_students.append({
                     "email": student_data.email,
                     "student_id": student_data.student_id,
-                    "error": f"Internal error: {str(e)}"
+                    "error": f"Internal error: {e!s}"
                 })
-                errors.append(f"Student {student_data.student_id}: {str(e)}")
+                errors.append(f"Student {student_data.student_id}: {e!s}")
         
         result = BulkOperationResult(
             total=len(bulk_request.students),
@@ -1729,7 +1884,7 @@ async def bulk_student_signup(
         logger.error(f"Error in bulk student signup: {e!s}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing bulk signup: {str(e)}",
+            detail=f"Error processing bulk signup: {e!s}",
         ) from e
 
 
@@ -1751,11 +1906,30 @@ async def bulk_student_enrollment(
     errors = []
     
     try:
+        # Convert course_id and semester_id from UUIDs to integer IDs if needed
+        course_int_id = bulk_request.course_id
+        if IDConverter.is_uuid(bulk_request.course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", bulk_request.course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found in your university",
+                )
+
+        semester_int_id = bulk_request.semester_id
+        if IDConverter.is_uuid(bulk_request.semester_id):
+            semester_int_id = await IDConverter.uuid_to_int(db, "semester", bulk_request.semester_id)
+            if not semester_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Semester not found in your university",
+                )
+
         # Verify course belongs to this university
         course_result = (
             db.admin_client.table("course")
             .select("id, name, code, university_id")
-            .eq("id", bulk_request.course_id)
+            .eq("id", course_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -1773,7 +1947,7 @@ async def bulk_student_enrollment(
         semester_result = (
             db.admin_client.table("semester")
             .select("id, name, university_id")
-            .eq("id", bulk_request.semester_id)
+            .eq("id", semester_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -1791,7 +1965,7 @@ async def bulk_student_enrollment(
         teacher_result = (
             db.admin_client.table("course")
             .select("teacher_id, teacher!inner(*, users!inner(*))")
-            .eq("id", bulk_request.course_id)
+            .eq("id", course_int_id)
             .execute()
         )
         
@@ -1800,9 +1974,6 @@ async def bulk_student_enrollment(
             teacher_data = teacher_result.data[0].get("teacher", {})
             teacher_user_data = teacher_data.get("users", {})
             teacher_name = f"{teacher_user_data.get('first_name', '')} {teacher_user_data.get('last_name', '')}".strip()
-        
-        from services.email_service import email_service
-        from settings import settings
         
         for enrollment_item in bulk_request.students:
             try:
@@ -1842,7 +2013,7 @@ async def bulk_student_enrollment(
                     db.admin_client.table("enrollment")
                     .select("*")
                     .eq("student_id", str(student_db_id))
-                    .eq("course_id", bulk_request.course_id)
+                    .eq("course_id", course_int_id)
                     .execute()
                 )
                 
@@ -1861,7 +2032,7 @@ async def bulk_student_enrollment(
                         # Reactivate the enrollment
                         db.admin_client.table("enrollment").update({
                             "is_active": True,
-                            "semester_id": bulk_request.semester_id,
+                            "semester_id": semester_int_id,
                             "enrolled_at": datetime.utcnow().isoformat(),
                         }).eq("id", enrollment["id"]).execute()
                         
@@ -1873,8 +2044,8 @@ async def bulk_student_enrollment(
                     enrollment_data = {
                         "id": str(uuid4()),
                         "student_id": str(student_db_id),
-                        "course_id": bulk_request.course_id,
-                        "semester_id": bulk_request.semester_id,
+                        "course_id": course_int_id,
+                        "semester_id": semester_int_id,
                         "enrolled_at": datetime.utcnow().isoformat(),
                         "is_active": True,
                     }
@@ -1923,7 +2094,7 @@ async def bulk_student_enrollment(
                     "student_id": enrollment_item.student_id,
                     "error": str(e)
                 })
-                errors.append(f"Student {enrollment_item.student_id}: {str(e)}")
+                errors.append(f"Student {enrollment_item.student_id}: {e!s}")
         
         result = BulkOperationResult(
             total=len(bulk_request.students),
@@ -1944,7 +2115,7 @@ async def bulk_student_enrollment(
         logger.error(f"Error in bulk enrollment: {e!s}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing bulk enrollment: {str(e)}",
+            detail=f"Error processing bulk enrollment: {e!s}",
         ) from e
 
 
@@ -1980,11 +2151,21 @@ async def create_module(
                 detail="semester_id is required",
             )
 
+        # Convert UUID to integer ID if needed
+        semester_int_id = semester_id
+        if IDConverter.is_uuid(semester_id):
+            semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id)
+            if not semester_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Semester not found in your university",
+                )
+
         # Verify semester belongs to this university
         semester_result = (
             db.admin_client.table("semester")
             .select("id")
-            .eq("id", semester_id)
+            .eq("id", semester_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -1999,7 +2180,7 @@ async def create_module(
         existing = (
             db.admin_client.table("module")
             .select("id")
-            .eq("semester_id", semester_id)
+            .eq("semester_id", semester_int_id)
             .eq("name", name)
             .limit(1)
             .execute()
@@ -2046,7 +2227,7 @@ async def create_module(
 async def list_modules(
     admin_data: Annotated[tuple[User, str], Depends(require_admin)],
     db=Depends(get_db),
-    semester_id: str = None,
+    semester_id: str | None = None,
 ):
     """
     List all modules for the admin's university.
@@ -2062,7 +2243,14 @@ async def list_modules(
             .eq("university_id", university_id)
         )
         if semester_id:
-            query = query.eq("semester_id", semester_id)
+            # Convert UUID to integer ID if needed
+            semester_int_id = semester_id
+            if IDConverter.is_uuid(semester_id):
+                semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id)
+                if semester_int_id:
+                    query = query.eq("semester_id", semester_int_id)
+            else:
+                query = query.eq("semester_id", semester_id)
 
         modules_result = query.order("display_order").order("created_at").execute()
 
@@ -2126,11 +2314,21 @@ async def get_module(
 
         module = module_result.data[0]
 
+        # Convert UUID to integer ID if needed
+        module_int_id = module_id
+        if IDConverter.is_uuid(module_id):
+            module_int_id = await IDConverter.uuid_to_int(db, "module", module_id)
+            if not module_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Module not found",
+                )
+
         # Get courses
         courses_result = (
             db.admin_client.table("module_course")
             .select("course_id, display_order, course!inner(id, name, code, description)")
-            .eq("module_id", module_id)
+            .eq("module_id", module_int_id)
             .order("display_order")
             .execute()
         )
@@ -2169,11 +2367,21 @@ async def update_module(
     admin_user, university_id = admin_data
 
     try:
+        # Convert UUID to integer ID if needed
+        module_int_id = module_id
+        if IDConverter.is_uuid(module_id):
+            module_int_id = await IDConverter.uuid_to_int(db, "module", module_id)
+            if not module_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Module not found",
+                )
+
         # Verify module exists
         module_result = (
             db.admin_client.table("module")
             .select("*")
-            .eq("id", module_id)
+            .eq("id", module_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -2187,17 +2395,19 @@ async def update_module(
 
         update_data = {"updated_at": datetime.utcnow().isoformat()}
 
-        if "name" in request and request["name"]:
+        if request.get("name"):
             update_data["name"] = request["name"].strip()
         if "description" in request:
-            update_data["description"] = (request["description"] or "").strip() or None
+            update_data["description"] = (
+                (request.get("description") or "").strip() or None
+            )
         if "display_order" in request:
             update_data["display_order"] = request["display_order"]
 
         result = (
             db.admin_client.table("module")
             .update(update_data)
-            .eq("id", module_id)
+            .eq("id", module_int_id)
             .execute()
         )
 
@@ -2233,10 +2443,20 @@ async def delete_module(
     admin_user, university_id = admin_data
 
     try:
+        # Convert UUID to integer ID if needed
+        module_int_id = module_id
+        if IDConverter.is_uuid(module_id):
+            module_int_id = await IDConverter.uuid_to_int(db, "module", module_id)
+            if not module_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Module not found",
+                )
+
         module_result = (
             db.admin_client.table("module")
             .select("id, name")
-            .eq("id", module_id)
+            .eq("id", module_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -2251,7 +2471,7 @@ async def delete_module(
         module_name = module_result.data[0]["name"]
 
         # Delete module (module_course entries cascade-delete via FK)
-        db.admin_client.table("module").delete().eq("id", module_id).execute()
+        db.admin_client.table("module").delete().eq("id", module_int_id).execute()
 
         logger.info(f"Admin {admin_user.id} deleted module '{module_name}' ({module_id})")
         return {"message": f"Module '{module_name}' deleted successfully"}
@@ -2280,11 +2500,21 @@ async def assign_courses_to_module(
     admin_user, university_id = admin_data
 
     try:
+        # Convert UUID to integer ID if needed
+        module_int_id = module_id
+        if IDConverter.is_uuid(module_id):
+            module_int_id = await IDConverter.uuid_to_int(db, "module", module_id)
+            if not module_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Module not found",
+                )
+
         # Verify module exists
         module_result = (
             db.admin_client.table("module")
             .select("id, name")
-            .eq("id", module_id)
+            .eq("id", module_int_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -2303,17 +2533,28 @@ async def assign_courses_to_module(
                 detail="course_ids list is required",
             )
 
+        # Convert course_ids from UUIDs to integer IDs if needed (before verification query)
+        course_int_ids = []
+        for course_id in course_ids:
+            if IDConverter.is_uuid(course_id):
+                course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+                if course_int_id:
+                    course_int_ids.append(course_int_id)
+            else:
+                course_int_ids.append(course_id)
+
         # Verify all courses belong to this university
         courses_result = (
             db.admin_client.table("course")
             .select("id, name")
-            .in_("id", course_ids)
+            .in_("id", course_int_ids)
             .eq("university_id", university_id)
             .execute()
         )
 
         found_ids = {c["id"] for c in (courses_result.data or [])}
-        missing = set(course_ids) - found_ids
+        # Compare with integer IDs for missing check
+        missing = set(course_int_ids) - found_ids
         if missing:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -2324,20 +2565,20 @@ async def assign_courses_to_module(
         existing_result = (
             db.admin_client.table("module_course")
             .select("course_id")
-            .eq("module_id", module_id)
-            .in_("course_id", course_ids)
+            .eq("module_id", module_int_id)
+            .in_("course_id", course_int_ids)
             .execute()
         )
         existing_ids = {mc["course_id"] for mc in (existing_result.data or [])}
 
         # Insert new assignments
         new_assignments = []
-        for course_id in course_ids:
-            if course_id not in existing_ids:
+        for course_int_id in course_int_ids:
+            if course_int_id not in existing_ids:
                 new_assignments.append({
                     "id": str(uuid4()),
-                    "module_id": module_id,
-                    "course_id": course_id,
+                    "module_id": module_int_id,
+                    "course_id": course_int_id,
                     "display_order": 0,
                     "created_at": datetime.utcnow().isoformat(),
                 })
@@ -2674,8 +2915,6 @@ async def upload_institute_logo(
     admin_user, university_id = admin_data
 
     try:
-        from services.branding_service import BrandingService
-
         # Get existing logo URL from database (for cleanup)
         existing_university = (
             db.admin_client.table("university")
@@ -2713,7 +2952,6 @@ async def upload_institute_logo(
         if logo_url:
             # Extract path from public URL (e.g., extract from full URL)
             try:
-                from urllib.parse import urlparse
                 parsed = urlparse(logo_url)
                 logo_path = parsed.path.lstrip("/")
             except Exception:
@@ -2758,11 +2996,18 @@ async def get_institute_logo(
         )
 
     try:
+        # Convert UUID to integer ID if needed
+        university_int_id = university_id
+        if IDConverter.is_uuid(university_id):
+            university_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not university_int_id:
+                university_int_id = university_id  # Fallback
+
         # Get university record
         university_result = (
             db.admin_client.table("university")
             .select("logo_url")
-            .eq("id", university_id)
+            .eq("id", university_int_id)
             .limit(1)
             .execute()
         )
@@ -2800,16 +3045,21 @@ async def delete_institute_logo(
     admin_user, university_id = admin_data
 
     try:
-        from services.branding_service import BrandingService
-
         # Delete logo file from storage
         await BrandingService.delete_logo(university_id)
+
+        # Convert UUID to integer ID if needed
+        university_int_id = university_id
+        if IDConverter.is_uuid(university_id):
+            university_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not university_int_id:
+                university_int_id = university_id  # Fallback
 
         # Update university record to remove logo URL
         update_result = (
             db.admin_client.table("university")
             .update({"logo_url": None, "updated_at": datetime.utcnow().isoformat()})
-            .eq("id", university_id)
+            .eq("id", university_int_id)
             .execute()
         )
 

@@ -27,10 +27,12 @@ class UniversityType(str, Enum):
 class University(SQLModel, table=True):
     """University entity."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID string
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
     name: str = Field(index=True)
     location: Optional[str] = None
     type: str = Field(default="GENERAL")  # MEDICAL, ENGINEERING, LAW, BUSINESS, ARTS, GENERAL
+    logo_url: Optional[str] = None  # Logo URL for branding
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

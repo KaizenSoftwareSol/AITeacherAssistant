@@ -52,6 +52,7 @@ from utils.query_helpers import (
     verify_student_enrollment,
     get_lecture_if_enrolled,
 )
+from utils.id_converter import IDConverter
 from supabase_config import supabase
 
 router = APIRouter()
@@ -76,7 +77,9 @@ async def require_student(
     
     # Get student profile with caching
     try:
-        student_data = StudentQueryHelper.get_student_profile(db, str(user.id))
+        # Use UUID for external lookups, but query helpers will convert to integer ID
+        user_uuid = user.uuid if hasattr(user, "uuid") and user.uuid else str(user.id)
+        student_data = await StudentQueryHelper.get_student_profile(db, user_uuid)
         
         if not student_data:
             raise HTTPException(
@@ -136,11 +139,29 @@ async def enroll_by_token(
                 detail="This enrollment link is not for your account",
             )
         
+        # Convert UUIDs to integer IDs if needed
+        course_int_id = course_id
+        semester_int_id = semester_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+        if IDConverter.is_uuid(semester_id):
+            semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id)
+            if not semester_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Semester not found",
+                )
+        
         # Verify course exists and belongs to student's university
         course_result = (
             db.admin_client.table("course")
             .select("id, name, code, university_id")
-            .eq("id", course_id)
+            .eq("id", course_int_id)
             .eq("university_id", str(student.university_id))
             .limit(1)
             .execute()
@@ -158,8 +179,8 @@ async def enroll_by_token(
         semester_result = (
             db.admin_client.table("semester")
             .select("id, name, course_id")
-            .eq("id", semester_id)
-            .eq("course_id", course_id)
+            .eq("id", semester_int_id)
+            .eq("course_id", course_int_id)
             .limit(1)
             .execute()
         )
@@ -175,7 +196,7 @@ async def enroll_by_token(
             db.admin_client.table("enrollment")
             .select("*")
             .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .execute()
         )
         
@@ -190,9 +211,10 @@ async def enroll_by_token(
                 }
             else:
                 # Reactivate the enrollment
+                # semester_int_id is already defined earlier in the function
                 db.admin_client.table("enrollment").update({
                     "is_active": True,
-                    "semester_id": semester_id,
+                    "semester_id": semester_int_id,
                     "enrolled_at": datetime.utcnow().isoformat(),
                 }).eq("id", enrollment["id"]).execute()
                 
@@ -209,8 +231,8 @@ async def enroll_by_token(
         enrollment_data = {
             "id": str(uuid4()),
             "student_id": str(student.id),
-            "course_id": course_id,
-            "semester_id": semester_id,
+            "course_id": course_int_id,
+            "semester_id": semester_int_id,
             "enrolled_at": datetime.utcnow().isoformat(),
             "is_active": True,
         }
@@ -231,10 +253,11 @@ async def enroll_by_token(
         # Get teacher info to send notification
         try:
             # Find lectures for this course to get teacher_id
+            # Use course_int_id which was already converted
             lecture_result = (
                 db.admin_client.table("lecture")
                 .select("teacher_id")
-                .eq("course_id", course_id)
+                .eq("course_id", course_int_id)
                 .limit(1)
                 .execute()
             )
@@ -307,7 +330,7 @@ async def enroll_in_course(
         logger.info(f"Student {student.id} attempting to enroll in course code: {request.course_code}")
         
         # Find the course by code (cached)
-        course = CourseQueryHelper.get_course_by_code(
+        course = await CourseQueryHelper.get_course_by_code(
             db, request.course_code, str(student.university_id)
         )
         
@@ -319,12 +342,19 @@ async def enroll_in_course(
         
         course_id = course["id"]
         
+        # Convert course_id to integer if needed (from query helper might return UUID)
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                course_int_id = course_id  # Fallback
+        
         # Check if already enrolled
         existing_enrollment = (
             db.admin_client.table("enrollment")
             .select("*")
             .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .execute()
         )
         
@@ -353,12 +383,21 @@ async def enroll_in_course(
         
         # Get the semester (use provided or get latest)
         semester_id = request.semester_id
-        if not semester_id:
+        semester_int_id = None
+        if semester_id:
+            # Convert semester_id to integer if needed
+            if IDConverter.is_uuid(semester_id):
+                semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id)
+                if not semester_int_id:
+                    semester_int_id = semester_id  # Fallback
+            else:
+                semester_int_id = semester_id
+        else:
             # Get the most recent semester for this course
             semester_result = (
                 db.admin_client.table("semester")
                 .select("*")
-                .eq("course_id", course_id)
+                .eq("course_id", course_int_id)
                 .order("start_date", desc=True)
                 .limit(1)
                 .execute()
@@ -366,6 +405,7 @@ async def enroll_in_course(
             
             if semester_result.data and len(semester_result.data) > 0:
                 semester_id = semester_result.data[0]["id"]
+                semester_int_id = semester_id  # From database, should be integer already
             else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -376,8 +416,8 @@ async def enroll_in_course(
         enrollment_data = {
             "id": str(uuid4()),
             "student_id": str(student.id),
-            "course_id": course_id,
-            "semester_id": semester_id,
+            "course_id": course_int_id,
+            "semester_id": semester_int_id,
             "enrolled_at": datetime.utcnow().isoformat(),
             "is_active": True,
         }
@@ -401,7 +441,7 @@ async def enroll_in_course(
             lecture_result = (
                 db.admin_client.table("lecture")
                 .select("teacher_id")
-                .eq("course_id", course_id)
+                .eq("course_id", course_int_id)
                 .limit(1)
                 .execute()
             )
@@ -481,7 +521,8 @@ async def get_my_courses(
             return cached_courses
         
         # Get all active enrollments for this student (cached)
-        enrollments = EnrollmentQueryHelper.get_student_enrollments(db, str(student.id))
+        student_uuid = student.uuid if hasattr(student, "uuid") and student.uuid else str(student.id)
+        enrollments = await EnrollmentQueryHelper.get_student_enrollments(db, student_uuid)
         
         if not enrollments:
             logger.info(f"No enrollments found for student {student.id}")
@@ -529,12 +570,30 @@ async def get_my_courses(
         courses = []
         for enrollment in enrollments:
             course = enrollment.get("course", {})
-            course_id = course.get("id")
+            course_id_int = course.get("id")
             
-            if not course_id:
+            if not course_id_int:
                 continue
             
-            course_lectures = lectures_by_course.get(course_id, [])
+            # Convert integer course_id to UUID for API response
+            course_id_uuid = None
+            if isinstance(course_id_int, int):
+                course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_id_int)
+            elif isinstance(course_id_int, str):
+                if IDConverter.is_uuid(course_id_int):
+                    course_id_uuid = course_id_int
+                else:
+                    # Try to convert string to int then to UUID
+                    try:
+                        course_id_int = int(course_id_int)
+                        course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_id_int)
+                    except ValueError:
+                        course_id_uuid = course_id_int  # Fallback
+            
+            if not course_id_uuid:
+                course_id_uuid = str(course_id_int)  # Final fallback
+            
+            course_lectures = lectures_by_course.get(course_id_int, [])
             total_lectures = len(course_lectures)
             published_lectures = sum(
                 1 for l in course_lectures
@@ -549,7 +608,7 @@ async def get_my_courses(
                     teacher_name = teacher_names.get(teacher_id, "Unknown Teacher")
             
             course_info = StudentCourseInfo(
-                course_id=course_id,
+                course_id=course_id_uuid,  # Use UUID string for API
                 course_code=course.get("code", "N/A"),
                 course_name=course.get("name", "Unnamed Course"),
                 course_description=course.get("description"),
@@ -628,10 +687,56 @@ async def get_my_courses(
                         })
 
             # Attach module + semester info to each course
+            # Note: courses_data has UUID course_id, but enrollment_semesters and course_modules use integer IDs
+            # We need to map UUID back to integer for lookup
+            course_uuid_to_int = {}
+            for enrollment in enrollments:
+                course = enrollment.get("course", {})
+                course_id_int = course.get("id")
+                if course_id_int:
+                    # Convert to UUID to match courses_data
+                    if isinstance(course_id_int, int):
+                        course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_id_int)
+                        if course_id_uuid:
+                            course_uuid_to_int[course_id_uuid] = course_id_int
+            
             for cd in courses_data:
-                cid = cd.get("course_id")
-                cd["semester_name"] = semester_names.get(enrollment_semesters.get(cid, ""))
-                cd["modules"] = course_modules.get(cid, [])
+                course_id_uuid = cd.get("course_id")
+                course_id_int = course_uuid_to_int.get(course_id_uuid)
+                if course_id_int:
+                    cd["semester_name"] = semester_names.get(enrollment_semesters.get(course_id_int, ""))
+                    # Convert module and semester IDs to UUIDs
+                    modules = course_modules.get(course_id_int, [])
+                    converted_modules = []
+                    for mod in modules:
+                        module_id_int = mod.get("module_id")
+                        semester_id_int = mod.get("semester_id")
+                        
+                        # Convert module_id to UUID
+                        module_id_uuid = None
+                        if isinstance(module_id_int, int):
+                            module_id_uuid = await IDConverter.int_to_uuid(db, "module", module_id_int)
+                        if not module_id_uuid:
+                            module_id_uuid = str(module_id_int) if module_id_int else None
+                        
+                        # Convert semester_id to UUID
+                        semester_id_uuid = None
+                        if isinstance(semester_id_int, int):
+                            semester_id_uuid = await IDConverter.int_to_uuid(db, "semester", semester_id_int)
+                        if not semester_id_uuid:
+                            semester_id_uuid = str(semester_id_int) if semester_id_int else None
+                        
+                        converted_modules.append({
+                            "module_id": module_id_uuid,
+                            "module_name": mod.get("module_name"),
+                            "module_display_order": mod.get("module_display_order", 0),
+                            "semester_id": semester_id_uuid,
+                            "semester_name": semester_names.get(semester_id_int, ""),
+                        })
+                    cd["modules"] = converted_modules
+                else:
+                    cd["semester_name"] = None
+                    cd["modules"] = []
 
         # Wrap response
         result = {"university_type": university_type, "courses": courses_data}
@@ -667,6 +772,16 @@ async def get_course_lectures(
     try:
         logger.info(f"Fetching lectures for course {course_id}, student {student.id}")
         
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+        
         # Check cache first
         cache_key = f"course_lectures:{course_id}:{student.id}"
         cached_response = cache.get("lectures", cache_key)
@@ -674,7 +789,8 @@ async def get_course_lectures(
             return cached_response
         
         # Verify student is enrolled in this course (cached)
-        enrollment = EnrollmentQueryHelper.check_enrollment(db, str(student.id), course_id)
+        student_uuid = student.uuid if hasattr(student, "uuid") and student.uuid else str(student.id)
+        enrollment = await EnrollmentQueryHelper.check_enrollment(db, student_uuid, course_id)
         
         if not enrollment:
             raise HTTPException(
@@ -683,7 +799,7 @@ async def get_course_lectures(
             )
         
         # Get course information (cached)
-        course = CourseQueryHelper.get_course_with_cache(db, course_id)
+        course = await CourseQueryHelper.get_course_with_cache(db, course_id)
         
         if not course:
             raise HTTPException(
@@ -692,7 +808,7 @@ async def get_course_lectures(
             )
         
         # Get all published lectures for this course (cached)
-        lectures_data = LectureQueryHelper.get_course_lectures(
+        lectures_data = await LectureQueryHelper.get_course_lectures(
             db, course_id, status_filter=["PUBLISHED", "DELIVERED"]
         )
         
@@ -711,7 +827,7 @@ async def get_course_lectures(
                 first_lecture = (
                     db.admin_client.table("lecture")
                     .select("teacher_id")
-                    .eq("course_id", course_id)
+                    .eq("course_id", course_int_id)
                     .limit(1)
                     .execute()
                 )
@@ -719,7 +835,7 @@ async def get_course_lectures(
                     teacher_id = first_lecture.data[0].get("teacher_id")
             
             if teacher_id:
-                teacher_name = TeacherQueryHelper.get_teacher_name(db, teacher_id)
+                teacher_name = await TeacherQueryHelper.get_teacher_name(db, teacher_id)
         
         # Batch fetch lecture_content for PDFs
         lecture_id_list = [row["id"] for row in lectures_data]
@@ -740,6 +856,9 @@ async def get_course_lectures(
         # Build lecture list with content and pdf info
         lectures = []
         for lecture_data in lectures_data:
+            # Convert integer ID to UUID for API response
+            lecture_uuid = await IDConverter.int_to_uuid(db, "lecture", lecture_data["id"]) if lecture_data.get("id") else None
+            
             pdf_file_name = None
             pdf_file_size = None
             pdf_download_url = None
@@ -757,7 +876,7 @@ async def get_course_lectures(
                     logger.warning(f"Could not get public URL for lecture {lecture_data['id']}: {e}")
 
             lecture_info = StudentLectureInfo(
-                lecture_id=lecture_data["id"],
+                lecture_id=lecture_uuid or str(lecture_data["id"]),  # Use UUID if available
                 title=lecture_data["title"],
                 description=lecture_data.get("description"),
                 summary=lecture_data.get("summary"),
@@ -798,8 +917,26 @@ async def get_course_lectures(
         grouped_dict = {topic: lectures_by_topic[topic] for topic in sorted_topics}
         
         # Build response
+        # Convert integer course_id to UUID for API response
+        course_id_int = course["id"]
+        course_id_uuid = None
+        if isinstance(course_id_int, int):
+            course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_id_int)
+        elif isinstance(course_id_int, str):
+            if IDConverter.is_uuid(course_id_int):
+                course_id_uuid = course_id_int
+            else:
+                try:
+                    course_id_int = int(course_id_int)
+                    course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_id_int)
+                except ValueError:
+                    course_id_uuid = course_id_int
+        
+        if not course_id_uuid:
+            course_id_uuid = str(course_id_int)  # Fallback
+        
         course_info = StudentCourseInfo(
-            course_id=course["id"],
+            course_id=course_id_uuid,  # Use UUID string for API
             course_code=course["code"],
             course_name=course["name"],
             course_description=course.get("description"),
@@ -856,10 +993,18 @@ async def get_lecture_summary(
         logger.info(f"Fetching summary for lecture {lecture_id}, student {student.id}")
         
         # Get lecture and verify access
+        # Convert UUID to integer ID for database query
+        lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id) if IDConverter.is_uuid(lecture_id) else lecture_id
+        if not lecture_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+        
         lecture_result = (
-            db.admin_client.table("lecture")
+            db.get_admin_client().table("lecture")
             .select("*, course!inner(id)")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .in_("status", ["PUBLISHED", "DELIVERED"])
             .execute()
         )
@@ -872,13 +1017,22 @@ async def get_lecture_summary(
         
         lecture = lecture_result.data[0]
         course_id = lecture["course"]["id"]
+        # Ensure course_id is an integer (from database result, should already be int after migration)
+        course_int_id = course_id if isinstance(course_id, int) else course_id
         
-        # Verify enrollment
+        # Verify enrollment - convert student_id to integer
+        student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+        if not student_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get student ID",
+            )
+        
         enrollment_result = (
             db.admin_client.table("enrollment")
             .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("student_id", student_int_id)  # Use integer ID
+            .eq("course_id", course_int_id)  # Use integer ID
             .eq("is_active", True)
             .execute()
         )
@@ -907,7 +1061,7 @@ async def get_lecture_summary(
         db.admin_client.table("lecture").update({
             "summary": summary,
             "updated_at": datetime.utcnow().isoformat()
-        }).eq("id", lecture_id).execute()
+        }).eq("id", lecture_int_id).execute()
         
         logger.info(f"Generated summary for lecture {lecture_id}")
         
@@ -945,11 +1099,21 @@ async def generate_lecture_embeddings(
     try:
         logger.info(f"Embedding generation request for lecture {lecture_id}, student {student.id}")
         
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or not published",
+                )
+        
         # Verify lecture access and enrollment
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, title, content, has_embeddings, course_id")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .in_("status", ["PUBLISHED", "DELIVERED"])
             .execute()
         )
@@ -963,12 +1127,15 @@ async def generate_lecture_embeddings(
         lecture = lecture_result.data[0]
         course_id = lecture["course_id"]
         
+        # course_id from database should be integer already, but verify
+        course_int_id = course_id if isinstance(course_id, int) else course_id
+        
         # Verify student is enrolled in the course
         enrollment_result = (
             db.admin_client.table("enrollment")
             .select("*")
             .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("is_active", True)
             .execute()
         )
@@ -1052,10 +1219,18 @@ async def chat_with_lecture(
         logger.info(f"Chat request for lecture {lecture_id}, student {student.id}")
         
         # Verify lecture access (same as summary endpoint)
+        # Convert UUID to integer ID for database query
+        lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id) if IDConverter.is_uuid(lecture_id) else lecture_id
+        if not lecture_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+        
         lecture_result = (
-            db.admin_client.table("lecture")
+            db.get_admin_client().table("lecture")
             .select("*, course!inner(id)")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .in_("status", ["PUBLISHED", "DELIVERED"])
             .execute()
         )
@@ -1068,13 +1243,22 @@ async def chat_with_lecture(
         
         lecture = lecture_result.data[0]
         course_id = lecture["course"]["id"]
+        # Ensure course_id is an integer (from database result, should already be int after migration)
+        course_int_id = course_id if isinstance(course_id, int) else course_id
         
-        # Verify enrollment
+        # Verify enrollment - convert student_id to integer
+        student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+        if not student_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get student ID",
+            )
+        
         enrollment_result = (
             db.admin_client.table("enrollment")
             .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("student_id", student_int_id)  # Use integer ID
+            .eq("course_id", course_int_id)  # Use integer ID
             .eq("is_active", True)
             .execute()
         )
@@ -1089,21 +1273,48 @@ async def chat_with_lecture(
         if not session_id:
             session_id = str(uuid4())
         
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+        
+        # Get integer user_id for query
+        user_int_id = user.id if isinstance(user.id, int) else await IDConverter.uuid_to_int(db, "users", str(user.id))
+        if not user_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get user ID",
+            )
+        
         conversation_result = (
             db.admin_client.table("ai_conversation")
             .select("*")
             .eq("session_id", session_id)
-            .eq("user_id", str(user.id))
-            .eq("lecture_id", lecture_id)
+            .eq("user_id", user_int_id)  # Use integer ID
+            .eq("lecture_id", lecture_int_id)  # Use integer ID
             .execute()
         )
         
+        # Get integer IDs for database
+        user_int_id = user.id if isinstance(user.id, int) else await IDConverter.uuid_to_int(db, "users", str(user.id))
+        if not user_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get user ID",
+            )
+        
         if not conversation_result.data:
-            # Create new conversation
+            # Create new conversation with integer IDs
+            conversation_uuid = str(uuid4())
             conversation_data = {
-                "id": str(uuid4()),
-                "user_id": str(user.id),
-                "lecture_id": lecture_id,
+                "uuid": conversation_uuid,  # Store UUID for external use
+                "user_id": user_int_id,  # Integer FK
+                "lecture_id": lecture_int_id,  # Integer FK
                 "conversation_type": "LECTURE_QA",
                 "session_id": session_id,
                 "title": f"Chat about {lecture['title'][:50]}",
@@ -1111,14 +1322,19 @@ async def chat_with_lecture(
                 "updated_at": datetime.utcnow().isoformat(),
             }
             conversation_result = db.admin_client.table("ai_conversation").insert(conversation_data).execute()
-            conversation_id = conversation_result.data[0]["id"]
+            conversation_record = conversation_result.data[0]
+            conversation_int_id = conversation_record["id"]  # Integer ID from database
+            conversation_uuid = conversation_record.get("uuid") or conversation_uuid
         else:
-            conversation_id = conversation_result.data[0]["id"]
+            conversation_record = conversation_result.data[0]
+            conversation_int_id = conversation_record["id"]  # Integer ID from database
+            conversation_uuid = conversation_record.get("uuid") or conversation_record.get("id")
         
-        # Save user message
+        # Save user message with integer conversation_id
+        user_msg_uuid = str(uuid4())
         user_msg_data = {
-            "id": str(uuid4()),
-            "conversation_id": conversation_id,
+            "uuid": user_msg_uuid,  # Store UUID for external use
+            "conversation_id": conversation_int_id,  # Integer FK
             "role": "USER",
             "content": user_message,
             "created_at": datetime.utcnow().isoformat(),
@@ -1128,15 +1344,16 @@ async def chat_with_lecture(
         # Use RAG service to get response
         rag_service = RAGService(db)
         response = await rag_service.generate_response(
-            lecture_id=lecture_id,
+            lecture_id=lecture_id,  # UUID string for external use
             query=user_message,
-            conversation_id=conversation_id,
+            conversation_id=conversation_int_id,  # Pass integer ID for internal database queries
         )
         
-        # Save assistant message
+        # Save assistant message with integer conversation_id
+        assistant_msg_uuid = str(uuid4())
         assistant_msg_data = {
-            "id": str(uuid4()),
-            "conversation_id": conversation_id,
+            "uuid": assistant_msg_uuid,  # Store UUID for external use
+            "conversation_id": conversation_int_id,  # Integer FK
             "role": "ASSISTANT",
             "content": response["answer"],
             "message_metadata": json.dumps({
@@ -1151,7 +1368,7 @@ async def chat_with_lecture(
         
         return {
             "session_id": session_id,
-            "conversation_id": conversation_id,
+            "conversation_id": conversation_uuid,  # Return UUID for API
             "response": response["answer"],
             "sources": response.get("sources", []),
         }
@@ -1192,14 +1409,16 @@ async def get_lecture_flashcards(
         cached_response = cache.get("flashcards", cache_key)
         if cached_response is not None:
             # Still need to verify enrollment (but this is cached too)
-            lecture = LectureQueryHelper.get_published_lecture(db, lecture_id)
+            lecture = await LectureQueryHelper.get_published_lecture(db, lecture_id)
             if lecture:
                 course_id = lecture.get("course", {}).get("id") or lecture.get("course_id")
-                if course_id and verify_student_enrollment(db, str(student.id), course_id):
+                student_uuid = student.uuid if hasattr(student, "uuid") and student.uuid else str(student.id)
+                if course_id and await verify_student_enrollment(db, student_uuid, course_id):
                     return cached_response
         
         # Verify lecture access and enrollment (cached)
-        lecture, error = get_lecture_if_enrolled(db, lecture_id, str(student.id), published_only=True)
+        student_uuid = student.uuid if hasattr(student, "uuid") and student.uuid else str(student.id)
+        lecture, error = await get_lecture_if_enrolled(db, lecture_id, student_uuid, published_only=True)
         
         if error:
             status_code = status.HTTP_403_FORBIDDEN if "not enrolled" in error else status.HTTP_404_NOT_FOUND
@@ -1208,7 +1427,7 @@ async def get_lecture_flashcards(
         course_id = lecture.get("course", {}).get("id") or lecture.get("course_id")
         
         # Get flashcards for this lecture (cached)
-        flashcards_data = FlashcardQueryHelper.get_lecture_flashcards(db, lecture_id)
+        flashcards_data = await FlashcardQueryHelper.get_lecture_flashcards(db, lecture_id)
         
         if not flashcards_data:
             raise HTTPException(
@@ -1218,8 +1437,10 @@ async def get_lecture_flashcards(
         
         flashcards = []
         for card in flashcards_data:
+            # Convert integer ID to UUID for API response
+            card_uuid = await IDConverter.int_to_uuid(db, "flashcard", card["id"]) if card.get("id") else None
             flashcards.append({
-                "id": card["id"],
+                "id": card_uuid or str(card["id"]),  # Use UUID if available, fallback to string
                 "question": card["question"],
                 "answer": card["answer"],
                 "difficulty": card.get("difficulty", "MEDIUM"),
@@ -1286,7 +1507,8 @@ async def get_lecture_quiz(
         cached_response = cache.get("assessments", cache_key)
         
         # Verify access first (cached operations)
-        lecture, error = get_lecture_if_enrolled(db, lecture_id, str(student.id), published_only=True)
+        student_uuid = student.uuid if hasattr(student, "uuid") and student.uuid else str(student.id)
+        lecture, error = await get_lecture_if_enrolled(db, lecture_id, student_uuid, published_only=True)
         
         if error:
             status_code = status.HTTP_403_FORBIDDEN if "not enrolled" in error else status.HTTP_404_NOT_FOUND
@@ -1299,7 +1521,7 @@ async def get_lecture_quiz(
         course_id = lecture.get("course", {}).get("id") or lecture.get("course_id")
         
         # Get default quiz for this lecture (cached)
-        assessment = AssessmentQueryHelper.get_default_assessment(db, lecture_id)
+        assessment = await AssessmentQueryHelper.get_default_assessment(db, lecture_id)
         
         if not assessment:
             raise HTTPException(
@@ -1308,12 +1530,17 @@ async def get_lecture_quiz(
             )
         
         # Get questions (cached)
-        questions_data = AssessmentQueryHelper.get_assessment_questions(db, assessment["id"])
+        questions_data = await AssessmentQueryHelper.get_assessment_questions(db, assessment["id"])
+        
+        # Convert assessment integer ID to UUID for response
+        assessment_uuid = await IDConverter.int_to_uuid(db, "assessment", assessment["id"]) if assessment.get("id") else None
         
         questions = []
         for q in questions_data:
+            # Convert question integer ID to UUID for response
+            question_uuid = await IDConverter.int_to_uuid(db, "question", q["id"]) if q.get("id") else None
             questions.append({
-                "question_id": q["id"],
+                "question_id": question_uuid or str(q["id"]),  # Use UUID if available
                 "question_text": q["question_text"],
                 "question_type": q["question_type"],
                 "points": q.get("points", 1.0),
@@ -1322,7 +1549,7 @@ async def get_lecture_quiz(
             })
         
         response = {
-            "assessment_id": assessment["id"],
+            "assessment_id": assessment_uuid or str(assessment["id"]),  # Use UUID if available
             "title": assessment["title"],
             "description": assessment.get("description"),
             "num_questions": len(questions),
@@ -1369,10 +1596,18 @@ async def generate_quiz(
         logger.info(f"Generating temporary quiz for lecture {lecture_id}, student {student.id}")
         
         # Verify lecture access
+        # Convert UUID to integer ID for database query
+        lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id) if IDConverter.is_uuid(lecture_id) else lecture_id
+        if not lecture_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found",
+            )
+        
         lecture_result = (
-            db.admin_client.table("lecture")
+            db.get_admin_client().table("lecture")
             .select("*, course!inner(id, name), teacher!inner(id)")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .in_("status", ["PUBLISHED", "DELIVERED"])
             .execute()
         )
@@ -1386,13 +1621,22 @@ async def generate_quiz(
         lecture = lecture_result.data[0]
         course_id = lecture["course"]["id"]
         teacher_id = lecture["teacher"]["id"]
+        # Ensure course_id is an integer (from database result, should already be int after migration)
+        course_int_id = course_id if isinstance(course_id, int) else course_id
         
-        # Verify enrollment
+        # Verify enrollment - convert student_id to integer
+        student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+        if not student_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get student ID",
+            )
+        
         enrollment_result = (
             db.admin_client.table("enrollment")
             .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("student_id", student_int_id)  # Use integer ID
+            .eq("course_id", course_int_id)  # Use integer ID
             .eq("is_active", True)
             .execute()
         )
@@ -1457,10 +1701,18 @@ async def submit_quiz(
         logger.info(f"Submitting quiz {assessment_id} for student {student.id}")
         
         # Get assessment and questions
+        # Convert UUID to integer ID for database query
+        assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id) if IDConverter.is_uuid(assessment_id) else assessment_id
+        if not assessment_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found",
+            )
+        
         assessment_result = (
-            db.admin_client.table("assessment")
+            db.get_admin_client().table("assessment")
             .select("*, lecture!inner(id, course_id)")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .execute()
         )
         
@@ -1473,13 +1725,22 @@ async def submit_quiz(
         assessment = assessment_result.data[0]
         lecture_id = assessment["lecture"]["id"]
         course_id = assessment["lecture"]["course_id"]
+        # Ensure course_id is an integer (from database result, should already be int after migration)
+        course_int_id = course_id if isinstance(course_id, int) else course_id
         
-        # Verify enrollment
+        # Verify enrollment - convert student_id to integer
+        student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+        if not student_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get student ID",
+            )
+        
         enrollment_result = (
             db.admin_client.table("enrollment")
             .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("student_id", student_int_id)  # Use integer ID
+            .eq("course_id", course_int_id)  # Use integer ID
             .eq("is_active", True)
             .execute()
         )
@@ -1494,7 +1755,7 @@ async def submit_quiz(
         questions_result = (
             db.admin_client.table("question")
             .select("*")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)
             .order("order_index")
             .execute()
         )
@@ -1508,12 +1769,19 @@ async def submit_quiz(
             student_answers=submission.get("answers", {}),
         )
         
-        # Create submission record
-        submission_id = str(uuid4())
+        # Create submission record with integer IDs
+        submission_uuid = str(uuid4())
+        student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+        if not student_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get student ID",
+            )
+        
         submission_data = {
-            "id": submission_id,
-            "assessment_id": assessment_id,
-            "student_id": str(student.id),
+            "uuid": submission_uuid,  # Store UUID for external use
+            "assessment_id": assessment_int_id,  # Integer FK
+            "student_id": student_int_id,  # Integer FK
             "answers": json.dumps(submission.get("answers", {})),
             "score": grading_result["score"],
             "max_score": grading_result["max_score"],
@@ -1525,57 +1793,15 @@ async def submit_quiz(
             "submitted_at": datetime.utcnow().isoformat(),
             "graded_at": datetime.utcnow().isoformat(),
         }
-        db.admin_client.table("assessment_submission").insert(submission_data).execute()
+        submission_result = db.admin_client.table("assessment_submission").insert(submission_data).execute()
+        # Get the UUID from the inserted record (or use the one we generated)
+        submission_id = submission_uuid
+        if submission_result.data and len(submission_result.data) > 0:
+            submission_id = submission_result.data[0].get("uuid") or submission_uuid
         
         # Calculate percentage and weak areas
         percentage = (grading_result["score"] / grading_result["max_score"]) * 100 if grading_result["max_score"] > 0 else 0
         weak_areas = [item["topic"] for item in grading_result.get("weak_areas", [])]
-        
-        # Add quiz results to chat history
-        # Find or create conversation for this lecture
-        conversation_result = (
-            db.admin_client.table("ai_conversation")
-            .select("*")
-            .eq("user_id", str(user.id))
-            .eq("lecture_id", lecture_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        
-        if conversation_result.data:
-            conversation_id = conversation_result.data[0]["id"]
-            
-            # Create system message with quiz results
-            
-            quiz_result_message = f"""
-Quiz Results:
-- Score: {grading_result['score']}/{grading_result['max_score']} ({percentage:.1f}%)
-- Questions Correct: {grading_result['correct_count']}/{grading_result['total_questions']}
-- Topics to Review: {', '.join(weak_areas) if weak_areas else 'None - Great job!'}
-
-I'm here to help you understand any topics you found challenging. Feel free to ask questions about: {', '.join(weak_areas) if weak_areas else 'anything from the lecture'}.
-            """.strip()
-            
-            quiz_metadata = {
-                "assessment_id": assessment_id,
-                "submission_id": submission_id,
-                "score": grading_result["score"],
-                "max_score": grading_result["max_score"],
-                "percentage": percentage,
-                "weak_areas": weak_areas,
-                "question_results": grading_result.get("question_results", []),
-            }
-            
-            system_msg_data = {
-                "id": str(uuid4()),
-                "conversation_id": conversation_id,
-                "role": "SYSTEM",
-                "content": quiz_result_message,
-                "message_metadata": json.dumps(quiz_metadata),
-                "created_at": datetime.utcnow().isoformat(),
-            }
-            db.admin_client.table("chat_message").insert(system_msg_data).execute()
         
         logger.info(f"Graded quiz {assessment_id} - Score: {grading_result['score']}/{grading_result['max_score']}")
         
@@ -1618,12 +1844,19 @@ async def get_chat_history(
     try:
         logger.info(f"Fetching chat history for lecture {lecture_id}, student {student.id}")
         
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                lecture_int_id = lecture_id  # Fallback
+        
         # Build query
         query = (
             db.admin_client.table("ai_conversation")
             .select("*, chat_message(*)")
             .eq("user_id", str(user.id))
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
         )
         
         if session_id:
@@ -1676,12 +1909,29 @@ async def get_test_quizzes(
     try:
         logger.info(f"Fetching test quizzes for course {course_id}, student {student.id}")
         
-        # Verify enrollment
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+        
+        # Verify enrollment - convert student_id to integer
+        student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+        if not student_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get student ID",
+            )
+        
         enrollment_result = (
             db.admin_client.table("enrollment")
             .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("student_id", student_int_id)  # Use integer ID
+            .eq("course_id", course_int_id)  # Use integer ID
             .eq("is_active", True)
             .execute()
         )
@@ -1696,7 +1946,7 @@ async def get_test_quizzes(
         assessments_result = (
             db.admin_client.table("assessment")
             .select("*, lecture!inner(id, title)")
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("quiz_mode", "TEST")
             .eq("is_published", True)
             .order("due_date", desc=False)
@@ -1805,11 +2055,21 @@ async def get_test_quiz_details(
     try:
         logger.info(f"Fetching test quiz {assessment_id} for student {student.id}")
         
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Test quiz not found or not published",
+                )
+        
         # Get assessment
         assessment_result = (
             db.admin_client.table("assessment")
             .select("*, lecture!inner(id, course_id)")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("quiz_mode", "TEST")
             .eq("is_published", True)
             .execute()
@@ -1875,7 +2135,7 @@ async def get_test_quiz_details(
         questions_result = (
             db.admin_client.table("question")
             .select("id, question_text, question_type, points, order_index, options")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)
             .order("order_index")
             .execute()
         )
@@ -1934,11 +2194,21 @@ async def submit_test_quiz(
     try:
         logger.info(f"Submitting test quiz {assessment_id} for student {student.id}")
         
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Test quiz not found",
+                )
+        
         # Get assessment
         assessment_result = (
             db.admin_client.table("assessment")
             .select("*, lecture!inner(id, course_id)")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("quiz_mode", "TEST")
             .eq("is_published", True)
             .execute()
@@ -1989,7 +2259,7 @@ async def submit_test_quiz(
         submissions_result = (
             db.admin_client.table("assessment_submission")
             .select("id, is_submitted")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)
             .eq("student_id", str(student.id))
             .execute()
         )
@@ -2007,7 +2277,7 @@ async def submit_test_quiz(
         questions_result = (
             db.admin_client.table("question")
             .select("*")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)
             .order("order_index")
             .execute()
         )
@@ -2021,12 +2291,19 @@ async def submit_test_quiz(
             student_answers=submission.get("answers", {}),
         )
         
-        # Create submission record
-        submission_id = str(uuid4())
+        # Create submission record with integer IDs
+        submission_uuid = str(uuid4())
+        student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+        if not student_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get student ID",
+            )
+        
         submission_data = {
-            "id": submission_id,
-            "assessment_id": assessment_id,
-            "student_id": str(student.id),
+            "uuid": submission_uuid,  # Store UUID for external use
+            "assessment_id": assessment_int_id,  # Integer FK
+            "student_id": student_int_id,  # Integer FK
             "answers": json.dumps(submission.get("answers", {})),
             "score": grading_result["score"],
             "max_score": grading_result["max_score"],
@@ -2038,7 +2315,11 @@ async def submit_test_quiz(
             "submitted_at": datetime.utcnow().isoformat(),
             "graded_at": datetime.utcnow().isoformat(),
         }
-        db.admin_client.table("assessment_submission").insert(submission_data).execute()
+        submission_result = db.admin_client.table("assessment_submission").insert(submission_data).execute()
+        # Get the UUID from the inserted record (or use the one we generated)
+        submission_id = submission_uuid
+        if submission_result.data and len(submission_result.data) > 0:
+            submission_id = submission_result.data[0].get("uuid") or submission_uuid
         
         percentage = (grading_result["score"] / grading_result["max_score"]) * 100 if grading_result["max_score"] > 0 else 0
         passed = percentage >= assessment.get("passing_score", 60.0)
@@ -2121,11 +2402,21 @@ async def get_quiz_leaderboard(
     try:
         logger.info(f"Fetching leaderboard for quiz {assessment_id}, student {student.id}")
         
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found",
+                )
+        
         # Get assessment
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, show_leaderboard, lecture!inner(course_id)")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("quiz_mode", "TEST")
             .eq("is_published", True)
             .execute()
@@ -2283,11 +2574,21 @@ async def request_quiz_results(
     try:
         logger.info(f"Student {student.id} requesting results for assessment {assessment_id}")
         
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Graded quiz not found",
+                )
+        
         # Get the assessment and verify it's a graded quiz (TEST mode)
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, teacher_id, course_id, quiz_mode, lecture!inner(course_id)")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("quiz_mode", "TEST")
             .eq("is_published", True)
             .execute()
@@ -2302,13 +2603,25 @@ async def request_quiz_results(
         assessment = assessment_result.data[0]
         course_id = assessment["lecture"]["course_id"]
         teacher_id = assessment["teacher_id"]
+        # Ensure course_id is an integer (from database result, should already be int after migration)
+        course_int_id = course_id if isinstance(course_id, int) else course_id
         
-        # Verify student is enrolled in the course
+        # Convert student.id to integer if needed
+        student_int_id = student.id
+        if IDConverter.is_uuid(student.id):
+            student_int_id = await IDConverter.uuid_to_int(db, "student", student.id)
+            if not student_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Student ID conversion failed",
+                )
+        
+        # Verify student is enrolled in the course using integer IDs
         enrollment_result = (
             db.admin_client.table("enrollment")
             .select("id")
-            .eq("student_id", str(student.id))
-            .eq("course_id", course_id)
+            .eq("student_id", student_int_id)  # Use integer ID
+            .eq("course_id", course_int_id)
             .eq("is_active", True)
             .execute()
         )
@@ -2319,12 +2632,12 @@ async def request_quiz_results(
                 detail="You are not enrolled in this course",
             )
         
-        # Verify student has submitted the quiz
+        # Verify student has submitted the quiz using integer IDs
         submission_result = (
             db.admin_client.table("assessment_submission")
             .select("id")
-            .eq("assessment_id", assessment_id)
-            .eq("student_id", str(student.id))
+            .eq("assessment_id", assessment_int_id)  # Use integer ID
+            .eq("student_id", student_int_id)  # Use integer ID
             .eq("is_submitted", True)
             .execute()
         )
@@ -2335,12 +2648,12 @@ async def request_quiz_results(
                 detail="You must submit the quiz before requesting results",
             )
         
-        # Check if request already exists
+        # Check if request already exists using integer IDs
         existing_request = (
             db.admin_client.table("result_view_request")
             .select("id, status, requested_at, responded_at, response_message")
-            .eq("assessment_id", assessment_id)
-            .eq("student_id", str(student.id))
+            .eq("assessment_id", assessment_int_id)  # Use integer ID
+            .eq("student_id", student_int_id)  # Use integer ID
             .execute()
         )
         
@@ -2355,19 +2668,40 @@ async def request_quiz_results(
                 "response_message": req.get("response_message"),
             }
         
-        # Create new request
-        request_id = str(uuid4())
+        # Ensure teacher_id is an integer
+        teacher_int_id = teacher_id
+        if IDConverter.is_uuid(teacher_id):
+            teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher_id)
+            if not teacher_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Teacher ID conversion failed",
+                )
+        
+        # Create new request using integer IDs
+        # Don't set 'id' - let database auto-generate integer PK
+        # Generate UUID for external API compatibility
+        request_uuid = str(uuid4())
         request_data = {
-            "id": request_id,
-            "assessment_id": assessment_id,
-            "student_id": str(student.id),
-            "teacher_id": teacher_id,
+            "uuid": request_uuid,  # UUID for external APIs
+            "assessment_id": assessment_int_id,  # Use integer ID
+            "student_id": student_int_id,  # Use integer ID
+            "teacher_id": teacher_int_id,  # Use integer ID
             "status": "PENDING",
             "request_message": request.message if request else None,
             "requested_at": datetime.utcnow().isoformat(),
         }
         
-        db.admin_client.table("result_view_request").insert(request_data).execute()
+        result = db.admin_client.table("result_view_request").insert(request_data).execute()
+        
+        # Get the created request ID (integer) and convert to UUID for response
+        if result.data:
+            request_id_int = result.data[0].get("id")
+            request_id = await IDConverter.int_to_uuid(db, "result_view_request", request_id_int) if request_id_int else None
+            if not request_id:
+                request_id = result.data[0].get("uuid") or request_uuid
+        else:
+            request_id = request_uuid
         
         logger.info(f"Created result view request {request_id} for student {student.id}")
         
@@ -2376,22 +2710,33 @@ async def request_quiz_results(
             notification_service = NotificationService(db)
             student_name = f"{user.first_name} {user.last_name}".strip() or "A student"
             
-            # Get teacher's user_id
+            # Get teacher's user_id using integer teacher_id
             teacher_result = (
                 db.admin_client.table("teacher")
                 .select("user_id")
-                .eq("id", teacher_id)
+                .eq("id", teacher_int_id)  # Use integer ID
                 .execute()
             )
             
             if teacher_result.data:
                 teacher_user_id = teacher_result.data[0]["user_id"]
-                await notification_service.notify_result_request(
-                    teacher_user_id=teacher_user_id,
-                    student_name=student_name,
-                    quiz_title=assessment["title"],
-                    request_id=request_id,
-                )
+                    # Convert teacher_user_id to UUID string if it's an integer
+                # The notification service will handle the conversion back to integer
+                if teacher_user_id:
+                    # If it's an integer, convert to UUID for the API
+                    if isinstance(teacher_user_id, int):
+                        teacher_user_id_uuid = await IDConverter.int_to_uuid(db, "users", teacher_user_id)
+                        if not teacher_user_id_uuid:
+                            teacher_user_id_uuid = str(teacher_user_id)  # Fallback
+                    else:
+                        teacher_user_id_uuid = str(teacher_user_id)
+                    
+                    await notification_service.notify_result_request(
+                        teacher_user_id=teacher_user_id_uuid,
+                        student_name=student_name,
+                        quiz_title=assessment["title"],
+                        request_id=request_id,  # Already a UUID string
+                    )
         except Exception as notify_error:
             logger.warning(f"Failed to send result request notification: {notify_error}")
         
@@ -2522,11 +2867,21 @@ async def get_my_quiz_results(
         
         # Request is APPROVED - get the full results
         
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found",
+                )
+        
         # Get assessment details
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, passing_score, lecture!inner(id, title, course_id)")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .execute()
         )
         

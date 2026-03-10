@@ -14,6 +14,7 @@ from models.document import (Document, DocumentCreate, DocumentRead,
 from models.user import Teacher
 from services.document_parser import DocumentParser
 from supabase_config import BUCKETS, supabase
+from utils.id_converter import IDConverter
 
 
 class DocumentService:
@@ -187,8 +188,8 @@ class DocumentService:
             logger.info("Creating document record in database")
             document_dict = {
                 **document_create.dict(),
-                "teacher_id": str(teacher.id),
-                "university_id": str(teacher.university_id),
+                "teacher_id": teacher.id,  # Integer ID for database
+                "university_id": teacher.university_id,  # Integer ID for database
                 "status": DocumentStatus.COMPLETED.value,
                 "created_at": datetime.utcnow().isoformat(),
                 "updated_at": datetime.utcnow().isoformat(),
@@ -201,6 +202,24 @@ class DocumentService:
             logger.info(
                 f"✅ Document uploaded successfully! ID: {document_data['id']}, Title: {title}"
             )
+            
+            # Convert integer IDs to UUIDs for response
+            # Document ID should already be converted by db.create_record, but ensure it's a UUID string
+            if isinstance(document_data.get("id"), int):
+                doc_uuid = await IDConverter.int_to_uuid(db, "documents", document_data["id"])
+                if doc_uuid:
+                    document_data["id"] = doc_uuid
+            
+            # Convert teacher_id and university_id from integers to UUIDs
+            if isinstance(document_data.get("teacher_id"), int):
+                teacher_uuid = await IDConverter.int_to_uuid(db, "teacher", document_data["teacher_id"])
+                if teacher_uuid:
+                    document_data["teacher_id"] = teacher_uuid
+            if isinstance(document_data.get("university_id"), int):
+                university_uuid = await IDConverter.int_to_uuid(db, "university", document_data["university_id"])
+                if university_uuid:
+                    document_data["university_id"] = university_uuid
+            
             return DocumentRead.model_validate(document_data)
 
         except HTTPException:
@@ -315,7 +334,7 @@ class DocumentService:
             )
 
     @staticmethod
-    def get_document_by_id(
+    async def get_document_by_id(
         db, document_id: str, teacher_id: str
     ) -> Optional[DocumentRead]:
         """Get a specific document by ID (only if owned by teacher)."""
@@ -331,12 +350,61 @@ class DocumentService:
                 f"requested teacher_id={teacher_id}"
             )
 
-            if doc_teacher_id != teacher_id:
-                logger.warning(
-                    f"Teacher ID mismatch for document {document_id}: "
-                    f"stored={doc_teacher_id}, requested={teacher_id}"
-                )
-                return None
+            # Compare teacher IDs - handle both integer and UUID
+            # First, try direct integer comparison if both are integers
+            if isinstance(doc_teacher_id, int) and isinstance(teacher_id, int):
+                if doc_teacher_id != teacher_id:
+                    logger.warning(
+                        f"Teacher ID mismatch for document {document_id}: "
+                        f"stored={doc_teacher_id}, requested={teacher_id}"
+                    )
+                    return None
+            else:
+                # Convert both to UUIDs for comparison
+                doc_teacher_uuid = None
+                requested_teacher_uuid = None
+                
+                if isinstance(doc_teacher_id, int):
+                    # Convert stored integer ID to UUID
+                    doc_teacher_uuid = await IDConverter.int_to_uuid(db, "teacher", doc_teacher_id)
+                else:
+                    doc_teacher_uuid = doc_teacher_id
+                
+                if isinstance(teacher_id, int):
+                    # Convert requested integer ID to UUID
+                    requested_teacher_uuid = await IDConverter.int_to_uuid(db, "teacher", teacher_id)
+                elif IDConverter.is_uuid(teacher_id):
+                    requested_teacher_uuid = teacher_id
+                else:
+                    # Try to convert string to int and then to UUID
+                    try:
+                        teacher_int = int(teacher_id)
+                        requested_teacher_uuid = await IDConverter.int_to_uuid(db, "teacher", teacher_int)
+                    except (ValueError, TypeError):
+                        requested_teacher_uuid = teacher_id
+                
+                if doc_teacher_uuid != requested_teacher_uuid:
+                    logger.warning(
+                        f"Teacher ID mismatch for document {document_id}: "
+                        f"stored={doc_teacher_id} (uuid={doc_teacher_uuid}), requested={teacher_id} (uuid={requested_teacher_uuid})"
+                    )
+                    return None
+
+            # Convert integer IDs to UUIDs for response
+            if isinstance(document_data.get("id"), int):
+                doc_uuid = await IDConverter.int_to_uuid(db, "documents", document_data["id"])
+                if doc_uuid:
+                    document_data["id"] = doc_uuid
+            
+            if isinstance(document_data.get("teacher_id"), int):
+                teacher_uuid = await IDConverter.int_to_uuid(db, "teacher", document_data["teacher_id"])
+                if teacher_uuid:
+                    document_data["teacher_id"] = teacher_uuid
+            
+            if isinstance(document_data.get("university_id"), int):
+                university_uuid = await IDConverter.int_to_uuid(db, "university", document_data["university_id"])
+                if university_uuid:
+                    document_data["university_id"] = university_uuid
 
             return DocumentRead.model_validate(Document(**document_data))
         except Exception as e:
@@ -347,14 +415,23 @@ class DocumentService:
             )
 
     @staticmethod
-    def update_document(
+    async def update_document(
         db, document_id: str, teacher_id: str, document_update: DocumentUpdate
     ) -> Optional[DocumentRead]:
         """Update document information."""
         try:
             # Check if document exists and belongs to teacher
             document_data = db.get_record_by_id("documents", document_id)
-            if not document_data or document_data.get("teacher_id") != teacher_id:
+            if not document_data:
+                return None
+            
+            # Compare teacher IDs - handle both integer and UUID
+            doc_teacher_id = document_data.get("teacher_id")
+            if isinstance(doc_teacher_id, int):
+                doc_teacher_uuid = await IDConverter.int_to_uuid(db, "teacher", doc_teacher_id)
+                if doc_teacher_uuid != teacher_id:
+                    return None
+            elif doc_teacher_id != teacher_id:
                 return None
 
             # Update fields
@@ -365,6 +442,22 @@ class DocumentService:
             updated_document = db.update_record("documents", document_id, update_data)
             if not updated_document:
                 return None
+
+            # Convert integer IDs to UUIDs for response
+            if isinstance(updated_document.get("id"), int):
+                doc_uuid = await IDConverter.int_to_uuid(db, "documents", updated_document["id"])
+                if doc_uuid:
+                    updated_document["id"] = doc_uuid
+            
+            if isinstance(updated_document.get("teacher_id"), int):
+                teacher_uuid = await IDConverter.int_to_uuid(db, "teacher", updated_document["teacher_id"])
+                if teacher_uuid:
+                    updated_document["teacher_id"] = teacher_uuid
+            
+            if isinstance(updated_document.get("university_id"), int):
+                university_uuid = await IDConverter.int_to_uuid(db, "university", updated_document["university_id"])
+                if university_uuid:
+                    updated_document["university_id"] = university_uuid
 
             return DocumentRead.model_validate(Document(**updated_document))
 

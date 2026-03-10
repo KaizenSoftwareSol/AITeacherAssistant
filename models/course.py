@@ -15,20 +15,21 @@ if TYPE_CHECKING:
 class Course(SQLModel, table=True):
     """Course/Subject entity with curriculum."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
     name: str = Field(index=True)
     code: str = Field(unique=True, index=True)  # e.g., "CS101"
     description: Optional[str] = None
     curriculum_content: Optional[str] = None  # Full curriculum text
-    university_id: str = Field(foreign_key="university.id")  # UUID
-    created_by_teacher_id: Optional[str] = Field(
+    university_id: int = Field(foreign_key="university.id")  # Integer FK for performance
+    created_by_teacher_id: Optional[int] = Field(
         default=None, foreign_key="teacher.id"
-    )  # UUID - teacher who created the course
+    )  # Integer FK for performance
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    university: Optional["University"] = Relationship(back_populates="courses")
+    university: "University" = Relationship(back_populates="courses")
     semesters: List["Semester"] = Relationship(back_populates="course")
     enrollments: List["Enrollment"] = Relationship(back_populates="course")
     lectures: List["Lecture"] = Relationship(back_populates="course")
@@ -42,17 +43,18 @@ class Semester(SQLModel, table=True):
     - Course-level: course_id set, university_id is None (legacy, tied to specific course)
     """
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
     name: str  # e.g., "Fall 2024", "Spring 2025"
     start_date: datetime
     end_date: datetime
-    university_id: Optional[str] = Field(default=None, foreign_key="university.id")  # UUID - for university-level semesters
-    course_id: Optional[str] = Field(default=None, foreign_key="course.id")  # UUID - for course-level semesters (legacy)
+    university_id: Optional[int] = Field(default=None, foreign_key="university.id")  # Integer FK - for university-level semesters
+    course_id: Optional[int] = Field(default=None, foreign_key="course.id")  # Integer FK - for course-level semesters (legacy)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    course: Optional["Course"] = Relationship(back_populates="semesters")
+    course: "Course" = Relationship(back_populates="semesters")
     lectures: List["Lecture"] = Relationship(back_populates="semester")
     enrollments: List["Enrollment"] = Relationship(back_populates="semester")
     modules: List["Module"] = Relationship(back_populates="semester")

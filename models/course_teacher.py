@@ -17,15 +17,16 @@ class CourseTeacher(SQLModel, table=True):
     Teachers can be assigned to courses they didn't create.
     """
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    course_id: str = Field(foreign_key="course.id")  # UUID
-    teacher_id: str = Field(foreign_key="teacher.id")  # UUID
-    assigned_by: Optional[str] = Field(
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    course_id: int = Field(foreign_key="course.id")  # Integer FK for performance
+    teacher_id: int = Field(foreign_key="teacher.id")  # Integer FK for performance
+    assigned_by: Optional[int] = Field(
         default=None, foreign_key="users.id"
-    )  # UUID - admin who assigned
+    )  # Integer FK - admin who assigned
     assigned_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = Field(default=True)
 
     # Relationships
-    course: Optional["Course"] = Relationship()
-    teacher: Optional["Teacher"] = Relationship()
+    course: "Course" = Relationship()
+    teacher: "Teacher" = Relationship()

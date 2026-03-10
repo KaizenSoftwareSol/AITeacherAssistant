@@ -45,8 +45,9 @@ class Notification(SQLModel, table=True):
     
     __tablename__ = "notification"
     
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    user_id: str = Field(foreign_key="users.id")  # UUID - recipient of the notification
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    user_id: int = Field(foreign_key="users.id")  # Integer FK for performance - recipient of the notification
     title: str = Field(max_length=255)
     description: Optional[str] = None
     type: int  # NotificationType enum value

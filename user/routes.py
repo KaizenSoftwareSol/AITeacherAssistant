@@ -9,6 +9,7 @@ from dependencies import AdminUser, AnyUser, get_current_user
 from models.user import User
 from routes_config import user_router
 from utils.db import get_db
+from utils.id_converter import IDConverter
 
 # Create router
 router = APIRouter()
@@ -28,9 +29,9 @@ async def read_users(
 
 @router.get("/{user_id}", response_model=UserRead)
 async def read_user(
-    user_id: int, current_user: Annotated[User, Depends(AnyUser)], db=Depends(get_db)
+    user_id: str, current_user: Annotated[User, Depends(AnyUser)], db=Depends(get_db)
 ):
-    """Get a specific user by ID."""
+    """Get a specific user by ID (UUID)."""
     user_data = db.get_user_by_id(user_id)
 
     if not user_data:
@@ -39,7 +40,9 @@ async def read_user(
         )
 
     # Users can only view their own profile unless they're admin
-    if current_user.role != "admin" and current_user.id != user_id:
+    # Compare UUIDs properly
+    current_user_uuid = current_user.uuid if hasattr(current_user, "uuid") and current_user.uuid else str(current_user.id)
+    if current_user.role != "admin" and current_user_uuid != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions"
         )
@@ -49,9 +52,9 @@ async def read_user(
 
 @router.delete("/{user_id}")
 async def delete_user(
-    user_id: int, current_user: Annotated[User, Depends(AdminUser)], db=Depends(get_db)
+    user_id: str, current_user: Annotated[User, Depends(AdminUser)], db=Depends(get_db)
 ):
-    """Delete a user (admin only)."""
+    """Delete a user (admin only). Accepts UUID string."""
     success = db.delete_user(user_id)
     if not success:
         raise HTTPException(

@@ -48,9 +48,9 @@ class RAGService:
             )
             
             if not similar_chunks:
-                logger.warning(f"No chunks found for lecture {lecture_id}")
+                logger.warning(f"No chunks found for lecture {lecture_id}. This usually means embeddings haven't been generated yet.")
                 return {
-                    "answer": "I don't have enough information from this lecture to answer that question. Could you rephrase or ask about something else covered in the lecture?",
+                    "answer": "I don't have enough information from this lecture to answer that question. The lecture embeddings may not have been generated yet. Please ask your teacher to generate embeddings for this lecture, or try asking about something else covered in the lecture.",
                     "sources": [],
                     "similarity_scores": [],
                 }
@@ -83,14 +83,29 @@ class RAGService:
             # Get conversation history if available
             conversation_history = []
             if conversation_id:
-                history_result = (
-                    self.db.admin_client.table("chat_message")
-                    .select("role, content")
-                    .eq("conversation_id", conversation_id)
-                    .order("created_at")
-                    .limit(10)  # Last 10 messages
-                    .execute()
-                )
+                # conversation_id can be integer or UUID string
+                conversation_int_id = conversation_id
+                if isinstance(conversation_id, str):
+                    from utils.id_converter import IDConverter
+                    if IDConverter.is_uuid(conversation_id):
+                        conversation_int_id = await IDConverter.uuid_to_int(self.db, "ai_conversation", conversation_id)
+                    else:
+                        try:
+                            conversation_int_id = int(conversation_id)
+                        except ValueError:
+                            conversation_int_id = None
+                
+                if conversation_int_id:
+                    history_result = (
+                        self.db.admin_client.table("chat_message")
+                        .select("role, content")
+                        .eq("conversation_id", conversation_int_id)  # Use integer ID
+                        .order("created_at")
+                        .limit(10)  # Last 10 messages
+                        .execute()
+                    )
+                else:
+                    history_result = type('obj', (object,), {'data': []})()
                 
                 if history_result.data:
                     conversation_history = [

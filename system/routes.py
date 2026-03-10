@@ -19,6 +19,7 @@ from system.models import (
     UniversityResponse,
 )
 from utils.db import get_db
+from utils.id_converter import IDConverter
 from logger import logger
 
 router = APIRouter()
@@ -217,11 +218,21 @@ async def get_university(
                 detail="University not found",
             )
 
+        # Convert UUID to integer ID if needed
+        university_int_id = university_id
+        if IDConverter.is_uuid(university_id):
+            university_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not university_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="University not found",
+                )
+
         # Get all admins for this university
         admins_result = (
             db.admin_client.table("users")
             .select("id, email, username, first_name, last_name, university_id, is_active, created_at")
-            .eq("university_id", university_id)
+            .eq("university_id", university_int_id)
             .eq("role", UserRole.ADMIN.value)
             .execute()
         )
@@ -307,7 +318,7 @@ async def delete_university(
 
         # Get all courses for this university
         courses = db.get_records(
-            "course", {"university_id": university_id}, use_cache=False
+            "course", {"university_id": university_int_id}, use_cache=False
         )
         course_ids = [c["id"] for c in courses]
         deleted_courses = 0
@@ -315,6 +326,7 @@ async def delete_university(
         # Delete all courses and their related data (similar to course deletion logic)
         for course in courses:
             course_id = course["id"]
+            # course_id from database is already an integer
             try:
                 # Get all lectures for this course
                 lectures = db.get_records("lecture", {"course_id": course_id}, use_cache=False)
@@ -322,10 +334,12 @@ async def delete_university(
 
                 # Delete lecture-related data
                 for lecture_id in lecture_ids:
+                    # lecture_id from database is already an integer
                     # Delete assessments and their children
                     assessments = db.get_records("assessment", {"lecture_id": lecture_id})
                     for assessment in assessments:
                         assessment_id = assessment["id"]
+                        # assessment_id from database is already an integer
                         # Delete questions
                         questions = db.get_records("question", {"assessment_id": assessment_id})
                         for question in questions:
@@ -470,12 +484,13 @@ async def delete_university(
             logger.warning(f"Failed to delete generated lecture files: {str(e)}")
 
         # Get all teachers for this university to delete their documents
-        teachers = db.get_records("teacher", {"university_id": university_id}, use_cache=False)
+        teachers = db.get_records("teacher", {"university_id": university_int_id}, use_cache=False)
         teacher_ids = [t["id"] for t in teachers]
         deleted_documents = 0
 
         # Delete documents uploaded by teachers
         for teacher_id in teacher_ids:
+            # teacher_id from database is already an integer
             documents = db.get_records("documents", {"teacher_id": teacher_id}, use_cache=False)
             for doc in documents:
                 try:
@@ -506,12 +521,12 @@ async def delete_university(
         users_result = (
             db.admin_client.table("users")
             .select("id, role")
-            .eq("university_id", university_id)
+            .eq("university_id", university_int_id)
             .execute()
         )
 
         # Get all students for this university FIRST
-        students = db.get_records("student", {"university_id": university_id}, use_cache=False)
+        students = db.get_records("student", {"university_id": university_int_id}, use_cache=False)
         student_ids = [s["id"] for s in students]
 
         # Delete ALL enrollments for ALL students in this university
@@ -576,7 +591,7 @@ async def delete_university(
         remaining_users = (
             db.admin_client.table("users")
             .select("id")
-            .eq("university_id", university_id)
+            .eq("university_id", university_int_id)
             .execute()
         )
 
@@ -598,7 +613,7 @@ async def delete_university(
         final_check = (
             db.admin_client.table("users")
             .select("id")
-            .eq("university_id", university_id)
+            .eq("university_id", university_int_id)
             .execute()
         )
 

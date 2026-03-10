@@ -2,6 +2,7 @@
 
 import json
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from supabase import Client, create_client
 
@@ -86,29 +87,47 @@ class SupabaseDB:
             raise
 
     def get_user_by_id(self, user_id, use_cache: bool = True) -> Optional[Dict[str, Any]]:
-        """Get user by ID (supports both int and UUID string) with caching."""
+        """Get user by ID (integer ID for performance) with caching."""
         try:
-            user_id_str = str(user_id)
+            # After migration, user_id will be an integer
+            # Convert to appropriate type for query
+            if isinstance(user_id, str):
+                # Try to parse as integer first (for backward compatibility during migration)
+                try:
+                    user_id = int(user_id)
+                except ValueError:
+                    # If not an integer, might be UUID - query by uuid column
+                    result = (
+                        self.get_admin_client()
+                        .table("users")
+                        .select("*")
+                        .eq("uuid", user_id)
+                        .execute()
+                    )
+                    return result.data[0] if result.data else None
+            
+            user_id_int = int(user_id) if not isinstance(user_id, int) else user_id
+            cache_key = f"id:{user_id_int}"
             
             # Check cache first
             if use_cache:
-                cached_user = cache.get("users", "id", user_id_str)
+                cached_user = cache.get("users", cache_key)
                 if cached_user is not None:
                     return cached_user if cached_user != "__NONE__" else None
             
-            # Fetch from database
+            # Fetch from database using integer ID
             result = (
                 self.get_admin_client()
                 .table("users")
                 .select("*")
-                .eq("id", user_id_str)
+                .eq("id", user_id_int)
                 .execute()
             )
             user = result.data[0] if result.data else None
             
             # Cache result
             if use_cache:
-                cache.set("users", user if user else "__NONE__", "id", user_id_str, ttl=60)
+                cache.set("users", user if user else "__NONE__", cache_key, ttl=60)
             
             return user
         except Exception as e:
@@ -145,19 +164,23 @@ class SupabaseDB:
     def update_user(
         self, user_id, user_data: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """Update user (supports UUID strings)."""
+        """Update user (uses integer ID for performance)."""
         try:
+            # Convert to integer if needed
+            user_id_int = int(user_id) if isinstance(user_id, str) and user_id.isdigit() else user_id
+            
             result = (
                 self.get_admin_client()
                 .table("users")
                 .update(user_data)
-                .eq("id", str(user_id))
+                .eq("id", user_id_int)
                 .execute()
             )
             user = result.data[0] if result.data else None
             
             # Invalidate cache
-            cache.invalidate_user(str(user_id))
+            cache_key = f"id:{user_id_int}"
+            cache.delete("users", cache_key)
             
             return user
         except Exception as e:
@@ -165,18 +188,22 @@ class SupabaseDB:
             return None
 
     def delete_user(self, user_id) -> bool:
-        """Delete user (supports UUID strings)."""
+        """Delete user (uses integer ID for performance)."""
         try:
+            # Convert to integer if needed
+            user_id_int = int(user_id) if isinstance(user_id, str) and user_id.isdigit() else user_id
+            
             result = (
                 self.get_admin_client()
                 .table("users")
                 .delete()
-                .eq("id", str(user_id))
+                .eq("id", user_id_int)
                 .execute()
             )
             
             # Invalidate cache
-            cache.invalidate_user(str(user_id))
+            cache_key = f"id:{user_id_int}"
+            cache.delete("users", cache_key)
             
             return len(result.data) > 0
         except Exception as e:
@@ -322,6 +349,11 @@ class SupabaseDB:
             result = self.get_admin_client().table(table_name).insert(data).execute()
             record = result.data[0] if result.data else None
             
+            # Convert integer ID to UUID for API responses
+            if record and "uuid" in record and "id" in record:
+                # Replace integer id with uuid for API compatibility
+                record["id"] = record["uuid"]
+            
             # Invalidate related caches based on table
             if record:
                 self._invalidate_table_cache(table_name, record)
@@ -334,10 +366,27 @@ class SupabaseDB:
     def get_record_by_id(
         self, table_name: str, record_id, use_cache: bool = True
     ) -> Optional[Dict[str, Any]]:
-        """Get a record by ID from any table (supports UUID strings and ints) with caching."""
+        """Get a record by ID from any table (uses integer ID for performance) with caching."""
         try:
-            record_id_str = str(record_id)
-            cache_key = f"{table_name}:{record_id_str}"
+            # Convert to integer if needed
+            if isinstance(record_id, str):
+                try:
+                    record_id = int(record_id)
+                except ValueError:
+                    # If not an integer, might be UUID - query by uuid column
+                    result = (
+                        self.get_admin_client()
+                        .table(table_name)
+                        .select("*")
+                        .eq("uuid", record_id)
+                        .execute()
+                    )
+                    record = result.data[0] if result.data else None
+                    # If querying by UUID, id is already the UUID, no conversion needed
+                    return record
+            
+            record_id_int = int(record_id) if not isinstance(record_id, int) else record_id
+            cache_key = f"{table_name}:id:{record_id_int}"
             
             # Check cache first
             if use_cache:
@@ -349,10 +398,15 @@ class SupabaseDB:
                 self.get_admin_client()
                 .table(table_name)
                 .select("*")
-                .eq("id", record_id_str)
+                .eq("id", record_id_int)
                 .execute()
             )
             record = result.data[0] if result.data else None
+            
+            # Convert integer ID to UUID for API responses
+            if record and "uuid" in record and "id" in record:
+                # Replace integer id with uuid for API compatibility
+                record["id"] = record["uuid"]
             
             # Cache result
             if use_cache:
@@ -398,6 +452,15 @@ class SupabaseDB:
             result = query.range(skip, skip + limit - 1).execute()
             records = result.data
             
+            # Convert integer IDs to UUIDs for API responses
+            # After migration, tables have both 'id' (integer) and 'uuid' (UUID) columns
+            # API responses should use UUIDs, so replace integer 'id' with 'uuid' value
+            if records:
+                for record in records:
+                    if "uuid" in record and "id" in record:
+                        # Replace integer id with uuid for API compatibility
+                        record["id"] = record["uuid"]
+            
             # Cache result
             if use_cache:
                 cache.set("queries", records, cache_key, ttl=60)
@@ -412,14 +475,32 @@ class SupabaseDB:
     ) -> Optional[Dict[str, Any]]:
         """Update a record in any table (supports UUID strings and ints)."""
         try:
-            result = (
-                self.get_admin_client()
-                .table(table_name)
-                .update(data)
-                .eq("id", str(record_id))
-                .execute()
-            )
+            query = self.get_admin_client().table(table_name).update(data)
+            
+            # Handle UUID strings by querying uuid column, otherwise use id column
+            if isinstance(record_id, str):
+                try:
+                    # Try to convert to int first
+                    record_id_int = int(record_id)
+                    query = query.eq("id", record_id_int)
+                except ValueError:
+                    # If not an integer, treat as UUID and query by uuid column
+                    try:
+                        UUID(str(record_id))
+                        query = query.eq("uuid", str(record_id))
+                    except ValueError:
+                        # Not a valid UUID either, try as integer string
+                        query = query.eq("id", int(record_id))
+            else:
+                query = query.eq("id", int(record_id))
+            
+            result = query.execute()
             record = result.data[0] if result.data else None
+            
+            # Convert integer ID to UUID for API responses
+            if record and "uuid" in record and "id" in record:
+                # Replace integer id with uuid for API compatibility
+                record["id"] = record["uuid"]
             
             # Invalidate cache
             cache.delete("queries", f"{table_name}:{str(record_id)}")
@@ -434,13 +515,26 @@ class SupabaseDB:
     def delete_record(self, table_name: str, record_id) -> bool:
         """Delete a record from any table (supports UUID strings and ints)."""
         try:
-            result = (
-                self.get_admin_client()
-                .table(table_name)
-                .delete()
-                .eq("id", str(record_id))
-                .execute()
-            )
+            query = self.get_admin_client().table(table_name).delete()
+            
+            # Handle UUID strings by querying uuid column, otherwise use id column
+            if isinstance(record_id, str):
+                try:
+                    # Try to convert to int first
+                    record_id_int = int(record_id)
+                    query = query.eq("id", record_id_int)
+                except ValueError:
+                    # If not an integer, treat as UUID and query by uuid column
+                    try:
+                        UUID(str(record_id))
+                        query = query.eq("uuid", str(record_id))
+                    except ValueError:
+                        # Not a valid UUID either, try as integer string
+                        query = query.eq("id", int(record_id))
+            else:
+                query = query.eq("id", int(record_id))
+            
+            result = query.execute()
             
             # Invalidate cache
             cache.delete("queries", f"{table_name}:{str(record_id)}")

@@ -29,6 +29,7 @@ from services.quiz_service import QuizService
 from services.summary_service import SummaryService
 from supabase_config import supabase
 from utils.db import get_db
+from utils.id_converter import IDConverter
 
 router = APIRouter()
 
@@ -373,14 +374,72 @@ async def check_duplicate_lecture(
         if not document_id_for_check and request.document_ids:
             document_id_for_check = request.document_ids[0] if request.document_ids else None
 
+        # Convert IDs to integer IDs for database queries (handle both UUID strings and integers)
+        course_int_id = request.course_id
+        semester_int_id = request.semester_id
+        document_int_id = document_id_for_check
+        
+        # Handle course_id (can be UUID string or integer)
+        if isinstance(request.course_id, str):
+            if IDConverter.is_uuid(request.course_id):
+                course_int_id = await IDConverter.uuid_to_int(db, "course", request.course_id)
+                if not course_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Course not found",
+                    )
+            else:
+                # String that's not a UUID, try to convert to int
+                try:
+                    course_int_id = int(request.course_id)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid course_id format",
+                    )
+        # If it's already an integer, use it directly
+        
+        # Handle semester_id (can be UUID string or integer)
+        if isinstance(request.semester_id, str):
+            if IDConverter.is_uuid(request.semester_id):
+                semester_int_id = await IDConverter.uuid_to_int(db, "semester", request.semester_id)
+                if not semester_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Semester not found",
+                    )
+            else:
+                # String that's not a UUID, try to convert to int
+                try:
+                    semester_int_id = int(request.semester_id)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid semester_id format",
+                    )
+        # If it's already an integer, use it directly
+        
+        # Handle document_id (can be UUID string or integer)
+        if document_id_for_check:
+            if isinstance(document_id_for_check, str):
+                if IDConverter.is_uuid(document_id_for_check):
+                    document_int_id = await IDConverter.uuid_to_int(db, "documents", document_id_for_check)
+                else:
+                    # String that's not a UUID, try to convert to int
+                    try:
+                        document_int_id = int(document_id_for_check)
+                    except ValueError:
+                        document_int_id = None  # Invalid format, ignore
+            # If it's already an integer, use it directly
+
         # Check for duplicates
-        result = LectureService.check_for_duplicate_lecture(
+        result = await LectureService.check_for_duplicate_lecture(
             db=db,
-            teacher_id=teacher.id,
-            course_id=request.course_id,
-            semester_id=request.semester_id,
+            teacher_id=str(teacher.id),  # Convert to string for consistency
+            course_id=course_int_id,
+            semester_id=semester_int_id,
             title=request.title,
-            document_id=document_id_for_check,
+            document_id=document_int_id,
             learning_outcomes=request.learning_outcomes,
             selected_chapters=request.selected_chapters,
         )
@@ -499,6 +558,16 @@ async def delete_lecture(
 
         logger.info(f"Deleting lecture {lecture_id} and all associated data")
 
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+
         # Get lecture details
         lecture_data = db.get_record_by_id("lecture", lecture_id)
         if not lecture_data:
@@ -515,7 +584,7 @@ async def delete_lecture(
             )
 
         # Step 1: Get assessments for this lecture (needed for cascading deletes)
-        assessments = db.get_records("assessment", {"lecture_id": lecture_id})
+        assessments = db.get_records("assessment", {"lecture_id": lecture_int_id})
         assessment_ids = [a["id"] for a in assessments]
 
         # Step 2: Delete deepest children first (assessment-related)
@@ -539,7 +608,7 @@ async def delete_lecture(
 
         # Step 3: Delete all direct children of lecture
         # Delete student engagement
-        engagements = db.get_records("student_engagement", {"lecture_id": lecture_id})
+        engagements = db.get_records("student_engagement", {"lecture_id": lecture_int_id})
         for engagement in engagements:
             db.delete_record("student_engagement", engagement["id"])
         logger.info(f"Deleted {len(engagements)} student engagement records")
@@ -550,31 +619,31 @@ async def delete_lecture(
         logger.info(f"Deleted {len(assessment_ids)} assessments")
 
         # Delete AI conversations
-        conversations = db.get_records("ai_conversation", {"lecture_id": lecture_id})
+        conversations = db.get_records("ai_conversation", {"lecture_id": lecture_int_id})
         for conversation in conversations:
             db.delete_record("ai_conversation", conversation["id"])
         logger.info(f"Deleted {len(conversations)} AI conversations")
 
         # Delete lecture analytics
-        analytics = db.get_records("lecture_analytics", {"lecture_id": lecture_id})
+        analytics = db.get_records("lecture_analytics", {"lecture_id": lecture_int_id})
         for analytic in analytics:
             db.delete_record("lecture_analytics", analytic["id"])
         logger.info(f"Deleted {len(analytics)} analytics records")
 
         # Delete lecture chunks
-        chunks = db.get_records("lecture_chunk", {"lecture_id": lecture_id})
+        chunks = db.get_records("lecture_chunk", {"lecture_id": lecture_int_id})
         for chunk in chunks:
             db.delete_record("lecture_chunk", chunk["id"])
         logger.info(f"Deleted {len(chunks)} lecture chunks")
 
         # Delete lecture embeddings
-        embeddings = db.get_records("lecture_embedding", {"lecture_id": lecture_id})
+        embeddings = db.get_records("lecture_embedding", {"lecture_id": lecture_int_id})
         for embedding in embeddings:
             db.delete_record("lecture_embedding", embedding["id"])
         logger.info(f"Deleted {len(embeddings)} lecture embeddings")
 
         # Delete lecture content and associated files
-        lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+        lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_int_id})
         for content in lecture_contents:
             try:
                 storage_bucket = content["storage_bucket"]
@@ -689,12 +758,19 @@ async def get_lecture_download_link(
             )
 
         # Get download URL
-        download_url = LectureService.get_lecture_download_url(
+        download_url = await LectureService.get_lecture_download_url(
             db=db, lecture_id=lecture_id, teacher_id=requester_teacher_id
         )
 
+        # Convert UUID to integer ID if needed for filter
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                lecture_int_id = lecture_id  # Fallback to original if conversion fails
+
         # Get lecture content for file info
-        lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+        lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_int_id})
         pdf_content = lecture_contents[0] if lecture_contents else None
 
         response = LectureDownloadResponse(
@@ -997,7 +1073,18 @@ async def generate_lecture_summary(
         summary = await summary_service.generate_lecture_summary(
             lecture_data.get("content", "")
         )
-        db.update_record("lecture", lecture_id, {"summary": summary})
+        
+        # Convert lecture_id to integer for update if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+        
+        db.update_record("lecture", lecture_int_id, {"summary": summary})
         
         logger.info(f"Summary generated for lecture {lecture_id}")
 
@@ -1059,9 +1146,16 @@ async def generate_lecture_quiz(
                 detail="Access denied to this lecture",
             )
 
+        # Convert UUID to integer ID if needed for filter
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                lecture_int_id = lecture_id  # Fallback to original if conversion fails
+
         # Check if default quiz already exists and delete it
         existing_quiz = db.get_records(
-            "assessment", {"lecture_id": lecture_id, "is_default": True}
+            "assessment", {"lecture_id": lecture_int_id, "is_default": True}
         )
         
         if existing_quiz:
@@ -1085,16 +1179,29 @@ async def generate_lecture_quiz(
             focus_areas=None,
         )
 
-        # Create default assessment
-        assessment_id = str(uuid4())
+        # Get integer IDs for assessment creation
+        course_int_id = lecture_data.get("course_id")
+        if isinstance(course_int_id, str):
+            if IDConverter.is_uuid(course_int_id):
+                course_int_id = await IDConverter.uuid_to_int(db, "course", course_int_id)
+            else:
+                try:
+                    course_int_id = int(course_int_id)
+                except ValueError:
+                    course_int_id = lecture_data.get("course_id")  # Fallback
+        
+        teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+        
+        # Create default assessment with integer IDs
+        assessment_uuid = str(uuid4())
         assessment_data = {
-            "id": assessment_id,
+            "uuid": assessment_uuid,  # Store UUID for external use
             "title": f"Quiz: {lecture_data.get('title')}",
             "description": f"Default quiz for {lecture_data.get('title')}",
             "assessment_type": "QUIZ",
-            "course_id": lecture_data.get("course_id"),
-            "lecture_id": lecture_id,
-            "teacher_id": teacher.id,
+            "course_id": course_int_id,  # Integer FK
+            "lecture_id": lecture_int_id,  # Integer FK
+            "teacher_id": teacher_int_id,  # Integer FK
             "time_limit": 30,
             "max_attempts": 3,
             "passing_score": 60.0,
@@ -1103,15 +1210,18 @@ async def generate_lecture_quiz(
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
         }
-        db.admin_client.table("assessment").insert(assessment_data).execute()
+        assessment_result = db.admin_client.table("assessment").insert(assessment_data).execute()
+        assessment_record = assessment_result.data[0]
+        assessment_int_id = assessment_record["id"]  # Integer ID from database
+        assessment_uuid = assessment_record.get("uuid") or assessment_uuid
 
-        # Create question records
+        # Create question records with integer assessment_id
         questions_data = []
         for idx, question in enumerate(quiz_data["questions"]):
-            question_id = str(uuid4())
+            question_uuid = str(uuid4())
             question_data = {
-                "id": question_id,
-                "assessment_id": assessment_id,
+                "uuid": question_uuid,  # Store UUID for external use
+                "assessment_id": assessment_int_id,  # Integer FK
                 "question_text": question["question_text"],
                 "question_type": question["question_type"],
                 "points": question.get("points", 1.0),
@@ -1126,13 +1236,13 @@ async def generate_lecture_quiz(
 
         db.admin_client.table("question").insert(questions_data).execute()
         logger.info(
-            f"Default quiz {assessment_id} created with {len(questions_data)} questions"
+            f"Default quiz {assessment_uuid} created with {len(questions_data)} questions"
         )
 
         return {
             "message": "Quiz generated successfully",
-            "lecture_id": lecture_id,
-            "assessment_id": assessment_id,
+            "lecture_id": lecture_id,  # UUID for API
+            "assessment_id": assessment_uuid,  # UUID for API
             "num_questions": len(questions_data),
         }
 
@@ -1188,8 +1298,15 @@ async def generate_lecture_flashcards(
                 detail="Access denied to this lecture",
             )
 
+        # Convert UUID to integer ID if needed for filter
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                lecture_int_id = lecture_id  # Fallback to original if conversion fails
+
         # Check if flashcards already exist and delete them
-        existing_flashcards = db.get_records("flashcard", {"lecture_id": lecture_id})
+        existing_flashcards = db.get_records("flashcard", {"lecture_id": lecture_int_id})
         if existing_flashcards:
             for flashcard in existing_flashcards:
                 db.delete_record("flashcard", flashcard["id"])
@@ -1203,12 +1320,13 @@ async def generate_lecture_flashcards(
             difficulty_mix=True
         )
         
-        # Save flashcards to database
+        # Save flashcards to database with integer lecture_id
         flashcards_data = []
         for idx, card in enumerate(flashcards):
+            flashcard_uuid = str(uuid4())
             flashcard_record = {
-                "id": str(uuid4()),
-                "lecture_id": lecture_id,
+                "uuid": flashcard_uuid,  # Store UUID for external use
+                "lecture_id": lecture_int_id,  # Integer FK
                 "question": card["question"],
                 "answer": card["answer"],
                 "order_index": idx,
@@ -1266,16 +1384,35 @@ async def generate_lecture_embeddings(
 
         logger.info(f"Generating embeddings for lecture {lecture_id}")
 
-        # Get lecture details
-        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+        elif isinstance(lecture_id, str):
+            try:
+                lecture_int_id = int(lecture_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid lecture_id format",
+                )
+
+        # Get lecture details using integer ID
+        lecture_data = db.get_record_by_id("lecture", lecture_int_id)
         if not lecture_data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Lecture not found",
             )
 
-        # Verify access
-        if lecture_data.get("teacher_id") != teacher.id:
+        # Verify access - compare integer IDs
+        teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+        if lecture_data.get("teacher_id") != teacher_int_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this lecture",
@@ -1284,13 +1421,13 @@ async def generate_lecture_embeddings(
         # Check if embeddings already exist and delete them
         if lecture_data.get("has_embeddings"):
             embedding_service = EmbeddingService(db)
-            await embedding_service.delete_lecture_embeddings(lecture_id)
+            await embedding_service.delete_lecture_embeddings(lecture_id)  # Pass UUID for service
             logger.info(f"Deleted existing embeddings for lecture {lecture_id}")
 
-        # Generate embeddings
+        # Generate embeddings - pass UUID to service (it will convert internally)
         embedding_service = EmbeddingService(db)
         result = await embedding_service.generate_embeddings_for_lecture(
-            lecture_id=lecture_id,
+            lecture_id=lecture_id,  # Pass UUID to service
             lecture_content=lecture_data.get("content", "")
         )
 
@@ -1374,11 +1511,14 @@ async def publish_lecture(
             course_id = lecture_data.get("course_id")
             lecture_title = lecture_data.get("title", "Lecture")
             
+            # course_id from database should be integer already, but verify
+            course_int_id = course_id if isinstance(course_id, int) else course_id
+            
             # Get course name
             course_result = (
                 db.admin_client.table("course")
                 .select("name")
-                .eq("id", course_id)
+                .eq("id", course_int_id)
                 .execute()
             )
             course_name = course_result.data[0]["name"] if course_result.data else "Course"
@@ -1387,7 +1527,7 @@ async def publish_lecture(
             enrollments_result = (
                 db.admin_client.table("enrollment")
                 .select("student_id")
-                .eq("course_id", course_id)
+                .eq("course_id", course_int_id)
                 .eq("is_active", True)
                 .execute()
             )
@@ -1551,8 +1691,26 @@ async def generate_lecture_audio(
 
         logger.info(f"Generating audio for lecture {lecture_id}")
 
-        # Get lecture details
-        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        # Convert lecture_id to integer for database queries
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+        elif isinstance(lecture_id, str):
+            try:
+                lecture_int_id = int(lecture_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid lecture_id format",
+                )
+
+        # Get lecture details using integer ID
+        lecture_data = db.get_record_by_id("lecture", lecture_int_id)
         if not lecture_data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1560,7 +1718,8 @@ async def generate_lecture_audio(
             )
 
         # Verify access
-        if lecture_data.get("teacher_id") != teacher.id:
+        teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+        if lecture_data.get("teacher_id") != teacher_int_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this lecture",
@@ -1575,10 +1734,10 @@ async def generate_lecture_audio(
                        "Minimum 100 characters required.",
             )
 
-        # Check if audio already exists and delete it
+        # Check if audio already exists and delete it using integer ID
         existing_audio = db.get_records(
             "lecture_content",
-            {"lecture_id": lecture_id, "file_type": "mp3"}
+            {"lecture_id": lecture_int_id, "file_type": "mp3"}
         )
         
         if existing_audio:
@@ -1606,11 +1765,11 @@ async def generate_lecture_audio(
             model=model,
         )
 
-        # Create lecture content record for the audio
-        audio_content_id = str(uuid4())
+        # Create lecture content record for the audio with integer lecture_id
+        audio_content_uuid = str(uuid4())
         audio_content_data = {
-            "id": audio_content_id,
-            "lecture_id": lecture_id,
+            "uuid": audio_content_uuid,  # Store UUID for external use
+            "lecture_id": lecture_int_id,  # Integer FK
             "file_name": result["audio_filename"],
             "file_type": "mp3",
             "file_size": result["file_size"],
@@ -1619,14 +1778,16 @@ async def generate_lecture_audio(
             "mime_type": result["mime_type"],
             "created_at": datetime.utcnow().isoformat(),
         }
-        db.admin_client.table("lecture_content").insert(audio_content_data).execute()
+        audio_result = db.admin_client.table("lecture_content").insert(audio_content_data).execute()
+        audio_content_record = audio_result.data[0] if audio_result.data else None
+        audio_content_uuid = audio_content_record.get("uuid") or audio_content_uuid if audio_content_record else audio_content_uuid
 
         logger.info(f"Audio generated successfully for lecture {lecture_id}")
 
         return {
             "message": "Audio generated successfully",
-            "lecture_id": lecture_id,
-            "audio_content_id": audio_content_id,
+            "lecture_id": lecture_id,  # UUID for API
+            "audio_content_id": audio_content_uuid,  # UUID for API
             "audio_filename": result["audio_filename"],
             "download_url": result["download_url"],
             "file_size": result["file_size"],
@@ -1663,8 +1824,26 @@ async def get_lecture_audio(
     try:
         logger.info(f"Fetching audio for lecture {lecture_id}")
 
-        # Get lecture details
-        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        # Convert lecture_id to integer for database queries
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+        elif isinstance(lecture_id, str):
+            try:
+                lecture_int_id = int(lecture_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid lecture_id format",
+                )
+
+        # Get lecture details using integer ID
+        lecture_data = db.get_record_by_id("lecture", lecture_int_id)
         if not lecture_data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1674,7 +1853,8 @@ async def get_lecture_audio(
         # Check access - teachers can access their own, students can access published
         if current_user.role == UserRole.TEACHER:
             teacher = current_user.teacher_profile
-            if not teacher or lecture_data.get("teacher_id") != teacher.id:
+            teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+            if not teacher or lecture_data.get("teacher_id") != teacher_int_id:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Access denied to this lecture",
@@ -1689,20 +1869,26 @@ async def get_lecture_audio(
             # Check if student is enrolled in the course
             student = current_user.student_profile
             if student:
-                enrollment = db.get_records(
-                    "enrollment",
-                    {"student_id": student.id, "course_id": lecture_data.get("course_id"), "is_active": True}
-                )
-                if not enrollment:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="You are not enrolled in this course",
+                # Convert student_id and course_id to integers
+                student_int_id = student.id if isinstance(student.id, int) else await IDConverter.uuid_to_int(db, "student", str(student.id))
+                course_id = lecture_data.get("course_id")
+                course_int_id = course_id if isinstance(course_id, int) else course_id
+                
+                if student_int_id:
+                    enrollment = db.get_records(
+                        "enrollment",
+                        {"student_id": student_int_id, "course_id": course_int_id, "is_active": True}
                     )
+                    if not enrollment:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You are not enrolled in this course",
+                        )
 
-        # Get audio content record
+        # Get audio content record using integer ID
         audio_records = db.get_records(
             "lecture_content",
-            {"lecture_id": lecture_id, "file_type": "mp3"}
+            {"lecture_id": lecture_int_id, "file_type": "mp3"}
         )
         
         if not audio_records:
@@ -1770,8 +1956,26 @@ async def delete_lecture_audio(
 
         logger.info(f"Deleting audio for lecture {lecture_id}")
 
-        # Get lecture details
-        lecture_data = db.get_record_by_id("lecture", lecture_id)
+        # Convert lecture_id to integer for database queries
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+        elif isinstance(lecture_id, str):
+            try:
+                lecture_int_id = int(lecture_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid lecture_id format",
+                )
+
+        # Get lecture details using integer ID
+        lecture_data = db.get_record_by_id("lecture", lecture_int_id)
         if not lecture_data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1779,16 +1983,17 @@ async def delete_lecture_audio(
             )
 
         # Verify access
-        if lecture_data.get("teacher_id") != teacher.id:
+        teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+        if lecture_data.get("teacher_id") != teacher_int_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this lecture",
             )
 
-        # Get audio content records
+        # Get audio content records using integer ID
         audio_records = db.get_records(
             "lecture_content",
-            {"lecture_id": lecture_id, "file_type": "mp3"}
+            {"lecture_id": lecture_int_id, "file_type": "mp3"}
         )
         
         if not audio_records:

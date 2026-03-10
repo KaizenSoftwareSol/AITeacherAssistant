@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from logger import logger
 from settings import settings
+from utils.id_converter import IDConverter
 
 
 class EmbeddingService:
@@ -50,6 +51,13 @@ class EmbeddingService:
             Dictionary with chunk and embedding counts
         """
         try:
+            # Convert UUID to integer ID if needed
+            lecture_int_id = lecture_id
+            if IDConverter.is_uuid(lecture_id):
+                lecture_int_id = await IDConverter.uuid_to_int(self.db, "lecture", lecture_id)
+                if not lecture_int_id:
+                    raise ValueError(f"Lecture {lecture_id} not found")
+            
             logger.info(f"Starting embedding generation for lecture {lecture_id}")
             
             # Chunk the generated lecture content
@@ -88,11 +96,11 @@ class EmbeddingService:
             chunk_id_map = {}  # Map chunk index to chunk_id
             
             for idx, chunk_data in enumerate(chunks):
-                chunk_id = str(uuid4())
-                chunk_id_map[idx] = chunk_id
+                chunk_uuid = str(uuid4())
+                chunk_id_map[idx] = chunk_uuid
                 chunk_records.append({
-                    "id": chunk_id,
-                    "lecture_id": lecture_id,
+                    "uuid": chunk_uuid,  # Store UUID for external use
+                    "lecture_id": lecture_int_id,  # Integer FK
                     "chunk_index": idx,
                     "content": chunk_data["content"],
                     "chunk_type": chunk_data.get("type", "CONTENT"),
@@ -128,10 +136,14 @@ class EmbeddingService:
             # Create embedding records
             embedding_records = []
             for idx, embedding_vector in enumerate(all_embeddings):
+                embedding_uuid = str(uuid4())
+                # chunk_id_map contains UUIDs, but we need integer chunk_id for FK
+                # Get the chunk record to find its integer ID
+                chunk_uuid = chunk_id_map[idx]
                 embedding_records.append({
-                    "id": str(uuid4()),
-                    "lecture_id": lecture_id,
-                    "chunk_id": chunk_id_map[idx],
+                    "uuid": embedding_uuid,  # Store UUID for external use
+                    "lecture_id": lecture_int_id,  # Integer FK
+                    "chunk_id": chunk_uuid,  # Will be converted to integer by database or use UUID lookup
                     "embedding": embedding_vector,
                     "embedding_model": self.embedding_model,
                     "created_at": now,
@@ -141,13 +153,29 @@ class EmbeddingService:
             if self.db:
                 DB_BATCH_SIZE = 100  # Increased from 10 to 100
                 
-                # Insert all chunks in larger batches
+                # Insert all chunks in larger batches and get their integer IDs
                 logger.info(f"Inserting {len(chunk_records)} chunks...")
+                chunk_uuid_to_int_id = {}  # Map UUID to integer ID
                 for i in range(0, len(chunk_records), DB_BATCH_SIZE):
                     batch = chunk_records[i:i + DB_BATCH_SIZE]
-                    self.db.admin_client.table("lecture_chunk").insert(batch).execute()
+                    result = self.db.admin_client.table("lecture_chunk").insert(batch).execute()
+                    # Map UUIDs to integer IDs from inserted records
+                    for record in result.data:
+                        chunk_uuid = record.get("uuid")
+                        chunk_int_id = record.get("id")
+                        if chunk_uuid and chunk_int_id:
+                            chunk_uuid_to_int_id[chunk_uuid] = chunk_int_id
                 
                 logger.info(f"Inserted {len(chunk_records)} chunks")
+                
+                # Update embedding records with integer chunk_ids
+                for emb_record in embedding_records:
+                    chunk_uuid = emb_record["chunk_id"]
+                    chunk_int_id = chunk_uuid_to_int_id.get(chunk_uuid)
+                    if chunk_int_id:
+                        emb_record["chunk_id"] = chunk_int_id  # Use integer FK
+                    else:
+                        logger.warning(f"Could not find integer ID for chunk UUID {chunk_uuid}")
                 
                 # Insert all embeddings in larger batches
                 logger.info(f"Inserting {len(embedding_records)} embeddings...")
@@ -161,7 +189,7 @@ class EmbeddingService:
                 self.db.admin_client.table("lecture").update({
                     "has_embeddings": True,
                     "updated_at": now
-                }).eq("id", lecture_id).execute()
+                }).eq("id", lecture_int_id).execute()
             
             logger.info(f"Completed embedding generation for lecture {lecture_id}")
             
@@ -250,11 +278,19 @@ class EmbeddingService:
         source_chunks = []
         
         try:
+            # Convert UUID to integer ID if needed
+            lecture_int_id = lecture_id
+            if IDConverter.is_uuid(lecture_id):
+                lecture_int_id = await IDConverter.uuid_to_int(self.db, "lecture", lecture_id)
+                if not lecture_int_id:
+                    logger.warning(f"Lecture {lecture_id} not found for source material extraction")
+                    return []
+            
             # Get the lecture to find the source document(s)
             lecture_result = (
                 self.db.admin_client.table("lecture")
                 .select("document_id, title, description")
-                .eq("id", lecture_id)
+                .eq("id", lecture_int_id)
                 .execute()
             )
             
@@ -272,13 +308,21 @@ class EmbeddingService:
                 logger.info(f"No source document linked to lecture '{lecture_title}' (id: {lecture_id}) - lecture may have been created from text input")
                 return []
             
+            # Convert document_id to integer if it's a UUID
+            document_int_id = document_id
+            if IDConverter.is_uuid(str(document_id)):
+                document_int_id = await IDConverter.uuid_to_int(self.db, "documents", str(document_id))
+                if not document_int_id:
+                    logger.warning(f"Document {document_id} not found")
+                    return []
+            
             logger.info(f"Fetching source document {document_id} for lecture '{lecture_title}'")
             
             # Get the document and its content
             doc_result = (
                 self.db.admin_client.table("documents")
                 .select("id, title, content_json_path")
-                .eq("id", document_id)
+                .eq("id", document_int_id)
                 .execute()
             )
             
@@ -474,21 +518,49 @@ class EmbeddingService:
             List of chunk dictionaries with similarity scores
         """
         try:
+            # Convert UUID to integer ID if needed
+            lecture_int_id = lecture_id
+            if IDConverter.is_uuid(lecture_id):
+                lecture_int_id = await IDConverter.uuid_to_int(self.db, "lecture", lecture_id)
+                if not lecture_int_id:
+                    raise ValueError(f"Lecture {lecture_id} not found")
+            elif isinstance(lecture_id, str):
+                try:
+                    lecture_int_id = int(lecture_id)
+                except ValueError:
+                    raise ValueError(f"Invalid lecture_id format: {lecture_id}")
+            
+            # Check if embeddings exist for this lecture
+            embedding_count = (
+                self.db.admin_client.table("lecture_embedding")
+                .select("id", count="exact")
+                .eq("lecture_id", lecture_int_id)
+                .execute()
+            )
+            
+            if embedding_count.count == 0:
+                logger.warning(f"No embeddings found for lecture {lecture_id} (int_id: {lecture_int_id}). Embeddings must be generated first.")
+                return []
+            
+            logger.info(f"Found {embedding_count.count} embeddings for lecture {lecture_id}, searching for similar chunks...")
+            
             # Generate query embedding
             query_embedding = await self.generate_query_embedding(query)
             
             # Use PostgreSQL function for similarity search
-            # Note: The search_lecture_chunks function was created in the migration
+            # Note: The search_lecture_chunks function expects integer lecture_id
             result = self.db.admin_client.rpc(
                 "search_lecture_chunks",
                 {
-                    "p_lecture_id": lecture_id,
+                    "p_lecture_id": lecture_int_id,  # Use integer ID
                     "p_query_embedding": query_embedding,
                     "p_limit": top_k,
                 }
             ).execute()
             
-            return result.data if result.data else []
+            chunks_found = result.data if result.data else []
+            logger.info(f"Found {len(chunks_found)} similar chunks for query: {query[:50]}...")
+            return chunks_found
         
         except Exception as e:
             logger.error(f"Error searching similar chunks: {str(e)}")
@@ -502,15 +574,23 @@ class EmbeddingService:
             lecture_id: UUID of the lecture
         """
         try:
+            # Convert UUID to integer ID if needed
+            lecture_int_id = lecture_id
+            if IDConverter.is_uuid(lecture_id):
+                lecture_int_id = await IDConverter.uuid_to_int(self.db, "lecture", lecture_id)
+                if not lecture_int_id:
+                    logger.warning(f"Lecture {lecture_id} not found")
+                    return
+            
             # Delete embeddings (chunks will cascade)
-            self.db.admin_client.table("lecture_embedding").delete().eq("lecture_id", lecture_id).execute()
-            self.db.admin_client.table("lecture_chunk").delete().eq("lecture_id", lecture_id).execute()
+            self.db.admin_client.table("lecture_embedding").delete().eq("lecture_id", lecture_int_id).execute()
+            self.db.admin_client.table("lecture_chunk").delete().eq("lecture_id", lecture_int_id).execute()
             
             # Update lecture flag
             self.db.admin_client.table("lecture").update({
                 "has_embeddings": False,
                 "updated_at": datetime.utcnow().isoformat()
-            }).eq("id", lecture_id).execute()
+            }).eq("id", lecture_int_id).execute()
             
             logger.info(f"Deleted embeddings for lecture {lecture_id}")
         
