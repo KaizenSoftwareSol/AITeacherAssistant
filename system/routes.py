@@ -4,7 +4,7 @@ import secrets
 import string
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from auth.models import UserCreate
 from auth.service import AuthService
@@ -111,65 +111,131 @@ async def create_university(
         ) from e
 
 
-@router.get("/universities", response_model=list[UniversityDetail])
+@router.get("/universities")
 async def list_universities(
     current_user: SystemUser,
     db=Depends(get_db),
-    skip: int = 0,
-    limit: int = 100,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
+    search: str = Query(None, description="Search by university name or location"),
+    sort_by: str = Query("name", description="Sort by: name, location, created_at, admin_count"),
+    sort_order: str = Query("asc", description="Sort order: asc or desc"),
 ):
     """
-    List all universities with admin counts.
+    List all universities with admin counts and pagination.
 
-    System users can view all universities in the system.
+    Query Parameters:
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    - search: Search by university name or location
+    - sort_by: Sort field (default: name)
+    - sort_order: asc or desc (default: asc)
     """
     try:
         # Get all universities
         universities = db.get_records(
-            "university", {}, skip=skip, limit=limit, use_cache=False
+            "university", {}, skip=0, limit=1000, use_cache=False
         )
 
         if not universities:
-            return []
+            return {
+                "items": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
+                "has_next": False,
+                "has_previous": False,
+            }
+        
+        # Apply search filter
+        if search:
+            search_lower = search.lower()
+            universities = [
+                u for u in universities
+                if search_lower in (u.get("name") or "").lower()
+                or search_lower in (u.get("location") or "").lower()
+            ]
 
         university_ids = [u["id"] for u in universities]
+
+        # Convert university UUIDs to integer IDs for database query
+        university_int_ids = []
+        uuid_to_int_map = {}
+        for univ_uuid in university_ids:
+            if IDConverter.is_uuid(univ_uuid):
+                univ_int_id = await IDConverter.uuid_to_int(db, "university", univ_uuid)
+                if univ_int_id:
+                    university_int_ids.append(univ_int_id)
+                    uuid_to_int_map[univ_uuid] = univ_int_id
+            else:
+                # Already an integer
+                university_int_ids.append(univ_uuid)
+                uuid_to_int_map[univ_uuid] = univ_uuid
 
         # Get admin counts for each university
         admin_counts = {}
         admin_users_map = {}
 
-        admins_result = (
-            db.admin_client.table("users")
-            .select("id, email, username, first_name, last_name, university_id, is_active, created_at")
-            .in_("university_id", university_ids)
-            .eq("role", UserRole.ADMIN.value)
-            .execute()
-        )
+        if university_int_ids:
+            admins_result = (
+                db.admin_client.table("users")
+                .select("id, email, username, first_name, last_name, university_id, is_active, created_at")
+                .in_("university_id", university_int_ids)
+                .eq("role", UserRole.ADMIN.value)
+                .execute()
+            )
 
-        for admin in admins_result.data or []:
-            univ_id = admin.get("university_id")
-            if univ_id:
-                if univ_id not in admin_counts:
-                    admin_counts[univ_id] = 0
-                    admin_users_map[univ_id] = []
-                admin_counts[univ_id] += 1
-                admin_users_map[univ_id].append(
-                    AdminSummary(
-                        user_id=admin["id"],
-                        email=admin["email"],
-                        username=admin["username"],
-                        first_name=admin.get("first_name", ""),
-                        last_name=admin.get("last_name", ""),
-                        university_id=univ_id,
-                        university_name="",  # Will be populated below
-                        is_active=admin.get("is_active", True),
-                        created_at=str(admin.get("created_at", "")),
-                    )
-                )
+            # Map integer university_id back to UUID for response
+            int_to_uuid_map = {v: k for k, v in uuid_to_int_map.items()}
+
+            for admin in admins_result.data or []:
+                univ_int_id = admin.get("university_id")
+                if univ_int_id:
+                    # Convert integer ID back to UUID for response
+                    univ_uuid = int_to_uuid_map.get(univ_int_id)
+                    if univ_uuid:
+                        if univ_uuid not in admin_counts:
+                            admin_counts[univ_uuid] = 0
+                            admin_users_map[univ_uuid] = []
+                        admin_counts[univ_uuid] += 1
+                        admin_users_map[univ_uuid].append(
+                            AdminSummary(
+                                user_id=admin["id"],
+                                email=admin["email"],
+                                username=admin["username"],
+                                first_name=admin.get("first_name", ""),
+                                last_name=admin.get("last_name", ""),
+                                university_id=univ_uuid,
+                                university_name="",  # Will be populated below
+                                is_active=admin.get("is_active", True),
+                                created_at=str(admin.get("created_at", "")),
+                            )
+                        )
+
+        # Sort
+        sort_desc = sort_order.lower() == "desc"
+        if sort_by == "admin_count":
+            universities.sort(key=lambda u: admin_counts.get(u["id"], 0), reverse=sort_desc)
+        else:
+            sort_key_map = {
+                "name": lambda u: (u.get("name") or "").lower(),
+                "location": lambda u: (u.get("location") or "").lower(),
+                "created_at": lambda u: u.get("created_at") or "",
+            }
+            sort_fn = sort_key_map.get(sort_by, sort_key_map["name"])
+            universities.sort(key=sort_fn, reverse=sort_desc)
+        
+        # Calculate pagination
+        total = len(universities)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_data = universities[start:end]
 
         # Build response
         universities_detail = []
-        for university in universities:
+        for university in page_data:
             univ_id = university["id"]
             admin_list = admin_users_map.get(univ_id, [])
             # Populate university_name in admin summaries
@@ -189,7 +255,15 @@ async def list_universities(
                 )
             )
 
-        return universities_detail
+        return {
+            "items": universities_detail,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_previous": page > 1,
+        }
 
     except Exception as e:
         logger.error(f"Error listing universities: {e!s}")
@@ -303,13 +377,23 @@ async def delete_university(
 
         university_name = university.get("name", university_id)
 
+        # Convert UUID to integer ID if needed
+        university_int_id = university_id
+        if IDConverter.is_uuid(university_id):
+            university_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not university_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="University not found",
+                )
+
         logger.info(
             f"System user {current_user.id} initiating cascade delete for university "
             f"{university_id} ({university_name})"
         )
 
         # Delete modules and module_course entries for this university
-        modules = db.get_records("module", {"university_id": university_id}, use_cache=False)
+        modules = db.get_records("module", {"university_id": university_int_id}, use_cache=False)
         for module in modules:
             # module_course entries cascade-delete via FK
             db.delete_record("module", module["id"])
@@ -757,44 +841,119 @@ async def create_admin_user(
         ) from e
 
 
-@router.get("/admins", response_model=list[AdminSummary])
+@router.get("/admins")
 async def list_all_admins(
     current_user: SystemUser,
     db=Depends(get_db),
-    skip: int = 0,
-    limit: int = 100,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
+    search: str = Query(None, description="Search by name, email, or university"),
+    university_id: str = Query(None, description="Filter by university ID"),
+    sort_by: str = Query("created_at", description="Sort by: first_name, last_name, email, created_at"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
 ):
     """
-    List all admin users across all universities.
+    List all admin users across all universities with pagination.
 
-    System users can view all admins in the system.
+    Query Parameters:
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    - search: Search by name, email, or university name
+    - university_id: Filter by university ID
+    - sort_by: Sort field (default: created_at)
+    - sort_order: asc or desc (default: desc)
     """
     try:
         # Get all admin users
-        admins_result = (
+        admins_query = (
             db.admin_client.table("users")
             .select("id, email, username, first_name, last_name, university_id, is_active, created_at")
             .eq("role", UserRole.ADMIN.value)
-            .order("created_at", desc=True)  # type: ignore
-            .range(skip, skip + limit - 1)
-            .execute()
         )
+        
+        # Filter by university if specified
+        if university_id:
+            univ_int_id = university_id
+            if IDConverter.is_uuid(university_id):
+                univ_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if univ_int_id:
+                admins_query = admins_query.eq("university_id", univ_int_id)
+        
+        admins_result = admins_query.execute()
 
         if not admins_result.data:
-            return []
+            return {
+                "items": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
+                "has_next": False,
+                "has_previous": False,
+            }
 
-        university_ids = list(set(a.get("university_id") for a in admins_result.data if a.get("university_id")))
+        university_int_ids = list(set(a.get("university_id") for a in admins_result.data if a.get("university_id")))
+
+        # Convert integer IDs to UUIDs for get_records_batch
+        university_uuids = []
+        int_to_uuid_map = {}
+        for univ_int_id in university_int_ids:
+            if univ_int_id:
+                univ_uuid = await IDConverter.int_to_uuid(db, "university", univ_int_id)
+                if univ_uuid:
+                    university_uuids.append(univ_uuid)
+                    int_to_uuid_map[univ_int_id] = univ_uuid
 
         # Get university names
         university_names = {}
-        if university_ids:
-            universities = db.get_records_batch("university", university_ids)
+        if university_uuids:
+            universities = db.get_records_batch("university", university_uuids)
             for univ in universities.values():
                 university_names[univ["id"]] = univ.get("name", "")
+        
+        all_admins_data = admins_result.data
+        
+        # Apply search filter
+        if search:
+            search_lower = search.lower()
+            filtered = []
+            for admin in all_admins_data:
+                univ_int_id = admin.get("university_id")
+                univ_uuid = int_to_uuid_map.get(univ_int_id, "")
+                univ_name = university_names.get(univ_uuid, "")
+                if (
+                    search_lower in (admin.get("first_name") or "").lower()
+                    or search_lower in (admin.get("last_name") or "").lower()
+                    or search_lower in (admin.get("email") or "").lower()
+                    or search_lower in univ_name.lower()
+                    or search_lower in f"{admin.get('first_name', '')} {admin.get('last_name', '')}".lower()
+                ):
+                    filtered.append(admin)
+            all_admins_data = filtered
+        
+        # Sort
+        sort_desc = sort_order.lower() == "desc"
+        sort_key_map = {
+            "first_name": lambda a: (a.get("first_name") or "").lower(),
+            "last_name": lambda a: (a.get("last_name") or "").lower(),
+            "email": lambda a: (a.get("email") or "").lower(),
+            "created_at": lambda a: a.get("created_at") or "",
+        }
+        sort_fn = sort_key_map.get(sort_by, sort_key_map["created_at"])
+        all_admins_data.sort(key=sort_fn, reverse=sort_desc)
+        
+        # Calculate pagination
+        total = len(all_admins_data)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_data = all_admins_data[start:end]
 
         admin_summaries = []
-        for admin in admins_result.data:
-            univ_id = admin.get("university_id")
+        for admin in page_data:
+            univ_int_id = admin.get("university_id")
+            # Convert integer ID to UUID for response
+            univ_uuid = int_to_uuid_map.get(univ_int_id, "") if univ_int_id else ""
             admin_summaries.append(
                 AdminSummary(
                     user_id=admin["id"],
@@ -802,14 +961,22 @@ async def list_all_admins(
                     username=admin["username"],
                     first_name=admin.get("first_name", ""),
                     last_name=admin.get("last_name", ""),
-                    university_id=univ_id or "",
-                    university_name=university_names.get(univ_id, ""),
+                    university_id=univ_uuid,
+                    university_name=university_names.get(univ_uuid, ""),
                     is_active=admin.get("is_active", True),
                     created_at=str(admin.get("created_at", "")),
                 )
             )
 
-        return admin_summaries
+        return {
+            "items": admin_summaries,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_previous": page > 1,
+        }
 
     except Exception as e:
         logger.error(f"Error listing admins: {e!s}")

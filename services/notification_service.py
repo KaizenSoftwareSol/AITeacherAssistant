@@ -790,6 +790,7 @@ class NotificationService:
         lecture_title: str,
         course_name: str,
         lecture_id: str,
+        course_id: Optional[str] = None,
         teacher_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Notify all enrolled students when a lecture is published."""
@@ -808,6 +809,7 @@ class NotificationService:
         try:
             from settings import settings
             from datetime import datetime
+            from utils.id_converter import IDConverter
             
             # Get user info for emails
             users_result = (
@@ -818,7 +820,18 @@ class NotificationService:
                 .execute()
             )
             
-            lecture_link = f"{settings.FRONTEND_URL}/student/lectures/{lecture_id}"
+            # Build lecture link with courseId query parameter
+            if course_id:
+                # Convert course_id to UUID if it's an integer
+                course_id_uuid = course_id
+                if not IDConverter.is_uuid(course_id):
+                    course_id_uuid = await IDConverter.int_to_uuid(self.db, "course", course_id)
+                    if not course_id_uuid:
+                        course_id_uuid = course_id  # Fallback to original
+                lecture_link = f"{settings.FRONTEND_URL}/student/lectures/{lecture_id}?courseId={course_id_uuid}"
+            else:
+                lecture_link = f"{settings.FRONTEND_URL}/student/lectures/{lecture_id}"
+            
             published_date = datetime.utcnow().strftime("%B %d, %Y")
             
             for user in users_result.data or []:
@@ -878,7 +891,7 @@ class NotificationService:
                 .execute()
             )
             
-            quiz_link = f"{settings.FRONTEND_URL}/student/assessments/{assessment_id}"
+            quiz_link = f"{settings.FRONTEND_URL}/student/assessments"
             
             for user in users_result.data or []:
                 user_email = user.get("email")
@@ -928,7 +941,7 @@ class NotificationService:
                 student_email = student_data.get("email")
                 student_name = f"{student_data.get('first_name', '')} {student_data.get('last_name', '')}".strip() or "Student"
                 if student_email:
-                    result_link = f"{settings.FRONTEND_URL}/student/assessments/{assessment_id}"
+                    result_link = f"{settings.FRONTEND_URL}/student/assessments"
                     
                     email_service.send_result_approved_notification(
                         to_email=student_email,

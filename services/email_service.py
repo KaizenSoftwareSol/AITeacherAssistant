@@ -293,7 +293,7 @@ class EmailService:
         Returns:
             True if email sent successfully
         """
-        dashboard_link = dashboard_link or f"{self.frontend_url}/student/dashboard"
+        dashboard_link = dashboard_link or f"{self.frontend_url}/dashboard"
         
         replacements = {
             "Student Name": student_name,

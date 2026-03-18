@@ -122,13 +122,13 @@ WITH CHECK (true);
 CREATE POLICY "Users can view their own profile"
 ON public.users FOR SELECT
 TO authenticated
-USING (auth.uid()::text = id::text);
+USING (auth.uid()::text = uuid::text);
 
 CREATE POLICY "Users can update their own profile"
 ON public.users FOR UPDATE
 TO authenticated
-USING (auth.uid()::text = id::text)
-WITH CHECK (auth.uid()::text = id::text);
+USING (auth.uid()::text = uuid::text)
+WITH CHECK (auth.uid()::text = uuid::text);
 
 -- ------------------------------------
 -- UNIVERSITY TABLE POLICIES
@@ -156,13 +156,31 @@ WITH CHECK (true);
 CREATE POLICY "Teachers can view their own profile"
 ON public.teacher FOR SELECT
 TO authenticated
-USING (user_id::text = auth.uid()::text);
+USING (
+    EXISTS (
+        SELECT 1 FROM public.users u
+        WHERE u.id = teacher.user_id
+        AND u.uuid::text = auth.uid()::text
+    )
+);
 
 CREATE POLICY "Teachers can update their own profile"
 ON public.teacher FOR UPDATE
 TO authenticated
-USING (user_id::text = auth.uid()::text)
-WITH CHECK (user_id::text = auth.uid()::text);
+USING (
+    EXISTS (
+        SELECT 1 FROM public.users u
+        WHERE u.id = teacher.user_id
+        AND u.uuid::text = auth.uid()::text
+    )
+)
+WITH CHECK (
+    EXISTS (
+        SELECT 1 FROM public.users u
+        WHERE u.id = teacher.user_id
+        AND u.uuid::text = auth.uid()::text
+    )
+);
 
 -- ------------------------------------
 -- STUDENT TABLE POLICIES
@@ -176,13 +194,31 @@ WITH CHECK (true);
 CREATE POLICY "Students can view their own profile"
 ON public.student FOR SELECT
 TO authenticated
-USING (user_id::text = auth.uid()::text);
+USING (
+    EXISTS (
+        SELECT 1 FROM public.users u
+        WHERE u.id = student.user_id
+        AND u.uuid::text = auth.uid()::text
+    )
+);
 
 CREATE POLICY "Students can update their own profile"
 ON public.student FOR UPDATE
 TO authenticated
-USING (user_id::text = auth.uid()::text)
-WITH CHECK (user_id::text = auth.uid()::text);
+USING (
+    EXISTS (
+        SELECT 1 FROM public.users u
+        WHERE u.id = student.user_id
+        AND u.uuid::text = auth.uid()::text
+    )
+)
+WITH CHECK (
+    EXISTS (
+        SELECT 1 FROM public.users u
+        WHERE u.id = student.user_id
+        AND u.uuid::text = auth.uid()::text
+    )
+);
 
 -- ------------------------------------
 -- COURSE TABLE POLICIES
@@ -204,7 +240,8 @@ TO authenticated
 USING (
     EXISTS (
         SELECT 1 FROM public.teacher t
-        WHERE t.user_id::text = auth.uid()::text
+        JOIN public.users u ON u.id = t.user_id
+        WHERE u.uuid::text = auth.uid()::text
         AND t.university_id = course.university_id
     )
 );
@@ -238,8 +275,9 @@ TO authenticated
 USING (
     EXISTS (
         SELECT 1 FROM public.student s
+        JOIN public.users u ON u.id = s.user_id
         WHERE s.id = enrollment.student_id
-        AND s.user_id::text = auth.uid()::text
+        AND u.uuid::text = auth.uid()::text
     )
 );
 
@@ -249,8 +287,9 @@ TO authenticated
 WITH CHECK (
     EXISTS (
         SELECT 1 FROM public.student s
+        JOIN public.users u ON u.id = s.user_id
         WHERE s.id = enrollment.student_id
-        AND s.user_id::text = auth.uid()::text
+        AND u.uuid::text = auth.uid()::text
     )
 );
 
@@ -270,7 +309,7 @@ USING (
     EXISTS (
         SELECT 1 FROM public.teacher t
         WHERE t.id = lecture.teacher_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -284,7 +323,7 @@ USING (
         JOIN public.student s ON s.id = e.student_id
         WHERE e.course_id = lecture.course_id
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -308,13 +347,13 @@ USING (
         WHERE l.id = lecture_content.lecture_id
         AND l.status IN ('PUBLISHED', 'DELIVERED')
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
     OR EXISTS (
         SELECT 1 FROM public.lecture l
         JOIN public.teacher t ON t.id = l.teacher_id
         WHERE l.id = lecture_content.lecture_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -338,13 +377,13 @@ USING (
         WHERE l.id = lecture_chunk.lecture_id
         AND l.status IN ('PUBLISHED', 'DELIVERED')
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
     OR EXISTS (
         SELECT 1 FROM public.lecture l
         JOIN public.teacher t ON t.id = l.teacher_id
         WHERE l.id = lecture_chunk.lecture_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -368,13 +407,13 @@ USING (
         WHERE l.id = lecture_embedding.lecture_id
         AND l.status IN ('PUBLISHED', 'DELIVERED')
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
     OR EXISTS (
         SELECT 1 FROM public.lecture l
         JOIN public.teacher t ON t.id = l.teacher_id
         WHERE l.id = lecture_embedding.lecture_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -395,7 +434,7 @@ USING (
         SELECT 1 FROM public.lecture l
         JOIN public.teacher t ON t.id = l.teacher_id
         WHERE l.id = lecture_analytics.lecture_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -440,7 +479,7 @@ USING (
     EXISTS (
         SELECT 1 FROM public.ai_conversation ac
         WHERE ac.id = chat_message.conversation_id
-        AND ac.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = ac.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -451,7 +490,7 @@ WITH CHECK (
     EXISTS (
         SELECT 1 FROM public.ai_conversation ac
         WHERE ac.id = chat_message.conversation_id
-        AND ac.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = ac.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -471,7 +510,7 @@ USING (
     EXISTS (
         SELECT 1 FROM public.teacher t
         WHERE t.id = assessment.teacher_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -485,7 +524,7 @@ USING (
         JOIN public.student s ON s.id = e.student_id
         WHERE e.course_id = assessment.course_id
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -505,7 +544,7 @@ USING (
     EXISTS (
         SELECT 1 FROM public.student s
         WHERE s.id = assessment_submission.student_id
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -516,7 +555,7 @@ WITH CHECK (
     EXISTS (
         SELECT 1 FROM public.student s
         WHERE s.id = assessment_submission.student_id
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -527,14 +566,14 @@ USING (
     EXISTS (
         SELECT 1 FROM public.student s
         WHERE s.id = assessment_submission.student_id
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 )
 WITH CHECK (
     EXISTS (
         SELECT 1 FROM public.student s
         WHERE s.id = assessment_submission.student_id
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -546,7 +585,7 @@ USING (
         SELECT 1 FROM public.assessment a
         JOIN public.teacher t ON t.id = a.teacher_id
         WHERE a.id = assessment_submission.assessment_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -567,7 +606,7 @@ USING (
         SELECT 1 FROM public.assessment a
         JOIN public.teacher t ON t.id = a.teacher_id
         WHERE a.id = question.assessment_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -582,7 +621,7 @@ USING (
         WHERE a.id = question.assessment_id
         AND a.is_published = true
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -626,7 +665,7 @@ USING (
     EXISTS (
         SELECT 1 FROM public.student s
         WHERE s.id = student_engagement.student_id
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -638,7 +677,7 @@ USING (
         SELECT 1 FROM public.lecture l
         JOIN public.teacher t ON t.id = l.teacher_id
         WHERE l.id = student_engagement.lecture_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -662,13 +701,13 @@ USING (
         WHERE l.id = flashcard.lecture_id
         AND l.status IN ('PUBLISHED', 'DELIVERED')
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
     OR EXISTS (
         SELECT 1 FROM public.lecture l
         JOIN public.teacher t ON t.id = l.teacher_id
         WHERE l.id = flashcard.lecture_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -689,7 +728,7 @@ USING (
         SELECT 1 FROM public.course c
         JOIN public.teacher t ON t.university_id = c.university_id
         WHERE c.id = document_assignment.course_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -702,7 +741,7 @@ USING (
         JOIN public.student s ON s.id = e.student_id
         WHERE e.course_id = document_assignment.course_id
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -722,7 +761,7 @@ USING (
     EXISTS (
         SELECT 1 FROM public.teacher t
         WHERE t.id = documents.teacher_id
-        AND t.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = t.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 
@@ -736,7 +775,7 @@ USING (
         JOIN public.student s ON s.id = e.student_id
         WHERE da.document_id = documents.id
         AND e.is_active = true
-        AND s.user_id::text = auth.uid()::text
+        AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.uuid::text = auth.uid()::text)
     )
 );
 

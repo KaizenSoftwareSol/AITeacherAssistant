@@ -892,16 +892,56 @@ async def get_lecture_plan(
 
         logger.info(f"Fetching lecture plan for lecture {lecture_id}")
 
-        # Get lecture details
-        lecture_data = db.get_record_by_id("lecture", lecture_id)
-        if not lecture_data:
+        # Convert lecture_id UUID to integer if needed
+        from utils.id_converter import IDConverter
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+        
+        # Get lecture details using integer ID
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("*")
+            .eq("id", lecture_int_id)
+            .execute()
+        )
+        
+        if not lecture_result.data:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Lecture not found",
             )
+        
+        lecture_data = lecture_result.data[0]
 
-        # Verify access
-        if lecture_data.get("teacher_id") != teacher.id:
+        # Verify access - compare integer IDs
+        lecture_teacher_id = lecture_data.get("teacher_id")
+        teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+        
+        # Ensure both are integers for comparison
+        if isinstance(lecture_teacher_id, str):
+            try:
+                lecture_teacher_id = int(lecture_teacher_id)
+            except ValueError:
+                # If it's a UUID, convert it
+                if IDConverter.is_uuid(lecture_teacher_id):
+                    lecture_teacher_id = await IDConverter.uuid_to_int(db, "teacher", lecture_teacher_id)
+        
+        if isinstance(teacher_int_id, str):
+            if IDConverter.is_uuid(teacher_int_id):
+                teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher_int_id)
+            else:
+                try:
+                    teacher_int_id = int(teacher_int_id)
+                except ValueError:
+                    pass
+        
+        if lecture_teacher_id != teacher_int_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this lecture",
@@ -909,20 +949,34 @@ async def get_lecture_plan(
 
         # Get lecture plan
         lecture_plan_json = lecture_data.get("lecture_plan")
+        
+        logger.info(
+            f"Lecture plan data for lecture {lecture_id}: "
+            f"type={type(lecture_plan_json)}, "
+            f"is_none={lecture_plan_json is None}, "
+            f"is_empty={lecture_plan_json == '' if isinstance(lecture_plan_json, str) else False}"
+        )
 
-        if not lecture_plan_json:
+        if not lecture_plan_json or (isinstance(lecture_plan_json, str) and lecture_plan_json.strip() == ""):
+            logger.warning(f"Lecture plan not found for lecture {lecture_id}. It may not have been generated yet.")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Lecture plan not found. It may not have been generated yet.",
+                detail="Lecture plan not found. It may not have been generated yet. Please generate it first using POST /{lecture_id}/generate-plan",
             )
 
         # Parse JSON
         import json
 
         try:
-            lecture_plan = json.loads(lecture_plan_json)
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse lecture plan JSON for lecture {lecture_id}")
+            # If it's already a dict, use it directly
+            if isinstance(lecture_plan_json, dict):
+                lecture_plan = lecture_plan_json
+            else:
+                # Otherwise, parse it as JSON string
+                lecture_plan = json.loads(lecture_plan_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse lecture plan JSON for lecture {lecture_id}: {str(e)}")
+            logger.error(f"Lecture plan JSON content: {lecture_plan_json[:200] if isinstance(lecture_plan_json, str) else lecture_plan_json}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to parse lecture plan",
@@ -1560,12 +1614,21 @@ async def publish_lecture(
                         teacher_name = f"{teacher_user_data.get('first_name', '')} {teacher_user_data.get('last_name', '')}".strip()
                     
                     # Send notifications
+                    # Convert course_id to UUID for the email link
+                    course_id_uuid = None
+                    if course_int_id:
+                        if IDConverter.is_uuid(course_int_id):
+                            course_id_uuid = course_int_id
+                        else:
+                            course_id_uuid = await IDConverter.int_to_uuid(db, "course", course_int_id)
+                    
                     notification_service = NotificationService(db)
                     await notification_service.notify_lecture_published(
                         student_user_ids=student_user_ids,
                         lecture_title=lecture_title,
                         course_name=course_name,
                         lecture_id=lecture_id,
+                        course_id=course_id_uuid or course_int_id,
                         teacher_name=teacher_name,
                     )
                     logger.info(f"Sent lecture published notifications to {len(student_user_ids)} students")

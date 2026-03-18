@@ -147,20 +147,38 @@ class AuthService:
             # System users don't belong to any university
             university_id = None
         elif user_create.university_id:
-            university = db.get_record_by_id("university", user_create.university_id)
-            if not university:
+            # Convert UUID to integer ID if needed, then query for integer ID
+            from utils.id_converter import IDConverter
+            university_int_id = user_create.university_id
+            if IDConverter.is_uuid(user_create.university_id):
+                university_int_id = await IDConverter.uuid_to_int(db, "university", user_create.university_id)
+                if not university_int_id:
+                    raise ValueError("Selected university was not found")
+            
+            # Query university directly to get integer ID
+            university_result = (
+                db.get_admin_client().table("university")
+                .select("id")
+                .eq("id", university_int_id)
+                .execute()
+            )
+            if not university_result.data:
                 raise ValueError("Selected university was not found")
-            university_id = university.get("id")
+            university_id = university_result.data[0]["id"]  # Integer ID for FK
         elif user_create.university_name:
             university_name = user_create.university_name.strip()
             if not university_name:
                 raise ValueError("University name cannot be empty")
 
-            existing_universities = db.get_records(
-                "university", {"name": university_name}
+            # Query directly to get integer ID
+            existing_universities_result = (
+                db.get_admin_client().table("university")
+                .select("id")
+                .eq("name", university_name)
+                .execute()
             )
-            if existing_universities:
-                university_id = existing_universities[0]["id"]
+            if existing_universities_result.data:
+                university_id = existing_universities_result.data[0]["id"]  # Integer ID
             else:
                 new_university = {
                     "name": university_name,
@@ -168,8 +186,10 @@ class AuthService:
                 if user_create.university_location:
                     new_university["location"] = user_create.university_location.strip()
 
-                university_result = db.create_record("university", new_university)
-                university_id = university_result.get("id")
+                university_result = db.get_admin_client().table("university").insert(new_university).execute()
+                if not university_result.data:
+                    raise ValueError("Failed to create university")
+                university_id = university_result.data[0]["id"]  # Integer ID from database
         else:
             raise ValueError("University selection is required")
 

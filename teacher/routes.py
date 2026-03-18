@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Annotated, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile
 from pydantic import BaseModel
 
 from dependencies import require_teacher
@@ -1688,10 +1688,15 @@ async def get_course_lectures_for_teacher(
     current_user: Annotated[User, Depends(require_teacher)],
     course_id: str,
     status_filter: str | None = None,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
+    search: str = Query(None, description="Search by lecture title or topic"),
+    sort_by: str = Query("lecture_number", description="Sort by: title, lecture_number, created_at, status"),
+    sort_order: str = Query("asc", description="Sort order: asc or desc"),
     db=Depends(get_db),
 ):
     """
-    Get all lectures for a specific course (teacher access).
+    Get all lectures for a specific course (teacher access) with pagination.
     
     Teachers can see all lectures for their courses including draft and generated ones.
     Optional status_filter: DRAFT, GENERATED, PUBLISHED, DELIVERED
@@ -1729,16 +1734,52 @@ async def get_course_lectures_for_teacher(
 
         lectures_result = query.order("created_at", desc=False).execute()
 
-        if not lectures_result.data:
+        all_lectures_data = lectures_result.data or []
+        
+        if not all_lectures_data:
             return {
                 "course_id": course_id,
-                "lectures": [],
-                "total_count": 0,
+                "items": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
+                "has_next": False,
+                "has_previous": False,
+                "by_status": {},
             }
+        
+        # Apply search filter
+        if search:
+            search_lower = search.lower()
+            all_lectures_data = [
+                lec for lec in all_lectures_data
+                if search_lower in (lec.get("title") or "").lower()
+                or search_lower in (lec.get("topic") or "").lower()
+                or search_lower in (lec.get("description") or "").lower()
+            ]
+        
+        # Sort
+        sort_desc = sort_order.lower() == "desc"
+        sort_key_map = {
+            "title": lambda l: (l.get("title") or "").lower(),
+            "lecture_number": lambda l: l.get("lecture_number") or 0,
+            "created_at": lambda l: l.get("created_at") or "",
+            "status": lambda l: (l.get("status") or "").lower(),
+        }
+        sort_fn = sort_key_map.get(sort_by, sort_key_map["lecture_number"])
+        all_lectures_data.sort(key=sort_fn, reverse=sort_desc)
+        
+        # Calculate pagination
+        total = len(all_lectures_data)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_data = all_lectures_data[start_idx:end_idx]
 
-        # Get additional info for each lecture
+        # Get additional info for each lecture on this page
         lectures = []
-        for lec in lectures_result.data:
+        for lec in page_data:
             # Check for quiz and flashcards
             assessment_result = (
                 db.admin_client.table("assessment")
@@ -1775,18 +1816,23 @@ async def get_course_lectures_for_teacher(
                 "has_flashcards": len(flashcards_result.data) > 0 if flashcards_result.data else False,
             })
 
-        # Group by status
+        # Group ALL lectures by status (not just current page)
         by_status = {}
-        for lec in lectures:
-            s = lec["status"]
+        for lec_data in all_lectures_data:
+            s = lec_data.get("status", "UNKNOWN")
             if s not in by_status:
-                by_status[s] = []
-            by_status[s].append(lec)
+                by_status[s] = 0
+            by_status[s] += 1
 
         return {
             "course_id": course_id,
-            "lectures": lectures,
-            "total_count": len(lectures),
+            "items": lectures,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_previous": page > 1,
             "by_status": by_status,
         }
 
@@ -3706,7 +3752,7 @@ async def get_quiz_submissions(
         submissions_result = (
             db.admin_client.table("assessment_submission")
             .select("*")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)  # Use integer ID, not UUID
             .eq("is_submitted", True)
             .order("score", desc=True)
             .execute()
@@ -3992,12 +4038,28 @@ async def get_quiz_leaderboard_teacher(
                     detail="Assessment not found or access denied",
                 )
 
+        # Convert teacher_id to integer if needed
+        teacher_int_id = teacher.id
+        if isinstance(teacher.id, str):
+            if IDConverter.is_uuid(teacher.id):
+                teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+                if not teacher_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Teacher profile not found",
+                    )
+            else:
+                try:
+                    teacher_int_id = int(teacher.id)
+                except ValueError:
+                    teacher_int_id = teacher.id
+
         # Verify ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, show_leaderboard")
             .eq("id", assessment_int_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -4013,7 +4075,7 @@ async def get_quiz_leaderboard_teacher(
         submissions_result = (
             db.admin_client.table("assessment_submission")
             .select("student_id, score, max_score, submitted_at")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)  # Use integer ID, not UUID
             .eq("is_submitted", True)
             .order("score", desc=True)
             .execute()
@@ -4565,12 +4627,47 @@ async def delete_test_quiz_question(
 
         logger.info(f"Deleting question {question_id} from assessment {assessment_id}")
 
+        # Convert UUIDs to integer IDs if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
+        question_int_id = question_id
+        if IDConverter.is_uuid(question_id):
+            question_int_id = await IDConverter.uuid_to_int(db, "question", question_id)
+            if not question_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Question not found",
+                )
+
+        # Convert teacher_id to integer if needed
+        teacher_int_id = teacher.id
+        if isinstance(teacher.id, str):
+            if IDConverter.is_uuid(teacher.id):
+                teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+                if not teacher_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Teacher profile not found",
+                    )
+            else:
+                try:
+                    teacher_int_id = int(teacher.id)
+                except ValueError:
+                    teacher_int_id = teacher.id
+
         # Verify assessment ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id")
-            .eq("id", assessment_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("id", assessment_int_id)  # Use integer ID
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -4584,8 +4681,8 @@ async def delete_test_quiz_question(
         question_result = (
             db.admin_client.table("question")
             .select("id")
-            .eq("id", question_id)
-            .eq("assessment_id", assessment_id)
+            .eq("id", question_int_id)  # Use integer ID
+            .eq("assessment_id", assessment_int_id)  # Use integer ID
             .execute()
         )
 
@@ -4596,7 +4693,7 @@ async def delete_test_quiz_question(
             )
 
         # Delete the question
-        db.admin_client.table("question").delete().eq("id", question_id).execute()
+        db.admin_client.table("question").delete().eq("id", question_int_id).execute()  # Use integer ID
 
         logger.info(f"Deleted question {question_id}")
 
@@ -5283,19 +5380,51 @@ async def get_result_view_requests(
 
         logger.info(f"Fetching result view requests for teacher {teacher.id}")
 
+        # Convert teacher_id to integer if needed
+        teacher_int_id = teacher.id
+        if isinstance(teacher.id, str):
+            if IDConverter.is_uuid(teacher.id):
+                teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+                if not teacher_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Teacher profile not found",
+                    )
+            else:
+                try:
+                    teacher_int_id = int(teacher.id)
+                except ValueError:
+                    teacher_int_id = teacher.id
+
+        # Convert assessment_id to integer if provided
+        assessment_int_id = None
+        if assessment_id:
+            if IDConverter.is_uuid(assessment_id):
+                assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+                if not assessment_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Assessment not found",
+                    )
+            else:
+                try:
+                    assessment_int_id = int(assessment_id)
+                except ValueError:
+                    assessment_int_id = assessment_id
+
         # Build query
         query = (
             db.admin_client.table("result_view_request")
             .select("*, assessment!inner(id, title, quiz_mode, lecture!inner(id, title, course_id)), student!inner(id, user_id)")
-            .eq("teacher_id", str(teacher.id))
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .order("requested_at", desc=True)
         )
 
         if status_filter and status_filter.upper() in ["PENDING", "APPROVED", "REJECTED"]:
             query = query.eq("status", status_filter.upper())
 
-        if assessment_id:
-            query = query.eq("assessment_id", assessment_id)
+        if assessment_int_id:
+            query = query.eq("assessment_id", assessment_int_id)  # Use integer ID
 
         result = query.execute()
 

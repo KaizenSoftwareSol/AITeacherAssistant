@@ -167,9 +167,12 @@ For SHORT_ANSWER questions, omit the options field and provide a sample correct 
             topic_performance = {}  # Track performance by topic
             
             for question in questions:
-                question_id = question["id"]
+                # Use UUID for matching with student_answers (frontend sends UUIDs as keys)
+                # Fallback to integer ID if UUID not available
+                question_id_for_matching = question.get("uuid") or str(question.get("id", ""))
+                question_id = question.get("id")  # Keep integer ID for response
                 correct_answer = question["correct_answer"]
-                student_answer = student_answers.get(question_id, "")
+                student_answer = student_answers.get(question_id_for_matching, "")
                 points = question.get("points", 1.0)
                 total_points += points
                 
@@ -192,8 +195,11 @@ For SHORT_ANSWER questions, omit the options field and provide a sample correct 
                     except:
                         options = None
                 
+                # Use UUID in response if available, otherwise use integer ID as string
+                response_question_id = question.get("uuid") or str(question_id) if question_id else ""
+                
                 question_result = {
-                    "question_id": question_id,
+                    "question_id": response_question_id,
                     "question_text": question["question_text"],
                     "question_type": question["question_type"],
                     "student_answer": student_answer,

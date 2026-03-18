@@ -1,9 +1,25 @@
 # admin/models.py
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, EmailStr
+
+
+# Generic pagination response
+T = TypeVar("T")
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Generic paginated response wrapper for any list endpoint."""
+    
+    items: List[T]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
 
 
 class DashboardStats(BaseModel):
@@ -219,6 +235,34 @@ class LogoDeleteResponse(BaseModel):
     """Response model for logo deletion."""
     
     message: str
+
+
+class AIChatUsageSummary(BaseModel):
+    """Summary of AI chat usage for a student."""
+    
+    user_id: str
+    student_id: str
+    email: str
+    first_name: str
+    last_name: str
+    messages_today: int
+    daily_limit: int
+    remaining: int
+    reset_at: datetime
+    total_conversations: int
+    total_messages_all_time: int
+
+
+class AIChatUsageStats(BaseModel):
+    """Overall AI chat usage statistics for a university."""
+    
+    total_students: int
+    students_with_usage: int
+    total_messages_today: int
+    total_messages_all_time: int
+    students_at_limit: int
+    daily_limit: int
+    usage_by_student: List[AIChatUsageSummary] = []
 
 
 # Update forward references

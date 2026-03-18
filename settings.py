@@ -1,5 +1,6 @@
 # settings.py
 
+import logging
 import os
 
 from pydantic_settings import BaseSettings
@@ -50,7 +51,8 @@ class Settings(BaseSettings):
     # Common email settings
     SMTP_SENDER_EMAIL: str = os.getenv("SMTP_SENDER_EMAIL", "aitaedu.org@gmail.com")
     SMTP_SENDER_NAME: str = os.getenv("SMTP_SENDER_NAME", "AITA Platform")
-    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    # Always use production frontend URL - can be overridden via environment variable for local dev
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://aitaedu.net")
 
     class Config:
         env_file = ".env"
@@ -58,3 +60,7 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Log the frontend URL being used
+logger = logging.getLogger(__name__)
+logger.info(f"Frontend URL configured: {settings.FRONTEND_URL}")

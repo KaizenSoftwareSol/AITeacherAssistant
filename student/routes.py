@@ -7,7 +7,7 @@ Optimized with caching for improved performance.
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, List, Optional
 from uuid import uuid4
 
@@ -1216,7 +1216,78 @@ async def chat_with_lecture(
                 detail="Message content is required",
             )
         
-        logger.info(f"Chat request for lecture {lecture_id}, student {student.id}")
+        # Get integer user_id for rate limiting check
+        user_int_id = user.id if isinstance(user.id, int) else await IDConverter.uuid_to_int(db, "users", str(user.id))
+        if not user_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get user ID",
+            )
+        
+        # Rate limiting: Check daily message count (20 messages per day)
+        # Count USER role messages sent today (UTC) - Database-backed (persistent across restarts)
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+        
+        # Optimized: Count messages directly via join instead of two queries
+        # This query counts USER messages for this user sent today
+        messages_result = (
+            db.admin_client.table("chat_message")
+            .select("id", count="exact")
+            .eq("role", "USER")
+            .gte("created_at", today_start.isoformat())
+            .lt("created_at", today_end.isoformat())
+            .execute()
+        )
+        
+        # Filter to only this user's messages by checking conversation ownership
+        # We need to get conversation IDs first, then count messages
+        user_conversations = (
+            db.admin_client.table("ai_conversation")
+            .select("id")
+            .eq("user_id", user_int_id)
+            .execute()
+        )
+        
+        conversation_ids = [conv["id"] for conv in user_conversations.data] if user_conversations.data else []
+        
+        # Count USER messages sent today for this user's conversations
+        messages_today = 0
+        if conversation_ids:
+            messages_result = (
+                db.admin_client.table("chat_message")
+                .select("id", count="exact")
+                .in_("conversation_id", conversation_ids)
+                .eq("role", "USER")
+                .gte("created_at", today_start.isoformat())
+                .lt("created_at", today_end.isoformat())
+                .execute()
+            )
+            # Use count if available, otherwise count data
+            if hasattr(messages_result, "count") and messages_result.count is not None:
+                messages_today = messages_result.count
+            else:
+                messages_today = len(messages_result.data) if messages_result.data else 0
+        
+        # Daily limit: 20 messages per day
+        daily_message_limit = 20
+        
+        if messages_today >= daily_message_limit:
+            # Calculate when the limit resets (next day at midnight UTC)
+            reset_time = today_end
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "error": "rate_limit_exceeded",
+                    "message": f"You have reached the daily limit of {daily_message_limit} messages. Please try again tomorrow.",
+                    "limit": daily_message_limit,
+                    "used": messages_today,
+                    "remaining": 0,
+                    "reset_at": reset_time.isoformat(),
+                },
+            )
+        
+        logger.info(f"Chat request for lecture {lecture_id}, student {student.id} (Messages today: {messages_today}/{daily_message_limit})")
         
         # Verify lecture access (same as summary endpoint)
         # Convert UUID to integer ID for database query
@@ -1269,10 +1340,6 @@ async def chat_with_lecture(
                 detail="You are not enrolled in this course",
             )
         
-        # Get or create conversation
-        if not session_id:
-            session_id = str(uuid4())
-        
         # Convert UUID to integer ID if needed
         lecture_int_id = lecture_id
         if IDConverter.is_uuid(lecture_id):
@@ -1283,32 +1350,55 @@ async def chat_with_lecture(
                     detail="Lecture not found",
                 )
         
-        # Get integer user_id for query
-        user_int_id = user.id if isinstance(user.id, int) else await IDConverter.uuid_to_int(db, "users", str(user.id))
-        if not user_int_id:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to get user ID",
+        # Get or create conversation
+        # If session_id is provided, try to use that conversation
+        # Otherwise, look for the latest conversation for this user+lecture in the last 24h
+        conversation_result = None
+        conversation_record = None
+        conversation_int_id = None
+        conversation_uuid = None
+        
+        if session_id:
+            # Try to find conversation by session_id
+            conversation_result = (
+                db.admin_client.table("ai_conversation")
+                .select("*")
+                .eq("session_id", session_id)
+                .eq("user_id", user_int_id)  # Use integer ID (already obtained above)
+                .eq("lecture_id", lecture_int_id)  # Use integer ID
+                .execute()
             )
         
-        conversation_result = (
-            db.admin_client.table("ai_conversation")
-            .select("*")
-            .eq("session_id", session_id)
-            .eq("user_id", user_int_id)  # Use integer ID
-            .eq("lecture_id", lecture_int_id)  # Use integer ID
-            .execute()
-        )
-        
-        # Get integer IDs for database
-        user_int_id = user.id if isinstance(user.id, int) else await IDConverter.uuid_to_int(db, "users", str(user.id))
-        if not user_int_id:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to get user ID",
+        # If no session_id or conversation not found, look for latest conversation in last 24h
+        if not conversation_result or not conversation_result.data:
+            # Look for the most recent conversation for this user+lecture in the last 24 hours
+            cutoff_time = datetime.utcnow() - timedelta(hours=24)
+            recent_conversations = (
+                db.admin_client.table("ai_conversation")
+                .select("*")
+                .eq("user_id", user_int_id)
+                .eq("lecture_id", lecture_int_id)
+                .gte("created_at", cutoff_time.isoformat())
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
             )
+            
+            if recent_conversations.data:
+                conversation_result = recent_conversations
+                conversation_record = recent_conversations.data[0]
+                conversation_int_id = conversation_record["id"]
+                conversation_uuid = conversation_record.get("uuid")
+                if not conversation_uuid:
+                    conversation_uuid = await IDConverter.int_to_uuid(db, "ai_conversation", conversation_int_id) if isinstance(conversation_int_id, int) else str(conversation_int_id)
+                # Use the existing session_id from the found conversation
+                session_id = conversation_record.get("session_id") or str(uuid4())
         
-        if not conversation_result.data:
+        # If still no conversation found, create a new one
+        if not conversation_result or not conversation_result.data:
+            if not session_id:
+                session_id = str(uuid4())
+            
             # Create new conversation with integer IDs
             conversation_uuid = str(uuid4())
             conversation_data = {
@@ -1326,9 +1416,13 @@ async def chat_with_lecture(
             conversation_int_id = conversation_record["id"]  # Integer ID from database
             conversation_uuid = conversation_record.get("uuid") or conversation_uuid
         else:
-            conversation_record = conversation_result.data[0]
+            # Use existing conversation
+            if not conversation_record:
+                conversation_record = conversation_result.data[0]
             conversation_int_id = conversation_record["id"]  # Integer ID from database
-            conversation_uuid = conversation_record.get("uuid") or conversation_record.get("id")
+            conversation_uuid = conversation_record.get("uuid")
+            if not conversation_uuid:
+                conversation_uuid = await IDConverter.int_to_uuid(db, "ai_conversation", conversation_int_id) if isinstance(conversation_int_id, int) else str(conversation_int_id)
         
         # Save user message with integer conversation_id
         user_msg_uuid = str(uuid4())
@@ -1366,11 +1460,20 @@ async def chat_with_lecture(
         
         logger.info(f"Chat response generated for lecture {lecture_id}")
         
+        # Calculate remaining messages for today
+        remaining_messages = daily_message_limit - (messages_today + 1)  # +1 because we just sent a message
+        
         return {
             "session_id": session_id,
             "conversation_id": conversation_uuid,  # Return UUID for API
             "response": response["answer"],
             "sources": response.get("sources", []),
+            "rate_limit": {
+                "limit": daily_message_limit,
+                "used": messages_today + 1,
+                "remaining": remaining_messages,
+                "reset_at": today_end.isoformat(),
+            },
         }
     
     except HTTPException:
@@ -1762,10 +1865,20 @@ async def submit_quiz(
         
         questions = questions_result.data
         
+        # Convert question integer IDs to UUIDs for matching with frontend answers
+        # Frontend sends UUIDs as keys in student_answers
+        questions_with_uuids = []
+        for q in questions:
+            question_uuid = await IDConverter.int_to_uuid(db, "question", q["id"]) if q.get("id") else None
+            q_with_uuid = q.copy()
+            # Store UUID for matching with student_answers keys
+            q_with_uuid["uuid"] = question_uuid or str(q["id"])
+            questions_with_uuids.append(q_with_uuid)
+        
         # Grade the submission
         quiz_service = QuizService(db)
         grading_result = quiz_service.grade_submission(
-            questions=questions,
+            questions=questions_with_uuids,
             student_answers=submission.get("answers", {}),
         )
         
@@ -1831,57 +1944,154 @@ async def submit_quiz(
 async def get_chat_history(
     lecture_id: str,
     user_student: Annotated[tuple[User, Student], Depends(require_student)],
-    session_id: Optional[str] = None,
+    hours: Optional[int] = Query(None, description="Get messages from last N hours (default: 24)"),
+    since: Optional[str] = Query(None, description="Get messages since ISO timestamp (e.g., 2026-03-12T10:00:00Z)"),
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(50, ge=1, le=200, description="Messages per page (default: 50, max: 200)"),
     db=Depends(get_db),
 ):
     """
-    Get chat history for a lecture conversation.
+    Get chat history for a lecture conversation with pagination.
     
-    Includes quiz results that were added to the chat history.
+    Returns messages from all conversations for the authenticated user and lecture.
+    Scoped by user+lecture, not session ID, so it persists across re-logins.
+    Messages are ordered chronologically (oldest first within a page).
+    
+    Query Parameters:
+    - hours: Get messages from last N hours (default: 24)
+    - since: Get messages since ISO timestamp (overrides hours if provided)
+    - page: Page number (default: 1). Page 1 = most recent messages
+    - page_size: Messages per page (default: 50, max: 200)
+    
+    Returns paginated messages with: id (uuid), role, content, created_at, conversation_id
     """
     user, student = user_student
     
     try:
         logger.info(f"Fetching chat history for lecture {lecture_id}, student {student.id}")
         
+        # Get integer user_id for query
+        user_int_id = user.id if isinstance(user.id, int) else await IDConverter.uuid_to_int(db, "users", str(user.id))
+        if not user_int_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get user ID",
+            )
+        
         # Convert UUID to integer ID if needed
         lecture_int_id = lecture_id
         if IDConverter.is_uuid(lecture_id):
             lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
             if not lecture_int_id:
-                lecture_int_id = lecture_id  # Fallback
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
         
-        # Build query
-        query = (
+        # Calculate time filter
+        if since:
+            # Parse ISO timestamp
+            try:
+                since_datetime = datetime.fromisoformat(since.replace('Z', '+00:00'))
+                if since_datetime.tzinfo is None:
+                    since_datetime = since_datetime.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid 'since' timestamp format. Use ISO format (e.g., 2026-03-12T10:00:00Z)",
+                )
+            cutoff_time = since_datetime
+        else:
+            # Default to 24 hours if not specified
+            hours_back = hours if hours is not None else 24
+            cutoff_time = datetime.utcnow() - timedelta(hours=hours_back)
+        
+        # Get all conversations for this user+lecture
+        conversations_result = (
             db.admin_client.table("ai_conversation")
-            .select("*, chat_message(*)")
-            .eq("user_id", str(user.id))
+            .select("id, uuid, session_id, created_at")
+            .eq("user_id", user_int_id)
             .eq("lecture_id", lecture_int_id)
+            .gte("created_at", cutoff_time.isoformat())
+            .execute()
         )
         
-        if session_id:
-            query = query.eq("session_id", session_id)
+        empty_response = {
+            "items": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": 1,
+            "has_next": False,
+            "has_previous": False,
+        }
         
-        result = query.order("created_at", desc=True).limit(1).execute()
+        if not conversations_result.data:
+            return empty_response
         
-        if not result.data:
-            return {
-                "conversation_id": None,
-                "messages": [],
-            }
+        # Get all conversation IDs
+        conversation_ids = [conv["id"] for conv in conversations_result.data]
         
-        conversation = result.data[0]
-        messages = conversation.get("chat_message", [])
+        # Get all messages from these conversations
+        messages_result = (
+            db.admin_client.table("chat_message")
+            .select("id, uuid, conversation_id, role, content, created_at")
+            .in_("conversation_id", conversation_ids)
+            .gte("created_at", cutoff_time.isoformat())
+            .order("created_at", desc=True)  # Newest first for pagination
+            .execute()
+        )
         
-        # Sort messages by created_at
-        messages.sort(key=lambda x: x["created_at"])
+        if not messages_result.data:
+            return empty_response
+        
+        all_messages_data = messages_result.data
+        
+        # Calculate pagination
+        total = len(all_messages_data)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_data = all_messages_data[start:end]
+        
+        # Reverse page_data so messages within a page are chronological (oldest first)
+        page_data.reverse()
+        
+        # Build response with UUIDs
+        messages = []
+        for msg in page_data:
+            # Convert conversation_id to UUID
+            conv_id_int = msg["conversation_id"]
+            conv_record = next((c for c in conversations_result.data if c["id"] == conv_id_int), None)
+            conversation_uuid = conv_record.get("uuid") if conv_record else None
+            if not conversation_uuid and conv_record:
+                conversation_uuid = await IDConverter.int_to_uuid(db, "ai_conversation", conv_id_int) if isinstance(conv_id_int, int) else conv_id_int
+            
+            # Convert message id to UUID
+            message_uuid = msg.get("uuid")
+            if not message_uuid:
+                message_uuid = await IDConverter.int_to_uuid(db, "chat_message", msg["id"]) if isinstance(msg["id"], int) else msg["id"]
+            
+            messages.append({
+                "id": message_uuid,
+                "role": msg["role"],
+                "content": msg["content"],
+                "created_at": msg["created_at"],
+                "conversation_id": conversation_uuid or str(conv_id_int),
+            })
         
         return {
-            "conversation_id": conversation["id"],
-            "session_id": conversation["session_id"],
-            "messages": messages,
+            "items": messages,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_previous": page > 1,
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching chat history: {str(e)}")
         raise HTTPException(
@@ -2284,10 +2494,20 @@ async def submit_test_quiz(
         
         questions = questions_result.data
         
+        # Convert question integer IDs to UUIDs for matching with frontend answers
+        # Frontend sends UUIDs as keys in student_answers
+        questions_with_uuids = []
+        for q in questions:
+            question_uuid = await IDConverter.int_to_uuid(db, "question", q["id"]) if q.get("id") else None
+            q_with_uuid = q.copy()
+            # Store UUID for matching with student_answers keys
+            q_with_uuid["uuid"] = question_uuid or str(q["id"])
+            questions_with_uuids.append(q_with_uuid)
+        
         # Grade the submission
         quiz_service = QuizService(db)
         grading_result = quiz_service.grade_submission(
-            questions=questions,
+            questions=questions_with_uuids,
             student_answers=submission.get("answers", {}),
         )
         
