@@ -666,6 +666,56 @@ class EmailService:
         subject = f"New Quiz Available: {quiz_title}"
         return self._send_email(to_email, subject, html_content, student_name)
     
+    def send_deadline_extended_notification(
+        self,
+        to_email: str,
+        student_name: str,
+        quiz_title: str,
+        course_name: str,
+        teacher_name: str,
+        old_due_date: str,
+        new_due_date: str,
+        max_points: Optional[int] = None,
+        quiz_link: Optional[str] = None
+    ) -> bool:
+        """
+        Send notification email to student when a quiz deadline is extended.
+        
+        Args:
+            to_email: Student email address
+            student_name: Student's name
+            quiz_title: Quiz title
+            course_name: Course name
+            teacher_name: Teacher's name
+            old_due_date: Previous deadline date
+            new_due_date: New extended deadline date
+            max_points: Maximum points (optional)
+            quiz_link: Link to quiz (optional)
+            
+        Returns:
+            True if email sent successfully
+        """
+        quiz_link = quiz_link or f"{self.frontend_url}/student/assessments"
+        
+        replacements = {
+            "Teacher Name": teacher_name,
+            "Course Name": course_name,
+            "Quiz Title": quiz_title,
+            "Old Due Date": old_due_date,
+            "New Due Date": new_due_date,
+            "Max Points": str(max_points) if max_points else "Not specified",
+            "QUIZ_LINK": quiz_link,
+        }
+        
+        html_content = self._render_template("20_deadline_extended.html", replacements)
+        
+        if not html_content:
+            logger.error("Failed to render deadline extended email template")
+            return False
+        
+        subject = f"📅 Deadline Extended: {quiz_title}"
+        return self._send_email(to_email, subject, html_content, student_name)
+    
     def send_student_enrolled_notification(
         self,
         to_email: str,

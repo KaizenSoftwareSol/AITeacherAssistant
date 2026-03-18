@@ -11,7 +11,7 @@ CONSOLIDATED ENDPOINTS (reduce API calls):
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 from uuid import uuid4
 
@@ -2649,6 +2649,12 @@ class TestQuizAIGenerateRequest(BaseModel):
     focus_areas: list[str] | None = None
 
 
+class ExtendDeadlineRequest(BaseModel):
+    """Request model for extending quiz deadline."""
+    new_due_date: str  # ISO format datetime string
+    notify_students: bool = True  # Whether to notify students about the extension
+
+
 @router.post("/lectures/{lecture_id}/test-quiz")
 async def create_test_quiz(
     current_user: Annotated[User, Depends(require_teacher)],
@@ -3511,6 +3517,235 @@ async def publish_test_quiz(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error publishing quiz",
         )
+
+
+@router.put("/assessments/{assessment_id}/extend-deadline")
+async def extend_quiz_deadline(
+    current_user: Annotated[User, Depends(require_teacher)],
+    assessment_id: str,
+    request: ExtendDeadlineRequest,
+    db=Depends(get_db),
+):
+    """
+    Extend the deadline for a quiz.
+    
+    Teachers can extend the deadline of their quizzes. Optionally notify all enrolled students
+    about the deadline extension.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
+        # Convert teacher.id to integer if needed
+        teacher_int_id = teacher.id
+        if IDConverter.is_uuid(teacher.id):
+            teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+            if not teacher_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher ID conversion failed",
+                )
+
+        # Verify ownership and get current assessment details
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("id, title, due_date, course_id, quiz_mode")
+            .eq("id", assessment_int_id)
+            .eq("teacher_id", teacher_int_id)
+            .execute()
+        )
+
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found or access denied",
+            )
+
+        assessment = assessment_result.data[0]
+        current_due_date = assessment.get("due_date")
+        quiz_title = assessment.get("title")
+        course_id = assessment.get("course_id")
+
+        # Parse new due_date and ensure it's timezone-aware
+        try:
+            new_due_date_str = request.new_due_date.replace("Z", "+00:00")
+            new_due_date = datetime.fromisoformat(new_due_date_str)
+            # Ensure timezone-aware (if naive, assume UTC)
+            if new_due_date.tzinfo is None:
+                new_due_date = new_due_date.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid new_due_date format. Use ISO format (e.g., 2024-12-31T23:59:59Z)",
+            )
+
+        # Validate that new deadline is in the future
+        # Use timezone-aware UTC datetime for comparison
+        now_utc = datetime.now(timezone.utc)
+        if new_due_date <= now_utc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="New deadline must be in the future",
+            )
+
+        # Validate that new deadline is after current deadline (if exists)
+        if current_due_date:
+            try:
+                # Parse current due date and ensure it's timezone-aware
+                current_due_str = str(current_due_date)
+                if "Z" in current_due_str or "+" in current_due_str or current_due_str.endswith("UTC"):
+                    current_due_str = current_due_str.replace("Z", "+00:00")
+                else:
+                    # If no timezone info, assume UTC
+                    if not current_due_str.endswith("+00:00") and not current_due_str.endswith("-00:00"):
+                        current_due_str = current_due_str + "+00:00"
+                
+                current_due_dt = datetime.fromisoformat(current_due_str)
+                # Ensure timezone-aware (if naive, assume UTC)
+                if current_due_dt.tzinfo is None:
+                    current_due_dt = current_due_dt.replace(tzinfo=timezone.utc)
+                
+                if new_due_date <= current_due_dt:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="New deadline must be after the current deadline",
+                    )
+            except (ValueError, AttributeError) as e:
+                # If current_due_date is invalid, just proceed
+                logger.warning(f"Could not parse current_due_date for comparison: {e}")
+                pass
+
+        # Update the deadline
+        db.admin_client.table("assessment").update({
+            "due_date": new_due_date.isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("id", assessment_int_id).execute()
+
+        logger.info(f"Extended deadline for quiz {assessment_id} to {new_due_date.isoformat()}")
+
+        # Notify enrolled students if requested
+        if request.notify_students:
+            try:
+                # Get all enrolled students' user_ids
+                enrollments_result = (
+                    db.admin_client.table("enrollment")
+                    .select("student_id")
+                    .eq("course_id", course_id)
+                    .eq("is_active", True)
+                    .execute()
+                )
+                
+                if enrollments_result.data:
+                    student_ids = [e["student_id"] for e in enrollments_result.data]
+                    
+                    # Get user_ids for these students
+                    students_result = (
+                        db.admin_client.table("student")
+                        .select("user_id")
+                        .in_("id", student_ids)
+                        .execute()
+                    )
+                    
+                    if students_result.data:
+                        student_user_ids = [str(s["user_id"]) for s in students_result.data]
+                        
+                        # Get course name for notification
+                        course_result = (
+                            db.admin_client.table("course")
+                            .select("name")
+                            .eq("id", course_id)
+                            .execute()
+                        )
+                        course_name = course_result.data[0].get("name", "Course") if course_result.data else "Course"
+                        
+                        # Get teacher name for email
+                        teacher_name = f"{current_user.first_name} {current_user.last_name}".strip() or "Your instructor"
+                        
+                        # Send email notifications to all enrolled students
+                        from settings import settings
+                        from services.email_service import email_service
+                        
+                        users_result = (
+                            db.admin_client.table("users")
+                            .select("id, email, first_name, last_name")
+                            .in_("id", student_user_ids)
+                            .execute()
+                        )
+                        
+                        for user in users_result.data or []:
+                            user_email = user.get("email")
+                            user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "Student"
+                            if user_email:
+                                # Format dates for email
+                                old_date_str = "Not set"
+                                if current_due_date:
+                                    try:
+                                        old_dt = datetime.fromisoformat(current_due_date.replace("Z", "+00:00"))
+                                        old_date_str = old_dt.strftime("%B %d, %Y at %I:%M %p")
+                                    except (ValueError, AttributeError):
+                                        old_date_str = str(current_due_date)
+                                
+                                new_date_str = new_due_date.strftime("%B %d, %Y at %I:%M %p")
+                                
+                                # Get max points if available
+                                max_points = None
+                                questions_result = (
+                                    db.admin_client.table("question")
+                                    .select("points")
+                                    .eq("assessment_id", assessment_int_id)
+                                    .execute()
+                                )
+                                if questions_result.data:
+                                    max_points = sum(float(q.get("points", 0) or 0) for q in questions_result.data)
+                                
+                                # Send dedicated deadline extension email
+                                email_service.send_deadline_extended_notification(
+                                    to_email=user_email,
+                                    student_name=user_name,
+                                    quiz_title=quiz_title,
+                                    course_name=course_name,
+                                    teacher_name=teacher_name,
+                                    old_due_date=old_date_str,
+                                    new_due_date=new_date_str,
+                                    max_points=int(max_points) if max_points else None,
+                                    quiz_link=f"{settings.FRONTEND_URL}/student/assessments"
+                                )
+                        
+                        logger.info(f"Sent deadline extension notifications to {len(users_result.data or [])} students")
+            except Exception as notify_error:
+                logger.warning(f"Failed to send deadline extension notifications: {notify_error}")
+
+        return {
+            "message": "Quiz deadline extended successfully",
+            "assessment_id": assessment_id,
+            "title": quiz_title,
+            "old_due_date": current_due_date,
+            "new_due_date": new_due_date.isoformat(),
+            "students_notified": request.notify_students,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error extending quiz deadline: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error extending quiz deadline",
+        ) from e
 
 
 @router.get("/assessments/{assessment_id}")
