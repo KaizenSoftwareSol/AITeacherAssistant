@@ -169,7 +169,7 @@ async def activate_account_with_token(
     Activate account and set password using activation token.
     
     This endpoint is used when a user clicks the activation link sent via email.
-    The token is a JWT that contains the user_id and expires in 48 hours.
+    The token is a JWT that contains the user_id and expires in 14 days.
     """
     # Verify token and get user_id
     user_id = AuthService.verify_activation_token(password_data.token)

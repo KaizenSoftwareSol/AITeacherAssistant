@@ -58,9 +58,9 @@ class AuthService:
         """
         Create a one-time activation token for password setup.
         
-        Token expires in 48 hours and includes user_id and purpose.
+        Token expires in 14 days and includes user_id and purpose.
         """
-        expires_delta = timedelta(hours=48)
+        expires_delta = timedelta(days=14)
         data = {
             "sub": str(user_id),
             "purpose": "activation",

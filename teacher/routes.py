@@ -1317,6 +1317,88 @@ async def get_lecture_summary(
         )
 
 
+@router.patch("/lectures/{lecture_id}/summary", status_code=status.HTTP_200_OK)
+async def update_lecture_summary(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    request: "SummaryUpdateRequest",
+    db=Depends(get_db),
+):
+    """
+    Update (edit) a lecture summary (teacher access).
+
+    This allows teachers to edit the AI-generated summary text after it is generated.
+    Only accessible to the teacher who owns the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        if request.summary is None or not request.summary.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Summary cannot be empty",
+            )
+
+        logger.info(f"Updating summary for lecture {lecture_id}, teacher {teacher.id}")
+
+        # Convert UUID to integer ID
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
+        # Verify ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, title, created_at")
+            .eq("id", lecture_int_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        lecture = lecture_result.data[0]
+
+        # Update lecture summary
+        db.admin_client.table("lecture").update(
+            {
+                "summary": request.summary.strip(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        ).eq("id", lecture_int_id).execute()
+
+        return {
+            "message": "Summary updated successfully",
+            "lecture_id": lecture_id,
+            "lecture_title": lecture.get("title"),
+            "summary": request.summary.strip(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating lecture summary: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating lecture summary",
+        ) from e
+
+
 @router.get("/lectures/{lecture_id}/flashcards")
 async def get_lecture_flashcards(
     current_user: Annotated[User, Depends(require_teacher)],
@@ -2653,6 +2735,11 @@ class ExtendDeadlineRequest(BaseModel):
     """Request model for extending quiz deadline."""
     new_due_date: str  # ISO format datetime string
     notify_students: bool = True  # Whether to notify students about the extension
+
+
+class SummaryUpdateRequest(BaseModel):
+    """Request model for updating a lecture summary."""
+    summary: str
 
 
 @router.post("/lectures/{lecture_id}/test-quiz")
