@@ -11,11 +11,11 @@ CONSOLIDATED ENDPOINTS (reduce API calls):
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile
 from pydantic import BaseModel
 
 from dependencies import require_teacher
@@ -25,6 +25,7 @@ from services.notification_service import NotificationService
 from services.cache_service import cache_response, cache
 from services.performance_monitor import track_endpoint
 from utils.db import get_db
+from utils.id_converter import IDConverter
 
 router = APIRouter()
 
@@ -179,8 +180,10 @@ async def get_teacher_dashboard(
         
         documents = []
         for doc in (documents_result.data or []):
+            # Convert document integer ID to UUID
+            doc_uuid = await IDConverter.int_to_uuid(db, "documents", doc["id"])
             documents.append({
-                "id": doc["id"],
+                "id": doc_uuid if doc_uuid else str(doc["id"]),
                 "title": doc["title"],
                 "document_type": doc["document_type"],
                 "status": doc["status"],
@@ -201,11 +204,13 @@ async def get_teacher_dashboard(
         lectures_by_course = {}
         
         for lec in (lectures_result.data or []):
+            # Convert lecture integer ID to UUID
+            lecture_uuid = await IDConverter.int_to_uuid(db, "lecture", lec["id"])
             lecture_info = {
-                "id": lec["id"],
+                "id": lecture_uuid if lecture_uuid else str(lec["id"]),
                 "title": lec["title"],
                 "status": lec["status"],
-                "course_id": lec["course_id"],
+                "course_id": lec["course_id"],  # This is an integer FK, keep as is for internal use
                 "topic": lec.get("topic"),
                 "lecture_number": lec.get("lecture_number"),
                 "created_at": lec["created_at"],
@@ -250,125 +255,15 @@ async def get_teacher_dashboard(
         )
 
 
-# ==================== DIVIDED DASHBOARD ENDPOINTS ====================
-
-
 @router.get("/dashboard/stats")
-@cache_response(ttl=120, region="teachers")
-@track_endpoint
-async def get_teacher_dashboard_stats(
+async def get_dashboard_stats(
     current_user: Annotated[User, Depends(require_teacher)],
     db=Depends(get_db),
 ):
-    """
-    Get teacher dashboard statistics only.
-    
-    Returns:
-    - stats: Overall statistics (courses, documents, lectures, students)
-    """
+    """Get dashboard statistics only."""
     try:
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
-        logger.info(f"Fetching dashboard stats for teacher {teacher.id}")
-
-        # Get course IDs for this teacher (same logic as dashboard)
-        course_ids_set = set()
-        
-        # 1. Courses created by this teacher
-        created_courses_result = (
-            db.admin_client.table("course")
-            .select("id")
-            .eq("university_id", teacher.university_id)
-            .eq("created_by_teacher_id", teacher.id)
-            .execute()
-        )
-        
-        for course in created_courses_result.data or []:
-            course_id = course.get("id")
-            if course_id:
-                course_ids_set.add(course_id)
-        
-        # 2. Courses assigned to this teacher
-        assigned_courses_result = (
-            db.admin_client.table("course_teacher")
-            .select("course_id")
-            .eq("teacher_id", teacher.id)
-            .eq("is_active", True)
-            .execute()
-        )
-        
-        for assignment in assigned_courses_result.data or []:
-            course_id = assignment.get("course_id")
-            if course_id:
-                course_ids_set.add(course_id)
-        
-        # 3. Courses where this teacher has created lectures
-        lectures_result = (
-            db.admin_client.table("lecture")
-            .select("course_id")
-            .eq("teacher_id", teacher.id)
-            .execute()
-        )
-        
-        for lecture in lectures_result.data or []:
-            course_id = lecture.get("course_id")
-            if course_id:
-                course_ids_set.add(course_id)
-        
-        course_ids = list(course_ids_set)
-        
-        # Count students (batch query)
-        total_students = 0
-        if course_ids:
-            enrollments_result = (
-                db.admin_client.table("enrollment")
-                .select("course_id")
-                .in_("course_id", course_ids)
-                .eq("is_active", True)
-                .execute()
-            )
-            total_students = len(enrollments_result.data or [])
-        
-        # Count documents
-        documents_result = (
-            db.admin_client.table("documents")
-            .select("id, status")
-            .eq("teacher_id", teacher.id)
-            .execute()
-        )
-        
-        documents = documents_result.data or []
-        completed_documents = sum(1 for d in documents if d["status"] == "COMPLETED")
-        
-        # Count lectures
-        lectures_result = (
-            db.admin_client.table("lecture")
-            .select("id, status")
-            .eq("teacher_id", teacher.id)
-            .execute()
-        )
-        
-        lectures = lectures_result.data or []
-        published_lectures = sum(1 for l in lectures if l["status"] in ["PUBLISHED", "DELIVERED"])
-        
-        stats = {
-            "total_courses": len(course_ids),
-            "total_documents": len(documents),
-            "completed_documents": completed_documents,
-            "total_lectures": len(lectures),
-            "published_lectures": published_lectures,
-            "total_students": total_students,
-        }
-
-        return stats
-
-    except HTTPException:
-        raise
+        dashboard_data = await get_teacher_dashboard(current_user, db)
+        return dashboard_data.get("stats", {})
     except Exception as e:
         logger.error(f"Error fetching dashboard stats: {str(e)}")
         raise HTTPException(
@@ -378,52 +273,16 @@ async def get_teacher_dashboard_stats(
 
 
 @router.get("/dashboard/recent-documents")
-@cache_response(ttl=60, region="teachers")
-@track_endpoint
-async def get_teacher_recent_documents(
+async def get_recent_documents(
     current_user: Annotated[User, Depends(require_teacher)],
     limit: int = 5,
     db=Depends(get_db),
 ):
-    """
-    Get recent documents for teacher dashboard.
-    
-    Returns:
-    - documents: List of recent documents with basic info
-    """
+    """Get recent documents for dashboard."""
     try:
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
-        logger.info(f"Fetching recent documents for teacher {teacher.id}")
-
-        documents_result = (
-            db.admin_client.table("documents")
-            .select("id, title, document_type, status, created_at")
-            .eq("teacher_id", teacher.id)
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        
-        documents = []
-        for doc in documents_result.data or []:
-            documents.append({
-                "id": doc["id"],
-                "title": doc["title"],
-                "document_type": doc["document_type"],
-                "status": doc["status"],
-                "created_at": doc["created_at"],
-            })
-
-        return {"documents": documents}
-
-    except HTTPException:
-        raise
+        dashboard_data = await get_teacher_dashboard(current_user, db)
+        documents = dashboard_data.get("documents", [])
+        return documents[:limit]
     except Exception as e:
         logger.error(f"Error fetching recent documents: {str(e)}")
         raise HTTPException(
@@ -433,147 +292,21 @@ async def get_teacher_recent_documents(
 
 
 @router.get("/dashboard/recent-lectures")
-@cache_response(ttl=60, region="teachers")
-@track_endpoint
-async def get_teacher_recent_lectures(
+async def get_recent_lectures(
     current_user: Annotated[User, Depends(require_teacher)],
     limit: int = 5,
     db=Depends(get_db),
 ):
-    """
-    Get recent lectures for teacher dashboard.
-    
-    Returns:
-    - lectures: List of recent lectures with course info
-    """
+    """Get recent lectures for dashboard."""
     try:
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
-        logger.info(f"Fetching recent lectures for teacher {teacher.id}")
-
-        lectures_result = (
-            db.admin_client.table("lecture")
-            .select("id, title, status, course_id, topic, lecture_number, created_at")
-            .eq("teacher_id", teacher.id)
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        
-        lectures = []
-        course_ids = set()
-        
-        for lec in lectures_result.data or []:
-            course_id = lec.get("course_id")
-            if course_id:
-                course_ids.add(course_id)
-            
-            lectures.append({
-                "id": lec["id"],
-                "lecture_id": lec["id"],
-                "title": lec["title"],
-                "status": lec["status"],
-                "course_id": course_id,
-                "topic": lec.get("topic"),
-                "lecture_number": lec.get("lecture_number"),
-                "created_at": lec["created_at"],
-            })
-        
-        # Batch fetch course info
-        course_map = {}
-        if course_ids:
-            courses_result = (
-                db.admin_client.table("course")
-                .select("id, name")
-                .in_("id", list(course_ids))
-                .execute()
-            )
-            course_map = {c["id"]: c for c in (courses_result.data or [])}
-        
-        # Enrich lectures with course names
-        for lecture in lectures:
-            course_info = course_map.get(lecture["course_id"])
-            lecture["course_name"] = course_info.get("name") if course_info else None
-
-        return {"lectures": lectures}
-
-    except HTTPException:
-        raise
+        dashboard_data = await get_teacher_dashboard(current_user, db)
+        lectures = dashboard_data.get("lectures", [])
+        return lectures[:limit]
     except Exception as e:
         logger.error(f"Error fetching recent lectures: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error fetching recent lectures",
-        )
-
-
-# ==================== PERFORMANCE MONITORING ENDPOINTS ====================
-
-
-@router.get("/dashboard/performance")
-@track_endpoint
-async def get_dashboard_performance_metrics(
-    current_user: Annotated[User, Depends(require_teacher)],
-):
-    """
-    Get performance metrics for dashboard endpoints.
-    
-    Returns:
-    - Performance data for dashboard API calls
-    - Cache hit rates
-    - Response time statistics
-    """
-    try:
-        # Get cache statistics for teacher region
-        cache_stats = cache.caches["teachers"].stats()
-        
-        # Get recent performance logs (this would typically come from a metrics store)
-        # For now, return cache stats and basic endpoint info
-        
-        endpoints = [
-            {
-                "path": "/teacher/dashboard/stats",
-                "description": "Dashboard statistics endpoint",
-                "cache_ttl": "2 minutes",
-                "cache_region": "teachers"
-            },
-            {
-                "path": "/teacher/dashboard/recent-documents", 
-                "description": "Recent documents endpoint",
-                "cache_ttl": "1 minute",
-                "cache_region": "teachers"
-            },
-            {
-                "path": "/teacher/dashboard/recent-lectures",
-                "description": "Recent lectures endpoint", 
-                "cache_ttl": "1 minute",
-                "cache_region": "teachers"
-            },
-            {
-                "path": "/teacher/dashboard",
-                "description": "Original consolidated dashboard endpoint",
-                "cache_ttl": "None",
-                "cache_region": "None"
-            }
-        ]
-        
-        return {
-            "cache_stats": cache_stats,
-            "endpoints": endpoints,
-            "monitoring_active": True,
-            "note": "Performance logs are available in application logs"
-        }
-
-    except Exception as e:
-        logger.error(f"Error fetching performance metrics: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error fetching performance metrics",
         )
 
 
@@ -1098,6 +831,190 @@ async def get_course_stats(
         )
 
 
+@router.get("/courses/{course_id}/info")
+async def get_course_info(
+    current_user: Annotated[User, Depends(require_teacher)],
+    course_id: str,
+    db=Depends(get_db),
+):
+    """Get basic course information."""
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+
+        # Get course
+        course_result = (
+            db.admin_client.table("course")
+            .select("*")
+            .eq("id", course_int_id)
+            .eq("university_id", teacher.university_id)
+            .execute()
+        )
+
+        if not course_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found or access denied",
+            )
+
+        course = course_result.data[0]
+        
+        # Convert integer ID to UUID for response
+        course_uuid = await IDConverter.int_to_uuid(db, "course", course["id"])
+        
+        return {
+            "id": course_uuid if course_uuid else str(course["id"]),
+            "name": course["name"],
+            "code": course["code"],
+            "description": course.get("description"),
+            "curriculum_content": course.get("curriculum_content"),
+            "created_at": course["created_at"],
+            "updated_at": course.get("updated_at"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching course info: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching course info",
+        )
+
+
+@router.get("/courses/{course_id}/documents")
+async def get_course_documents(
+    current_user: Annotated[User, Depends(require_teacher)],
+    course_id: str,
+    db=Depends(get_db),
+):
+    """Get all documents assigned to a specific course."""
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        logger.info(f"Fetching documents for course {course_id}")
+
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+
+        # Verify course belongs to teacher's university
+        course_result = (
+            db.admin_client.table("course")
+            .select("id, name, code")
+            .eq("id", course_int_id)
+            .eq("university_id", teacher.university_id)
+            .execute()
+        )
+
+        if not course_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found or access denied",
+            )
+
+        # Get document assignments for this course
+        logger.info(f"Querying document_assignment for course_id (int): {course_int_id}")
+        assignments_result = (
+            db.admin_client.table("document_assignment")
+            .select("id, document_id, topic, created_at")
+            .eq("course_id", course_int_id)
+            .execute()
+        )
+        
+        logger.info(f"Found {len(assignments_result.data or [])} document assignments")
+        document_ids = [a["document_id"] for a in (assignments_result.data or [])]
+        logger.info(f"Document IDs from assignments: {document_ids}")
+        
+        documents = []
+        if document_ids:
+            # Get document details
+            logger.info(f"Querying documents table with IDs: {document_ids}")
+            docs_result = (
+                db.admin_client.table("documents")
+                .select("id, title, document_type, status, file_size, description, created_at, updated_at")
+                .in_("id", document_ids)
+                .execute()
+            )
+            logger.info(f"Found {len(docs_result.data or [])} documents in documents table")
+            
+            # Create a map of document_id -> assignments
+            assignments_by_doc = {}
+            for a in (assignments_result.data or []):
+                doc_id = a["document_id"]
+                if doc_id not in assignments_by_doc:
+                    assignments_by_doc[doc_id] = []
+                # Convert assignment integer ID to UUID
+                assignment_uuid = await IDConverter.int_to_uuid(db, "document_assignment", a["id"])
+                assignments_by_doc[doc_id].append({
+                    "assignment_id": assignment_uuid if assignment_uuid else str(a["id"]),
+                    "topic": a.get("topic"),
+                    "assigned_at": a["created_at"],
+                })
+            
+            # Build response with document details and assignments
+            for doc in (docs_result.data or []):
+                doc_id = doc["id"]
+                # Convert document integer ID to UUID
+                doc_uuid = await IDConverter.int_to_uuid(db, "documents", doc_id)
+                
+                documents.append({
+                    "id": doc_uuid if doc_uuid else str(doc_id),
+                    "title": doc["title"],
+                    "document_type": doc["document_type"],
+                    "status": doc["status"],
+                    "file_size": doc.get("file_size"),
+                    "description": doc.get("description"),
+                    "created_at": doc["created_at"],
+                    "updated_at": doc.get("updated_at"),
+                    "assignments": assignments_by_doc.get(doc_id, []),
+                })
+        else:
+            logger.warning(f"No document IDs found for course {course_int_id}")
+
+        return {
+            "course_id": course_id,
+            "course_name": course_result.data[0].get("name"),
+            "course_code": course_result.data[0].get("code"),
+            "documents": documents,
+            "total_documents": len(documents),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching course documents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching course documents",
+        )
+
+
 @router.get("/courses/{course_id}/full")
 async def get_course_full_details(
     current_user: Annotated[User, Depends(require_teacher)],
@@ -1126,12 +1043,22 @@ async def get_course_full_details(
 
         logger.info(f"Fetching full course details for course {course_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+
         # Get course info
         course_result = (
             db.admin_client.table("course")
             .select("id, name, code, description, curriculum_content, created_at, updated_at")
-            .eq("id", course_id)
-            .eq("university_id", str(teacher.university_id))
+            .eq("id", course_int_id)
+            .eq("university_id", teacher.university_id)
             .execute()
         )
         
@@ -1147,7 +1074,7 @@ async def get_course_full_details(
         lectures_result = (
             db.admin_client.table("lecture")
             .select("id, title, description, status, topic, lecture_number, summary, created_at, updated_at")
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("teacher_id", teacher.id)
             .order("lecture_number", desc=False)
             .execute()
@@ -1212,8 +1139,10 @@ async def get_course_full_details(
                 except Exception:
                     pass
             
+            # Convert integer ID to UUID for response
+            lecture_uuid = await IDConverter.int_to_uuid(db, "lecture", lid)
             lectures.append({
-                "id": lid,
+                "id": lecture_uuid if lecture_uuid else str(lid),
                 "title": lec["title"],
                 "description": lec.get("description"),
                 "status": lec["status"],
@@ -1237,7 +1166,7 @@ async def get_course_full_details(
         enrollments_result = (
             db.admin_client.table("enrollment")
             .select("id, student_id, enrolled_at, is_active")
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("is_active", True)
             .order("enrolled_at", desc=True)
             .execute()
@@ -1282,13 +1211,16 @@ async def get_course_full_details(
         # Get attached documents (if any document assignment exists)
         documents = []
         try:
+            logger.info(f"Fetching document assignments for course_id (int): {course_int_id}")
             doc_assignment_result = (
                 db.admin_client.table("document_assignment")
                 .select("document_id")
-                .eq("course_id", course_id)
+                .eq("course_id", course_int_id)
                 .execute()
             )
+            logger.info(f"Found {len(doc_assignment_result.data or [])} document assignments")
             doc_ids = [d["document_id"] for d in (doc_assignment_result.data or [])]
+            logger.info(f"Document IDs to fetch: {doc_ids}")
             if doc_ids:
                 docs_result = (
                     db.admin_client.table("documents")
@@ -1296,9 +1228,17 @@ async def get_course_full_details(
                     .in_("id", doc_ids)
                     .execute()
                 )
+                logger.info(f"Found {len(docs_result.data or [])} documents")
+                # Convert document integer IDs to UUIDs for response
+                for doc in (docs_result.data or []):
+                    doc_id = doc["id"]
+                    doc_uuid = await IDConverter.int_to_uuid(db, "documents", doc_id)
+                    if doc_uuid:
+                        doc["id"] = doc_uuid
                 documents = docs_result.data or []
-        except Exception:
+        except Exception as e:
             # Table might not exist yet
+            logger.error(f"Error fetching documents for course: {e}", exc_info=True)
             pass
         
         # Calculate stats
@@ -1313,9 +1253,12 @@ async def get_course_full_details(
             "attached_documents": len(documents),
         }
         
+        # Convert course integer ID to UUID for response
+        course_uuid = await IDConverter.int_to_uuid(db, "course", course["id"])
+        
         return {
             "course": {
-                "id": course["id"],
+                "id": course_uuid if course_uuid else str(course["id"]),
                 "name": course["name"],
                 "code": course["code"],
                 "description": course.get("description"),
@@ -1366,11 +1309,21 @@ async def get_lecture_full_details(
 
         logger.info(f"Fetching full lecture details for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Get lecture with all fields
         lecture_result = (
             db.admin_client.table("lecture")
             .select("*")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -1397,7 +1350,7 @@ async def get_lecture_full_details(
         content_result = (
             db.admin_client.table("lecture_content")
             .select("*")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .execute()
         )
         if content_result.data:
@@ -1422,7 +1375,7 @@ async def get_lecture_full_details(
         assessment_result = (
             db.admin_client.table("assessment")
             .select("*")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .eq("is_default", True)
             .execute()
         )
@@ -1438,8 +1391,10 @@ async def get_lecture_full_details(
             
             questions = []
             for q in (questions_result.data or []):
+                # Convert question integer ID to UUID
+                question_uuid = await IDConverter.int_to_uuid(db, "question", q["id"])
                 questions.append({
-                    "id": q["id"],
+                    "id": question_uuid if question_uuid else str(q["id"]),
                     "question_text": q["question_text"],
                     "question_type": q.get("question_type", "MULTIPLE_CHOICE"),
                     "points": q.get("points", 1.0),
@@ -1448,8 +1403,10 @@ async def get_lecture_full_details(
                     "explanation": q.get("explanation"),
                 })
             
+            # Convert assessment integer ID to UUID
+            assessment_uuid = await IDConverter.int_to_uuid(db, "assessment", assessment["id"])
             quiz = {
-                "id": assessment["id"],
+                "id": assessment_uuid if assessment_uuid else str(assessment["id"]),
                 "title": assessment["title"],
                 "description": assessment.get("description"),
                 "time_limit": assessment.get("time_limit", 30),
@@ -1464,7 +1421,7 @@ async def get_lecture_full_details(
         flashcards_result = (
             db.admin_client.table("flashcard")
             .select("*")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .order("order_index")
             .execute()
         )
@@ -1473,8 +1430,10 @@ async def get_lecture_full_details(
         flashcard_stats = {"EASY": 0, "MEDIUM": 0, "HARD": 0}
         for card in (flashcards_result.data or []):
             diff = card.get("difficulty", "MEDIUM")
+            # Convert flashcard integer ID to UUID
+            flashcard_uuid = await IDConverter.int_to_uuid(db, "flashcard", card["id"])
             flashcards.append({
-                "id": card["id"],
+                "id": flashcard_uuid if flashcard_uuid else str(card["id"]),
                 "question": card["question"],
                 "answer": card["answer"],
                 "difficulty": diff,
@@ -1488,7 +1447,7 @@ async def get_lecture_full_details(
             plan_result = (
                 db.admin_client.table("lecture_plan")
                 .select("*")
-                .eq("lecture_id", lecture_id)
+                .eq("lecture_id", lecture_int_id)
                 .execute()
             )
             if plan_result.data:
@@ -1496,9 +1455,12 @@ async def get_lecture_full_details(
         except Exception:
             pass
         
+        # Convert lecture integer ID to UUID for response
+        lecture_uuid = await IDConverter.int_to_uuid(db, "lecture", lecture["id"])
+        
         return {
             "lecture": {
-                "id": lecture["id"],
+                "id": lecture_uuid if lecture_uuid else str(lecture["id"]),
                 "title": lecture["title"],
                 "description": lecture.get("description"),
                 "status": lecture["status"],
@@ -1558,11 +1520,21 @@ async def get_lecture_documents(
 
         logger.info(f"Fetching documents for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Get lecture with document_id and course_id
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, title, document_id, course_id, topic")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -1614,8 +1586,10 @@ async def get_lecture_documents(
                 
                 for doc in (docs_result.data or []):
                     assignment = assignment_map.get(doc["id"], {})
+                    # Convert document integer ID to UUID
+                    doc_uuid = await IDConverter.int_to_uuid(db, "documents", doc["id"])
                     course_documents.append({
-                        "id": doc["id"],
+                        "id": doc_uuid if doc_uuid else str(doc["id"]),
                         "title": doc["title"],
                         "document_type": doc["document_type"],
                         "status": doc["status"],
@@ -1688,11 +1662,21 @@ async def get_lecture_summary(
 
         logger.info(f"Fetching summary for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Get lecture and verify ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, title, summary, status, created_at, updated_at")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -1726,6 +1710,88 @@ async def get_lecture_summary(
         )
 
 
+@router.patch("/lectures/{lecture_id}/summary", status_code=status.HTTP_200_OK)
+async def update_lecture_summary(
+    current_user: Annotated[User, Depends(require_teacher)],
+    lecture_id: str,
+    request: "SummaryUpdateRequest",
+    db=Depends(get_db),
+):
+    """
+    Update (edit) a lecture summary (teacher access).
+
+    This allows teachers to edit the AI-generated summary text after it is generated.
+    Only accessible to the teacher who owns the lecture.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        if request.summary is None or not request.summary.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Summary cannot be empty",
+            )
+
+        logger.info(f"Updating summary for lecture {lecture_id}, teacher {teacher.id}")
+
+        # Convert UUID to integer ID
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
+        # Verify ownership
+        lecture_result = (
+            db.admin_client.table("lecture")
+            .select("id, title, created_at")
+            .eq("id", lecture_int_id)
+            .eq("teacher_id", teacher.id)
+            .execute()
+        )
+
+        if not lecture_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found or access denied",
+            )
+
+        lecture = lecture_result.data[0]
+
+        # Update lecture summary
+        db.admin_client.table("lecture").update(
+            {
+                "summary": request.summary.strip(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        ).eq("id", lecture_int_id).execute()
+
+        return {
+            "message": "Summary updated successfully",
+            "lecture_id": lecture_id,
+            "lecture_title": lecture.get("title"),
+            "summary": request.summary.strip(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating lecture summary: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating lecture summary",
+        ) from e
+
+
 @router.get("/lectures/{lecture_id}/flashcards")
 async def get_lecture_flashcards(
     current_user: Annotated[User, Depends(require_teacher)],
@@ -1752,11 +1818,21 @@ async def get_lecture_flashcards(
 
         logger.info(f"Fetching flashcards for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, title, status")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -1773,7 +1849,7 @@ async def get_lecture_flashcards(
         flashcards_result = (
             db.admin_client.table("flashcard")
             .select("*")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .order("order_index")
             .execute()
         )
@@ -1786,8 +1862,10 @@ async def get_lecture_flashcards(
             diff = card.get("difficulty", "MEDIUM")
             topic = card.get("topic", "General")
             
+            # Convert flashcard integer ID to UUID
+            flashcard_uuid = await IDConverter.int_to_uuid(db, "flashcard", card["id"])
             flashcards.append({
-                "id": card["id"],
+                "id": flashcard_uuid if flashcard_uuid else str(card["id"]),
                 "question": card["question"],
                 "answer": card["answer"],
                 "difficulty": diff,
@@ -1847,11 +1925,21 @@ async def get_lecture_quiz(
 
         logger.info(f"Fetching quiz for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, title, status")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -1868,7 +1956,7 @@ async def get_lecture_quiz(
         assessment_result = (
             db.admin_client.table("assessment")
             .select("*")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .eq("is_default", True)
             .execute()
         )
@@ -1954,11 +2042,21 @@ async def get_lecture_resources(
 
         logger.info(f"Fetching all resources for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Get lecture details
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, title, summary, status, content, description, learning_outcomes, created_at, updated_at")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -1975,7 +2073,7 @@ async def get_lecture_resources(
         lecture_content_result = (
             db.admin_client.table("lecture_content")
             .select("file_name, file_size, storage_bucket, storage_path")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .execute()
         )
         
@@ -2001,7 +2099,7 @@ async def get_lecture_resources(
         flashcards_result = (
             db.admin_client.table("flashcard")
             .select("id")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .execute()
         )
         flashcards_count = len(flashcards_result.data) if flashcards_result.data else 0
@@ -2010,7 +2108,7 @@ async def get_lecture_resources(
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .eq("is_default", True)
             .execute()
         )
@@ -2065,10 +2163,15 @@ async def get_course_lectures_for_teacher(
     current_user: Annotated[User, Depends(require_teacher)],
     course_id: str,
     status_filter: str | None = None,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
+    search: str = Query(None, description="Search by lecture title or topic"),
+    sort_by: str = Query("lecture_number", description="Sort by: title, lecture_number, created_at, status"),
+    sort_order: str = Query("asc", description="Sort order: asc or desc"),
     db=Depends(get_db),
 ):
     """
-    Get all lectures for a specific course (teacher access).
+    Get all lectures for a specific course (teacher access) with pagination.
     
     Teachers can see all lectures for their courses including draft and generated ones.
     Optional status_filter: DRAFT, GENERATED, PUBLISHED, DELIVERED
@@ -2083,11 +2186,21 @@ async def get_course_lectures_for_teacher(
 
         logger.info(f"Fetching lectures for course {course_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+
         # Build query
         query = (
             db.admin_client.table("lecture")
             .select("id, title, description, status, topic, lecture_number, created_at, updated_at")
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("teacher_id", teacher.id)
         )
 
@@ -2096,44 +2209,77 @@ async def get_course_lectures_for_teacher(
 
         lectures_result = query.order("created_at", desc=False).execute()
 
-        if not lectures_result.data:
+        all_lectures_data = lectures_result.data or []
+        
+        if not all_lectures_data:
             return {
                 "course_id": course_id,
-                "lectures": [],
-                "total_count": 0,
+                "items": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
+                "has_next": False,
+                "has_previous": False,
+                "by_status": {},
             }
+        
+        # Apply search filter
+        if search:
+            search_lower = search.lower()
+            all_lectures_data = [
+                lec for lec in all_lectures_data
+                if search_lower in (lec.get("title") or "").lower()
+                or search_lower in (lec.get("topic") or "").lower()
+                or search_lower in (lec.get("description") or "").lower()
+            ]
+        
+        # Sort
+        sort_desc = sort_order.lower() == "desc"
+        sort_key_map = {
+            "title": lambda l: (l.get("title") or "").lower(),
+            "lecture_number": lambda l: l.get("lecture_number") or 0,
+            "created_at": lambda l: l.get("created_at") or "",
+            "status": lambda l: (l.get("status") or "").lower(),
+        }
+        sort_fn = sort_key_map.get(sort_by, sort_key_map["lecture_number"])
+        all_lectures_data.sort(key=sort_fn, reverse=sort_desc)
+        
+        # Calculate pagination
+        total = len(all_lectures_data)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_data = all_lectures_data[start_idx:end_idx]
 
-        # Get additional info for each lecture using batch queries
-        lecture_ids = [lec["id"] for lec in lectures_result.data]
-        
-        # Batch get assessments for all lectures
-        assessments_result = (
-            db.admin_client.table("assessment")
-            .select("lecture_id")
-            .eq("is_default", True)
-            .in_("lecture_id", lecture_ids)
-            .execute()
-        )
-        assessment_by_lecture = {}
-        for a in (assessments_result.data or []):
-            assessment_by_lecture[a["lecture_id"]] = True
-        
-        # Batch get flashcards for all lectures
-        flashcards_result = (
-            db.admin_client.table("flashcard")
-            .select("lecture_id")
-            .in_("lecture_id", lecture_ids)
-            .execute()
-        )
-        flashcards_by_lecture = {}
-        for f in (flashcards_result.data or []):
-            flashcards_by_lecture[f["lecture_id"]] = True
-        
-        # Build lectures array with batch-fetched data
+        # Get additional info for each lecture on this page
         lectures = []
-        for lec in lectures_result.data:
+        for lec in page_data:
+            # Check for quiz and flashcards
+            assessment_result = (
+                db.admin_client.table("assessment")
+                .select("id")
+                .eq("lecture_id", lec["id"])
+                .eq("is_default", True)
+                .execute()
+            )
+            
+            flashcards_result = (
+                db.admin_client.table("flashcard")
+                .select("id")
+                .eq("lecture_id", lec["id"])
+                .execute()
+            )
+
+            # Convert lecture integer ID to UUID for response
+            lecture_id = lec["id"]
+            if isinstance(lecture_id, int):
+                lecture_uuid = await IDConverter.int_to_uuid(db, "lecture", lecture_id)
+                if lecture_uuid:
+                    lecture_id = lecture_uuid
+            
             lectures.append({
-                "lecture_id": lec["id"],
+                "lecture_id": lecture_id if isinstance(lecture_id, str) else str(lecture_id),
                 "title": lec["title"],
                 "description": lec.get("description"),
                 "status": lec["status"],
@@ -2145,18 +2291,23 @@ async def get_course_lectures_for_teacher(
                 "has_flashcards": lec["id"] in flashcards_by_lecture,
             })
 
-        # Group by status
+        # Group ALL lectures by status (not just current page)
         by_status = {}
-        for lec in lectures:
-            s = lec["status"]
+        for lec_data in all_lectures_data:
+            s = lec_data.get("status", "UNKNOWN")
             if s not in by_status:
-                by_status[s] = []
-            by_status[s].append(lec)
+                by_status[s] = 0
+            by_status[s] += 1
 
         return {
             "course_id": course_id,
-            "lectures": lectures,
-            "total_count": len(lectures),
+            "items": lectures,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_previous": page > 1,
             "by_status": by_status,
         }
 
@@ -2191,11 +2342,21 @@ async def get_course_quizzes(
 
         logger.info(f"Fetching quizzes for course {course_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        course_int_id = course_id
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+
         # Get published lectures with quizzes
         lectures_result = (
             db.admin_client.table("lecture")
             .select("id, title, status, topic, lecture_number")
-            .eq("course_id", course_id)
+            .eq("course_id", course_int_id)
             .eq("teacher_id", teacher.id)
             .in_("status", ["PUBLISHED", "DELIVERED"])
             .order("created_at", desc=False)
@@ -2320,11 +2481,30 @@ async def update_quiz_question(
 
         logger.info(f"Updating question {question_id} for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUIDs to integer IDs
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
+        question_int_id = question_id
+        if IDConverter.is_uuid(question_id):
+            question_int_id = await IDConverter.uuid_to_int(db, "question", question_id)
+            if not question_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Question not found",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, teacher_id")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -2339,7 +2519,7 @@ async def update_quiz_question(
         question_result = (
             db.admin_client.table("question")
             .select("*, assessment!inner(lecture_id)")
-            .eq("id", question_id)
+            .eq("id", question_int_id)
             .execute()
         )
 
@@ -2416,11 +2596,21 @@ async def add_quiz_question(
 
         logger.info(f"Adding question to quiz for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, teacher_id, title")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -2435,7 +2625,7 @@ async def add_quiz_question(
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .eq("is_default", True)
             .execute()
         )
@@ -2447,6 +2637,7 @@ async def add_quiz_question(
             )
 
         assessment_id = assessment_result.data[0]["id"]
+        # assessment_id from database is already an integer
 
         # Get current max order_index
         questions_result = (
@@ -2462,11 +2653,12 @@ async def add_quiz_question(
         if questions_result.data:
             next_order = (questions_result.data[0].get("order_index", 0) or 0) + 1
 
-        # Create new question
-        question_id = str(uuid4())
+        # Create new question with integer assessment_id
+        # assessment_id from database is already an integer
+        question_uuid = str(uuid4())
         question_data = {
-            "id": question_id,
-            "assessment_id": assessment_id,
+            "uuid": question_uuid,  # Store UUID for external use
+            "assessment_id": assessment_id,  # Integer FK (already from database)
             "question_text": request.question_text,
             "question_type": request.question_type,
             "points": request.points,
@@ -2478,14 +2670,16 @@ async def add_quiz_question(
             "updated_at": datetime.utcnow().isoformat(),
         }
 
-        db.admin_client.table("question").insert(question_data).execute()
+        question_result = db.admin_client.table("question").insert(question_data).execute()
+        question_record = question_result.data[0] if question_result.data else None
+        question_uuid = question_record.get("uuid") or question_uuid if question_record else question_uuid
 
-        logger.info(f"Created question {question_id} for assessment {assessment_id}")
+        logger.info(f"Created question {question_uuid} for assessment {assessment_id}")
 
         return {
             "message": "Question added successfully",
-            "question_id": question_id,
-            "assessment_id": assessment_id,
+            "question_id": question_uuid,  # Return UUID for API
+            "assessment_id": assessment_id,  # Return integer (or convert to UUID if needed)
             "order_index": next_order,
         }
 
@@ -2521,11 +2715,30 @@ async def delete_quiz_question(
 
         logger.info(f"Deleting question {question_id} from lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUIDs to integer IDs
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
+        question_int_id = question_id
+        if IDConverter.is_uuid(question_id):
+            question_int_id = await IDConverter.uuid_to_int(db, "question", question_id)
+            if not question_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Question not found",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, teacher_id")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -2540,7 +2753,7 @@ async def delete_quiz_question(
         question_result = (
             db.admin_client.table("question")
             .select("*, assessment!inner(lecture_id)")
-            .eq("id", question_id)
+            .eq("id", question_int_id)
             .execute()
         )
 
@@ -2551,14 +2764,14 @@ async def delete_quiz_question(
             )
 
         question = question_result.data[0]
-        if question.get("assessment", {}).get("lecture_id") != lecture_id:
+        if question.get("assessment", {}).get("lecture_id") != lecture_int_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Question does not belong to this lecture",
             )
 
         # Delete the question
-        db.admin_client.table("question").delete().eq("id", question_id).execute()
+        db.admin_client.table("question").delete().eq("id", question_int_id).execute()
 
         logger.info(f"Deleted question {question_id}")
 
@@ -2620,11 +2833,30 @@ async def update_flashcard(
 
         logger.info(f"Updating flashcard {flashcard_id} for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUIDs to integer IDs
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
+        flashcard_int_id = flashcard_id
+        if IDConverter.is_uuid(flashcard_id):
+            flashcard_int_id = await IDConverter.uuid_to_int(db, "flashcard", flashcard_id)
+            if not flashcard_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Flashcard not found",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, teacher_id")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -2639,8 +2871,8 @@ async def update_flashcard(
         flashcard_result = (
             db.admin_client.table("flashcard")
             .select("*")
-            .eq("id", flashcard_id)
-            .eq("lecture_id", lecture_id)
+            .eq("id", flashcard_int_id)
+            .eq("lecture_id", lecture_int_id)
             .execute()
         )
 
@@ -2669,7 +2901,7 @@ async def update_flashcard(
             update_data["topic"] = request.topic
 
         # Update the flashcard
-        db.admin_client.table("flashcard").update(update_data).eq("id", flashcard_id).execute()
+        db.admin_client.table("flashcard").update(update_data).eq("id", flashcard_int_id).execute()
 
         logger.info(f"Updated flashcard {flashcard_id}")
 
@@ -2712,11 +2944,21 @@ async def add_flashcard(
 
         logger.info(f"Adding flashcard to lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, teacher_id")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -2738,7 +2980,7 @@ async def add_flashcard(
         flashcards_result = (
             db.admin_client.table("flashcard")
             .select("order_index")
-            .eq("lecture_id", lecture_id)
+            .eq("lecture_id", lecture_int_id)
             .order("order_index", desc=True)
             .limit(1)
             .execute()
@@ -2804,11 +3046,30 @@ async def delete_flashcard(
 
         logger.info(f"Deleting flashcard {flashcard_id} from lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUIDs to integer IDs
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
+        flashcard_int_id = flashcard_id
+        if IDConverter.is_uuid(flashcard_id):
+            flashcard_int_id = await IDConverter.uuid_to_int(db, "flashcard", flashcard_id)
+            if not flashcard_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Flashcard not found",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, teacher_id")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -2823,8 +3084,8 @@ async def delete_flashcard(
         flashcard_result = (
             db.admin_client.table("flashcard")
             .select("id")
-            .eq("id", flashcard_id)
-            .eq("lecture_id", lecture_id)
+            .eq("id", flashcard_int_id)
+            .eq("lecture_id", lecture_int_id)
             .execute()
         )
 
@@ -2835,7 +3096,7 @@ async def delete_flashcard(
             )
 
         # Delete the flashcard
-        db.admin_client.table("flashcard").delete().eq("id", flashcard_id).execute()
+        db.admin_client.table("flashcard").delete().eq("id", flashcard_int_id).execute()
 
         logger.info(f"Deleted flashcard {flashcard_id}")
 
@@ -2877,6 +3138,17 @@ class TestQuizAIGenerateRequest(BaseModel):
     focus_areas: list[str] | None = None
 
 
+class ExtendDeadlineRequest(BaseModel):
+    """Request model for extending quiz deadline."""
+    new_due_date: str  # ISO format datetime string
+    notify_students: bool = True  # Whether to notify students about the extension
+
+
+class SummaryUpdateRequest(BaseModel):
+    """Request model for updating a lecture summary."""
+    summary: str
+
+
 @router.post("/lectures/{lecture_id}/test-quiz")
 async def create_test_quiz(
     current_user: Annotated[User, Depends(require_teacher)],
@@ -2900,11 +3172,21 @@ async def create_test_quiz(
 
         logger.info(f"Creating test quiz for lecture {lecture_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        lecture_int_id = lecture_id
+        if IDConverter.is_uuid(lecture_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture not found or access denied",
+                )
+
         # Verify lecture ownership
         lecture_result = (
             db.admin_client.table("lecture")
             .select("id, title, course_id, content")
-            .eq("id", lecture_id)
+            .eq("id", lecture_int_id)
             .eq("teacher_id", teacher.id)
             .execute()
         )
@@ -2933,16 +3215,23 @@ async def create_test_quiz(
                 detail="Invalid due_date format. Use ISO format (e.g., 2024-12-31T23:59:59Z)",
             )
 
-        # Create assessment
-        assessment_id = str(uuid4())
+        # Get integer IDs for assessment creation
+        course_int_id = lecture["course_id"]
+        if not isinstance(course_int_id, int):
+            course_int_id = int(course_int_id) if course_int_id else None
+        
+        teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+
+        # Create assessment with integer IDs
+        assessment_uuid = str(uuid4())
         assessment_data = {
-            "id": assessment_id,
+            "uuid": assessment_uuid,  # Store UUID for external use
             "title": request.title,
             "description": request.description,
             "assessment_type": "QUIZ",
-            "course_id": lecture["course_id"],
-            "lecture_id": lecture_id,
-            "teacher_id": str(teacher.id),
+            "course_id": course_int_id,  # Integer FK
+            "lecture_id": lecture_int_id,  # Integer FK
+            "teacher_id": teacher_int_id,  # Integer FK
             "time_limit": request.time_limit,
             "max_attempts": request.max_attempts,
             "passing_score": request.passing_score,
@@ -2956,13 +3245,15 @@ async def create_test_quiz(
             "updated_at": datetime.utcnow().isoformat(),
         }
 
-        db.admin_client.table("assessment").insert(assessment_data).execute()
+        assessment_result = db.admin_client.table("assessment").insert(assessment_data).execute()
+        assessment_record = assessment_result.data[0]
+        assessment_uuid = assessment_record.get("uuid") or assessment_uuid
 
-        logger.info(f"Created test quiz {assessment_id} for lecture {lecture_id}")
+        logger.info(f"Created test quiz {assessment_uuid} for lecture {lecture_id}")
 
         return {
             "message": "Test quiz created successfully",
-            "assessment_id": assessment_id,
+            "assessment_id": assessment_uuid,  # UUID for API
             "title": request.title,
             "lecture_id": lecture_id,
             "lecture_title": lecture["title"],
@@ -3450,12 +3741,32 @@ async def generate_quiz_questions(
 
         logger.info(f"Generating questions for assessment {assessment_id}, teacher {teacher.id}")
 
-        # Get assessment and verify ownership
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+        
+        # Convert teacher.id to integer if needed
+        teacher_int_id = teacher.id
+        if IDConverter.is_uuid(teacher.id):
+            teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+            if not teacher_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher ID conversion failed",
+                )
+
+        # Get assessment and verify ownership using integer IDs
         assessment_result = (
             db.admin_client.table("assessment")
             .select("*, lecture!inner(id, title, content)")
-            .eq("id", assessment_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("id", assessment_int_id)  # Use integer ID
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -3474,12 +3785,22 @@ async def generate_quiz_questions(
                 detail="Lecture has no content to generate questions from",
             )
 
+        # Convert lecture_id to integer if needed for quiz service
+        lecture_int_id = lecture.get("id")
+        if IDConverter.is_uuid(lecture_int_id):
+            lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_int_id)
+            if not lecture_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Lecture ID conversion failed",
+                )
+
         # Generate questions using AI
         from services.quiz_service import QuizService
         
         quiz_service = QuizService(db)
         quiz_data = await quiz_service.generate_quiz_from_lecture(
-            lecture_id=lecture["id"],
+            lecture_id=lecture_int_id,  # Use integer ID
             lecture_content=lecture["content"],
             num_questions=request.num_questions,
             question_types=request.question_types,
@@ -3487,11 +3808,11 @@ async def generate_quiz_questions(
             focus_areas=request.focus_areas,
         )
 
-        # Get current max order_index
+        # Get current max order_index using integer assessment_id
         existing_questions = (
             db.admin_client.table("question")
             .select("order_index")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)  # Use integer ID
             .order("order_index", desc=True)
             .limit(1)
             .execute()
@@ -3501,12 +3822,12 @@ async def generate_quiz_questions(
         if existing_questions.data:
             start_order = (existing_questions.data[0].get("order_index", 0) or 0) + 1
 
-        # Insert generated questions
+        # Insert generated questions with integer assessment_id
         questions_to_insert = []
         for i, q in enumerate(quiz_data.get("questions", [])):
             question_data = {
-                "id": str(uuid4()),
-                "assessment_id": assessment_id,
+                "uuid": str(uuid4()),  # Store UUID for external use
+                "assessment_id": assessment_int_id,  # Use integer ID
                 "question_text": q["question_text"],
                 "question_type": q.get("question_type", "MULTIPLE_CHOICE"),
                 "points": q.get("points", 1.0),
@@ -3560,12 +3881,32 @@ async def publish_test_quiz(
                 detail="Teacher profile not found",
             )
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
+        # Convert teacher.id to integer if needed
+        teacher_int_id = teacher.id
+        if IDConverter.is_uuid(teacher.id):
+            teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+            if not teacher_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher ID conversion failed",
+                )
+
         # Verify ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, quiz_mode")
-            .eq("id", assessment_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("id", assessment_int_id)
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -3579,7 +3920,7 @@ async def publish_test_quiz(
         questions_result = (
             db.admin_client.table("question")
             .select("id")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)
             .execute()
         )
 
@@ -3593,7 +3934,7 @@ async def publish_test_quiz(
         db.admin_client.table("assessment").update({
             "is_published": True,
             "updated_at": datetime.utcnow().isoformat(),
-        }).eq("id", assessment_id).execute()
+        }).eq("id", assessment_int_id).execute()
 
         quiz_title = assessment_result.data[0]["title"]
         
@@ -3603,7 +3944,7 @@ async def publish_test_quiz(
             quiz_full = (
                 db.admin_client.table("assessment")
                 .select("course_id, due_date")
-                .eq("id", assessment_id)
+                .eq("id", assessment_int_id)
                 .execute()
             )
             
@@ -3634,12 +3975,15 @@ async def publish_test_quiz(
                     if students_result.data:
                         student_user_ids = [s["user_id"] for s in students_result.data]
                         
+                        # Convert student_user_ids to strings (they might be integers from DB)
+                        student_user_ids_str = [str(uid) for uid in student_user_ids]
+                        
                         notification_service = NotificationService(db)
                         await notification_service.notify_quiz_published(
-                            student_user_ids=student_user_ids,
+                            student_user_ids=student_user_ids_str,
                             quiz_title=quiz_title,
                             due_date=due_date,
-                            assessment_id=assessment_id,
+                            assessment_id=assessment_id,  # Pass UUID for external use in URLs
                         )
                         logger.info(f"Sent quiz published notifications to {len(student_user_ids)} students")
         except Exception as notify_error:
@@ -3663,6 +4007,235 @@ async def publish_test_quiz(
         )
 
 
+@router.put("/assessments/{assessment_id}/extend-deadline")
+async def extend_quiz_deadline(
+    current_user: Annotated[User, Depends(require_teacher)],
+    assessment_id: str,
+    request: ExtendDeadlineRequest,
+    db=Depends(get_db),
+):
+    """
+    Extend the deadline for a quiz.
+    
+    Teachers can extend the deadline of their quizzes. Optionally notify all enrolled students
+    about the deadline extension.
+    """
+    try:
+        teacher = current_user.teacher_profile
+        if not teacher:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Teacher profile not found",
+            )
+
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
+        # Convert teacher.id to integer if needed
+        teacher_int_id = teacher.id
+        if IDConverter.is_uuid(teacher.id):
+            teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+            if not teacher_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher ID conversion failed",
+                )
+
+        # Verify ownership and get current assessment details
+        assessment_result = (
+            db.admin_client.table("assessment")
+            .select("id, title, due_date, course_id, quiz_mode")
+            .eq("id", assessment_int_id)
+            .eq("teacher_id", teacher_int_id)
+            .execute()
+        )
+
+        if not assessment_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Assessment not found or access denied",
+            )
+
+        assessment = assessment_result.data[0]
+        current_due_date = assessment.get("due_date")
+        quiz_title = assessment.get("title")
+        course_id = assessment.get("course_id")
+
+        # Parse new due_date and ensure it's timezone-aware
+        try:
+            new_due_date_str = request.new_due_date.replace("Z", "+00:00")
+            new_due_date = datetime.fromisoformat(new_due_date_str)
+            # Ensure timezone-aware (if naive, assume UTC)
+            if new_due_date.tzinfo is None:
+                new_due_date = new_due_date.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid new_due_date format. Use ISO format (e.g., 2024-12-31T23:59:59Z)",
+            )
+
+        # Validate that new deadline is in the future
+        # Use timezone-aware UTC datetime for comparison
+        now_utc = datetime.now(timezone.utc)
+        if new_due_date <= now_utc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="New deadline must be in the future",
+            )
+
+        # Validate that new deadline is after current deadline (if exists)
+        if current_due_date:
+            try:
+                # Parse current due date and ensure it's timezone-aware
+                current_due_str = str(current_due_date)
+                if "Z" in current_due_str or "+" in current_due_str or current_due_str.endswith("UTC"):
+                    current_due_str = current_due_str.replace("Z", "+00:00")
+                else:
+                    # If no timezone info, assume UTC
+                    if not current_due_str.endswith("+00:00") and not current_due_str.endswith("-00:00"):
+                        current_due_str = current_due_str + "+00:00"
+                
+                current_due_dt = datetime.fromisoformat(current_due_str)
+                # Ensure timezone-aware (if naive, assume UTC)
+                if current_due_dt.tzinfo is None:
+                    current_due_dt = current_due_dt.replace(tzinfo=timezone.utc)
+                
+                if new_due_date <= current_due_dt:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="New deadline must be after the current deadline",
+                    )
+            except (ValueError, AttributeError) as e:
+                # If current_due_date is invalid, just proceed
+                logger.warning(f"Could not parse current_due_date for comparison: {e}")
+                pass
+
+        # Update the deadline
+        db.admin_client.table("assessment").update({
+            "due_date": new_due_date.isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("id", assessment_int_id).execute()
+
+        logger.info(f"Extended deadline for quiz {assessment_id} to {new_due_date.isoformat()}")
+
+        # Notify enrolled students if requested
+        if request.notify_students:
+            try:
+                # Get all enrolled students' user_ids
+                enrollments_result = (
+                    db.admin_client.table("enrollment")
+                    .select("student_id")
+                    .eq("course_id", course_id)
+                    .eq("is_active", True)
+                    .execute()
+                )
+                
+                if enrollments_result.data:
+                    student_ids = [e["student_id"] for e in enrollments_result.data]
+                    
+                    # Get user_ids for these students
+                    students_result = (
+                        db.admin_client.table("student")
+                        .select("user_id")
+                        .in_("id", student_ids)
+                        .execute()
+                    )
+                    
+                    if students_result.data:
+                        student_user_ids = [str(s["user_id"]) for s in students_result.data]
+                        
+                        # Get course name for notification
+                        course_result = (
+                            db.admin_client.table("course")
+                            .select("name")
+                            .eq("id", course_id)
+                            .execute()
+                        )
+                        course_name = course_result.data[0].get("name", "Course") if course_result.data else "Course"
+                        
+                        # Get teacher name for email
+                        teacher_name = f"{current_user.first_name} {current_user.last_name}".strip() or "Your instructor"
+                        
+                        # Send email notifications to all enrolled students
+                        from settings import settings
+                        from services.email_service import email_service
+                        
+                        users_result = (
+                            db.admin_client.table("users")
+                            .select("id, email, first_name, last_name")
+                            .in_("id", student_user_ids)
+                            .execute()
+                        )
+                        
+                        for user in users_result.data or []:
+                            user_email = user.get("email")
+                            user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "Student"
+                            if user_email:
+                                # Format dates for email
+                                old_date_str = "Not set"
+                                if current_due_date:
+                                    try:
+                                        old_dt = datetime.fromisoformat(current_due_date.replace("Z", "+00:00"))
+                                        old_date_str = old_dt.strftime("%B %d, %Y at %I:%M %p")
+                                    except (ValueError, AttributeError):
+                                        old_date_str = str(current_due_date)
+                                
+                                new_date_str = new_due_date.strftime("%B %d, %Y at %I:%M %p")
+                                
+                                # Get max points if available
+                                max_points = None
+                                questions_result = (
+                                    db.admin_client.table("question")
+                                    .select("points")
+                                    .eq("assessment_id", assessment_int_id)
+                                    .execute()
+                                )
+                                if questions_result.data:
+                                    max_points = sum(float(q.get("points", 0) or 0) for q in questions_result.data)
+                                
+                                # Send dedicated deadline extension email
+                                email_service.send_deadline_extended_notification(
+                                    to_email=user_email,
+                                    student_name=user_name,
+                                    quiz_title=quiz_title,
+                                    course_name=course_name,
+                                    teacher_name=teacher_name,
+                                    old_due_date=old_date_str,
+                                    new_due_date=new_date_str,
+                                    max_points=int(max_points) if max_points else None,
+                                    quiz_link=f"{settings.FRONTEND_URL}/student/assessments"
+                                )
+                        
+                        logger.info(f"Sent deadline extension notifications to {len(users_result.data or [])} students")
+            except Exception as notify_error:
+                logger.warning(f"Failed to send deadline extension notifications: {notify_error}")
+
+        return {
+            "message": "Quiz deadline extended successfully",
+            "assessment_id": assessment_id,
+            "title": quiz_title,
+            "old_due_date": current_due_date,
+            "new_due_date": new_due_date.isoformat(),
+            "students_notified": request.notify_students,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error extending quiz deadline: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error extending quiz deadline",
+        ) from e
+
+
 @router.get("/assessments/{assessment_id}")
 async def get_assessment_details(
     current_user: Annotated[User, Depends(require_teacher)],
@@ -3684,12 +4257,32 @@ async def get_assessment_details(
 
         logger.info(f"Fetching assessment {assessment_id}, teacher {teacher.id}")
 
-        # Get assessment with lecture and course info in single query
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
+        # Get assessment with lecture info
+        # Convert teacher.id to integer if needed
+        teacher_int_id = teacher.id
+        if IDConverter.is_uuid(teacher.id):
+            teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+            if not teacher_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher ID conversion failed",
+                )
+        
         assessment_result = (
             db.admin_client.table("assessment")
-            .select("*, lecture!inner(id, title, course_id, course!inner(name, code))")
-            .eq("id", assessment_id)
-            .eq("teacher_id", str(teacher.id))
+            .select("*, lecture!inner(id, title, course_id)")
+            .eq("id", assessment_int_id)  # Use integer ID
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -3707,7 +4300,7 @@ async def get_assessment_details(
         questions_result = (
             db.admin_client.table("question")
             .select("*")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)
             .order("order_index")
             .execute()
         )
@@ -3728,11 +4321,11 @@ async def get_assessment_details(
                 "explanation": q.get("explanation"),
             })
 
-        # Get submission count
+        # Get submission count using integer assessment_id
         submissions_result = (
             db.admin_client.table("assessment_submission")
             .select("id")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)  # Use integer ID
             .eq("is_submitted", True)
             .execute()
         )
@@ -3747,18 +4340,26 @@ async def get_assessment_details(
             except Exception:
                 pass
 
+        # Convert IDs to UUIDs for API response
+        assessment_id_uuid = assessment_id  # Already a UUID from the request
+        lecture_id_uuid = await IDConverter.int_to_uuid(db, "lecture", lecture.get("id")) if lecture.get("id") else None
+        if not lecture_id_uuid and lecture.get("id"):
+            lecture_id_uuid = lecture.get("uuid") or str(lecture.get("id"))
+        
+        course_id_uuid = await IDConverter.int_to_uuid(db, "course", lecture.get("course_id")) if lecture.get("course_id") else None
+        if not course_id_uuid and lecture.get("course_id"):
+            course_id_uuid = str(lecture.get("course_id"))
+
         return {
-            "assessment_id": assessment_id,
+            "assessment_id": assessment_id_uuid,  # Use UUID for API
             "title": assessment["title"],
             "description": assessment.get("description"),
             "assessment_type": assessment.get("assessment_type", "QUIZ"),
             "quiz_mode": assessment.get("quiz_mode", "PRACTICE"),
             "difficulty": assessment.get("difficulty", "MEDIUM"),
-            "lecture_id": lecture.get("id"),
+            "lecture_id": lecture_id_uuid,  # Use UUID for API
             "lecture_title": lecture.get("title"),
-            "course_id": lecture.get("course_id"),
-            "course_name": course.get("name"),
-            "course_code": course.get("code"),
+            "course_id": course_id_uuid,  # Use UUID for API
             "time_limit": assessment.get("time_limit"),
             "max_attempts": assessment.get("max_attempts", 1),
             "passing_score": assessment.get("passing_score", 60.0),
@@ -3805,11 +4406,21 @@ async def get_quiz_submissions(
 
         logger.info(f"Fetching submissions for assessment {assessment_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
         # Verify ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, course_id, due_date")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("teacher_id", str(teacher.id))
             .execute()
         )
@@ -3865,7 +4476,7 @@ async def get_quiz_submissions(
         submissions_result = (
             db.admin_client.table("assessment_submission")
             .select("*")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)  # Use integer ID, not UUID
             .eq("is_submitted", True)
             .order("score", desc=True)
             .execute()
@@ -3977,12 +4588,31 @@ async def get_detailed_submission(
 
         logger.info(f"Fetching detailed submission for student {student_id}, assessment {assessment_id}")
 
+        # Convert UUIDs to integer IDs
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found",
+                )
+        
+        student_int_id = student_id
+        if IDConverter.is_uuid(student_id):
+            student_int_id = await IDConverter.uuid_to_int(db, "student", student_id)
+            if not student_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Student not found",
+                )
+
         # Verify ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title")
-            .eq("id", assessment_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("id", assessment_int_id)
+            .eq("teacher_id", teacher.id)
             .execute()
         )
 
@@ -3998,7 +4628,7 @@ async def get_detailed_submission(
         student_result = (
             db.admin_client.table("student")
             .select("id, user_id")
-            .eq("id", student_id)
+            .eq("id", student_int_id)
             .execute()
         )
 
@@ -4022,8 +4652,8 @@ async def get_detailed_submission(
         submission_result = (
             db.admin_client.table("assessment_submission")
             .select("*")
-            .eq("assessment_id", assessment_id)
-            .eq("student_id", student_id)
+            .eq("assessment_id", assessment_int_id)
+            .eq("student_id", student_int_id)
             .eq("is_submitted", True)
             .order("score", desc=True)
             .limit(1)
@@ -4122,12 +4752,38 @@ async def get_quiz_leaderboard_teacher(
                 detail="Teacher profile not found",
             )
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
+        # Convert teacher_id to integer if needed
+        teacher_int_id = teacher.id
+        if isinstance(teacher.id, str):
+            if IDConverter.is_uuid(teacher.id):
+                teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+                if not teacher_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Teacher profile not found",
+                    )
+            else:
+                try:
+                    teacher_int_id = int(teacher.id)
+                except ValueError:
+                    teacher_int_id = teacher.id
+
         # Verify ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, show_leaderboard")
-            .eq("id", assessment_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("id", assessment_int_id)
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -4143,7 +4799,7 @@ async def get_quiz_leaderboard_teacher(
         submissions_result = (
             db.admin_client.table("assessment_submission")
             .select("student_id, score, max_score, submitted_at")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)  # Use integer ID, not UUID
             .eq("is_submitted", True)
             .order("score", desc=True)
             .execute()
@@ -4250,12 +4906,33 @@ async def get_course_test_quizzes(
 
         logger.info(f"Fetching test quizzes for course {course_id}, teacher {teacher.id}")
 
+        # Convert IDs to integers for database queries
+        course_int_id = course_id
+        if isinstance(course_id, str):
+            if IDConverter.is_uuid(course_id):
+                course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+                if not course_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Course not found",
+                    )
+            else:
+                try:
+                    course_int_id = int(course_id)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid course_id format",
+                    )
+        
+        teacher_int_id = teacher.id if isinstance(teacher.id, int) else teacher.id
+
         # Get test quizzes
         assessments_result = (
             db.admin_client.table("assessment")
             .select("*, lecture!inner(id, title)")
-            .eq("course_id", course_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("course_id", course_int_id)  # Use integer ID
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .eq("quiz_mode", "TEST")
             .order("created_at", desc=True)
             .execute()
@@ -4366,11 +5043,21 @@ async def get_test_quiz_questions(
                 detail="Teacher profile not found",
             )
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
         # Verify ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, quiz_mode, difficulty")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("teacher_id", str(teacher.id))
             .execute()
         )
@@ -4451,11 +5138,21 @@ async def add_test_quiz_question(
 
         logger.info(f"Adding question to assessment {assessment_id}, teacher {teacher.id}")
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
         # Verify ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title, is_published")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("teacher_id", str(teacher.id))
             .execute()
         )
@@ -4486,7 +5183,7 @@ async def add_test_quiz_question(
         existing_questions = (
             db.admin_client.table("question")
             .select("order_index")
-            .eq("assessment_id", assessment_id)
+            .eq("assessment_id", assessment_int_id)
             .order("order_index", desc=True)
             .limit(1)
             .execute()
@@ -4496,11 +5193,11 @@ async def add_test_quiz_question(
         if existing_questions.data:
             next_order = (existing_questions.data[0].get("order_index", 0) or 0) + 1
 
-        # Create question
-        question_id = str(uuid4())
+        # Create question with integer assessment_id
+        question_uuid = str(uuid4())
         question_data = {
-            "id": question_id,
-            "assessment_id": assessment_id,
+            "uuid": question_uuid,  # Store UUID for external use
+            "assessment_id": assessment_id,  # Integer FK (already from database)
             "question_text": request.question_text,
             "question_type": request.question_type,
             "points": request.points,
@@ -4512,13 +5209,15 @@ async def add_test_quiz_question(
             "updated_at": datetime.utcnow().isoformat(),
         }
 
-        db.admin_client.table("question").insert(question_data).execute()
+        question_result = db.admin_client.table("question").insert(question_data).execute()
+        question_record = question_result.data[0] if question_result.data else None
+        question_uuid = question_record.get("uuid") or question_uuid if question_record else question_uuid
 
-        logger.info(f"Added question {question_id} to assessment {assessment_id}")
+        logger.info(f"Added question {question_uuid} to assessment {assessment_id}")
 
         return {
             "message": "Question added successfully",
-            "question_id": question_id,
+            "question_id": question_uuid,  # Return UUID for API
             "assessment_id": assessment_id,
             "order_index": next_order,
             "question_type": request.question_type,
@@ -4652,12 +5351,47 @@ async def delete_test_quiz_question(
 
         logger.info(f"Deleting question {question_id} from assessment {assessment_id}")
 
+        # Convert UUIDs to integer IDs if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
+        question_int_id = question_id
+        if IDConverter.is_uuid(question_id):
+            question_int_id = await IDConverter.uuid_to_int(db, "question", question_id)
+            if not question_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Question not found",
+                )
+
+        # Convert teacher_id to integer if needed
+        teacher_int_id = teacher.id
+        if isinstance(teacher.id, str):
+            if IDConverter.is_uuid(teacher.id):
+                teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+                if not teacher_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Teacher profile not found",
+                    )
+            else:
+                try:
+                    teacher_int_id = int(teacher.id)
+                except ValueError:
+                    teacher_int_id = teacher.id
+
         # Verify assessment ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id")
-            .eq("id", assessment_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("id", assessment_int_id)  # Use integer ID
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -4671,8 +5405,8 @@ async def delete_test_quiz_question(
         question_result = (
             db.admin_client.table("question")
             .select("id")
-            .eq("id", question_id)
-            .eq("assessment_id", assessment_id)
+            .eq("id", question_int_id)  # Use integer ID
+            .eq("assessment_id", assessment_int_id)  # Use integer ID
             .execute()
         )
 
@@ -4683,7 +5417,7 @@ async def delete_test_quiz_question(
             )
 
         # Delete the question
-        db.admin_client.table("question").delete().eq("id", question_id).execute()
+        db.admin_client.table("question").delete().eq("id", question_int_id).execute()  # Use integer ID
 
         logger.info(f"Deleted question {question_id}")
 
@@ -4787,11 +5521,21 @@ async def add_bulk_questions(
 
         logger.info(f"Adding {len(questions)} questions to assessment {assessment_id}")
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
         # Verify assessment ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("teacher_id", str(teacher.id))
             .execute()
         )
@@ -4828,8 +5572,8 @@ async def add_bulk_questions(
                     )
 
             question_data = {
-                "id": str(uuid4()),
-                "assessment_id": assessment_id,
+                "uuid": str(uuid4()),  # Store UUID for external use
+                "assessment_id": assessment_id,  # Integer FK (already from database)
                 "question_text": q.question_text,
                 "question_type": q.question_type,
                 "points": q.points,
@@ -4894,11 +5638,21 @@ async def export_questions_to_csv(
                 detail="Teacher profile not found",
             )
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found",
+                )
+
         # Verify assessment exists and belongs to teacher's lecture
         assessment_result = (
             db.admin_client.table("assessment")
             .select("*, lecture!inner(teacher_id, title)")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .execute()
         )
 
@@ -5274,10 +6028,9 @@ async def import_questions_from_csv(
         # Insert questions
         questions_to_insert = []
         for i, q in enumerate(questions_to_add):
-            question_id = str(uuid4())
             questions_to_insert.append({
-                "id": question_id,
-                "assessment_id": assessment_id,
+                "uuid": str(uuid4()),  # Store UUID for external use
+                "assessment_id": assessment_id,  # Integer FK (already from database)
                 "question_text": q["question_text"],
                 "question_type": q["question_type"],
                 "options": q["options"],
@@ -5351,19 +6104,51 @@ async def get_result_view_requests(
 
         logger.info(f"Fetching result view requests for teacher {teacher.id}")
 
+        # Convert teacher_id to integer if needed
+        teacher_int_id = teacher.id
+        if isinstance(teacher.id, str):
+            if IDConverter.is_uuid(teacher.id):
+                teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+                if not teacher_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Teacher profile not found",
+                    )
+            else:
+                try:
+                    teacher_int_id = int(teacher.id)
+                except ValueError:
+                    teacher_int_id = teacher.id
+
+        # Convert assessment_id to integer if provided
+        assessment_int_id = None
+        if assessment_id:
+            if IDConverter.is_uuid(assessment_id):
+                assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+                if not assessment_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Assessment not found",
+                    )
+            else:
+                try:
+                    assessment_int_id = int(assessment_id)
+                except ValueError:
+                    assessment_int_id = assessment_id
+
         # Build query
         query = (
             db.admin_client.table("result_view_request")
             .select("*, assessment!inner(id, title, quiz_mode, lecture!inner(id, title, course_id)), student!inner(id, user_id)")
-            .eq("teacher_id", str(teacher.id))
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .order("requested_at", desc=True)
         )
 
         if status_filter and status_filter.upper() in ["PENDING", "APPROVED", "REJECTED"]:
             query = query.eq("status", status_filter.upper())
 
-        if assessment_id:
-            query = query.eq("assessment_id", assessment_id)
+        if assessment_int_id:
+            query = query.eq("assessment_id", assessment_int_id)  # Use integer ID
 
         result = query.execute()
 
@@ -5554,12 +6339,32 @@ async def approve_result_request(
 
         logger.info(f"Teacher {teacher.id} approving request {request_id}")
 
-        # Get the request and verify ownership
+        # Convert request_id UUID to integer if needed
+        request_int_id = request_id
+        if IDConverter.is_uuid(request_id):
+            request_int_id = await IDConverter.uuid_to_int(db, "result_view_request", request_id)
+            if not request_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Request not found",
+                )
+        
+        # Convert teacher.id to integer if needed
+        teacher_int_id = teacher.id
+        if IDConverter.is_uuid(teacher.id):
+            teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher.id)
+            if not teacher_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Teacher ID conversion failed",
+                )
+
+        # Get the request and verify ownership using integer IDs
         request_result = (
             db.admin_client.table("result_view_request")
             .select("*, student!inner(user_id)")
-            .eq("id", request_id)
-            .eq("teacher_id", str(teacher.id))
+            .eq("id", request_int_id)  # Use integer ID
+            .eq("teacher_id", teacher_int_id)  # Use integer ID
             .execute()
         )
 
@@ -5578,21 +6383,41 @@ async def approve_result_request(
                 "status": req["status"],
             }
 
-        # Update the request
+        # Update the request using integer ID
         update_data = {
             "status": "APPROVED",
             "response_message": response.message if response else None,
             "responded_at": datetime.utcnow().isoformat(),
         }
 
-        db.admin_client.table("result_view_request").update(update_data).eq("id", request_id).execute()
+        db.admin_client.table("result_view_request").update(update_data).eq("id", request_int_id).execute()
 
         # Get student name for response
-        student_user_id = req["student"]["user_id"]
+        # Handle both UUID and integer user_id from the join
+        student_user_id_raw = req["student"]["user_id"]
+        student_user_id_int = student_user_id_raw
+        if IDConverter.is_uuid(student_user_id_raw):
+            # If it's a UUID, convert to integer for query
+            student_user_id_int = await IDConverter.uuid_to_int(db, "users", student_user_id_raw)
+            if not student_user_id_int:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Student user ID conversion failed",
+                )
+        elif isinstance(student_user_id_raw, str):
+            # Try to parse as integer
+            try:
+                student_user_id_int = int(student_user_id_raw)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Invalid student user ID",
+                )
+        
         user_result = (
             db.admin_client.table("users")
             .select("first_name, last_name")
-            .eq("id", student_user_id)
+            .eq("id", student_user_id_int)  # Use integer ID
             .execute()
         )
         user = user_result.data[0] if user_result.data else {}
@@ -5604,19 +6429,29 @@ async def approve_result_request(
         try:
             notification_service = NotificationService(db)
             
-            # Get quiz title from assessment
+            # Get quiz title from assessment using integer assessment_id
+            assessment_int_id = req.get("assessment_id")  # This is an integer from the database
             assessment_result = (
                 db.admin_client.table("assessment")
                 .select("title")
-                .eq("id", req.get("assessment_id"))
+                .eq("id", assessment_int_id)  # Use integer ID
                 .execute()
             )
             quiz_title = assessment_result.data[0]["title"] if assessment_result.data else "Quiz"
             
+            # Convert student_user_id and assessment_id to UUID strings for notification service
+            student_user_id_uuid = await IDConverter.int_to_uuid(db, "users", student_user_id_int) if student_user_id_int else None
+            if not student_user_id_uuid:
+                student_user_id_uuid = str(student_user_id_int)  # Fallback
+            
+            assessment_id_uuid = await IDConverter.int_to_uuid(db, "assessment", assessment_int_id) if assessment_int_id else None
+            if not assessment_id_uuid:
+                assessment_id_uuid = str(assessment_int_id)  # Fallback
+            
             await notification_service.notify_result_approved(
-                student_user_id=student_user_id,
+                student_user_id=student_user_id_uuid,  # Pass UUID string
                 quiz_title=quiz_title,
-                assessment_id=req.get("assessment_id"),
+                assessment_id=assessment_id_uuid,  # Pass UUID string
             )
         except Exception as notify_error:
             logger.warning(f"Failed to send result approval notification: {notify_error}")
@@ -5838,11 +6673,21 @@ async def approve_all_assessment_requests(
 
         logger.info(f"Teacher {teacher.id} approving all requests for assessment {assessment_id}")
 
+        # Convert UUID to integer ID if needed
+        assessment_int_id = assessment_id
+        if IDConverter.is_uuid(assessment_id):
+            assessment_int_id = await IDConverter.uuid_to_int(db, "assessment", assessment_id)
+            if not assessment_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assessment not found or access denied",
+                )
+
         # Verify assessment ownership
         assessment_result = (
             db.admin_client.table("assessment")
             .select("id, title")
-            .eq("id", assessment_id)
+            .eq("id", assessment_int_id)
             .eq("teacher_id", str(teacher.id))
             .execute()
         )

@@ -58,9 +58,9 @@ class AuthService:
         """
         Create a one-time activation token for password setup.
         
-        Token expires in 48 hours and includes user_id and purpose.
+        Token expires in 14 days and includes user_id and purpose.
         """
-        expires_delta = timedelta(hours=48)
+        expires_delta = timedelta(days=14)
         data = {
             "sub": str(user_id),
             "purpose": "activation",
@@ -147,20 +147,38 @@ class AuthService:
             # System users don't belong to any university
             university_id = None
         elif user_create.university_id:
-            university = db.get_record_by_id("university", user_create.university_id)
-            if not university:
+            # Convert UUID to integer ID if needed, then query for integer ID
+            from utils.id_converter import IDConverter
+            university_int_id = user_create.university_id
+            if IDConverter.is_uuid(user_create.university_id):
+                university_int_id = await IDConverter.uuid_to_int(db, "university", user_create.university_id)
+                if not university_int_id:
+                    raise ValueError("Selected university was not found")
+            
+            # Query university directly to get integer ID
+            university_result = (
+                db.get_admin_client().table("university")
+                .select("id")
+                .eq("id", university_int_id)
+                .execute()
+            )
+            if not university_result.data:
                 raise ValueError("Selected university was not found")
-            university_id = university.get("id")
+            university_id = university_result.data[0]["id"]  # Integer ID for FK
         elif user_create.university_name:
             university_name = user_create.university_name.strip()
             if not university_name:
                 raise ValueError("University name cannot be empty")
 
-            existing_universities = db.get_records(
-                "university", {"name": university_name}
+            # Query directly to get integer ID
+            existing_universities_result = (
+                db.get_admin_client().table("university")
+                .select("id")
+                .eq("name", university_name)
+                .execute()
             )
-            if existing_universities:
-                university_id = existing_universities[0]["id"]
+            if existing_universities_result.data:
+                university_id = existing_universities_result.data[0]["id"]  # Integer ID
             else:
                 new_university = {
                     "name": university_name,
@@ -168,8 +186,10 @@ class AuthService:
                 if user_create.university_location:
                     new_university["location"] = user_create.university_location.strip()
 
-                university_result = db.create_record("university", new_university)
-                university_id = university_result.get("id")
+                university_result = db.get_admin_client().table("university").insert(new_university).execute()
+                if not university_result.data:
+                    raise ValueError("Failed to create university")
+                university_id = university_result.data[0]["id"]  # Integer ID from database
         else:
             raise ValueError("University selection is required")
 
@@ -197,13 +217,29 @@ class AuthService:
         if not user_result:
             raise ValueError("Failed to create user")
 
+        # db.create_user returns UUID in 'id' field for API compatibility
+        # We need integer ID for foreign keys
+        user_id_uuid = user_result.get("id")
         user_id = user_result.get("id")
+        
+        # Convert UUID to integer ID if needed
+        if isinstance(user_id, str):
+            from utils.id_converter import IDConverter
+            if IDConverter.is_uuid(user_id):
+                user_id = await IDConverter.uuid_to_int(db, "users", user_id)
+                if not user_id:
+                    raise ValueError("Failed to convert user UUID to integer ID")
+            else:
+                try:
+                    user_id = int(user_id)
+                except ValueError:
+                    raise ValueError(f"Invalid user_id format: {user_id}")
 
         # Create role-specific profiles
         if user_create.role == UserRole.TEACHER:
             teacher_payload = {
-                "user_id": user_id,
-                "university_id": university_id,
+                "user_id": user_id,  # Integer FK
+                "university_id": university_id,  # Integer FK
             }
             if user_create.department:
                 teacher_payload["department"] = user_create.department.strip()
@@ -227,8 +263,8 @@ class AuthService:
                 raise ValueError("A student with this student ID already exists")
 
             student_payload = {
-                "user_id": user_id,
-                "university_id": university_id,
+                "user_id": user_id,  # Integer FK
+                "university_id": university_id,  # Integer FK
                 "student_id": student_id,
             }
 
@@ -269,15 +305,27 @@ class AuthService:
     def to_user_read(db, user: User) -> UserRead:
         """Convert a User model to UserRead with profile enrichment."""
 
+        # Use UUID for external API responses (not integer ID)
+        user_uuid = user.uuid if hasattr(user, "uuid") and user.uuid else str(user.id)
+        
+        # Convert university_id to UUID if it's an integer
+        university_id_value = getattr(user, "university_id", None)
+        university_uuid = None
+        if university_id_value is not None:
+            # If it's an integer, we need to get the UUID from the university table
+            # For now, return as string (will be converted to UUID after migration)
+            # After migration, we'll need to query the university table to get UUID
+            university_uuid = str(university_id_value)  # Temporary - will be UUID after migration
+        
         user_dict = {
-            "id": user.id,
+            "id": user_uuid,  # Return UUID, not integer ID
             "email": user.email,
             "username": user.username,
             "first_name": user.first_name,
             "last_name": user.last_name,
             "is_active": user.is_active,
             "role": user.role,
-            "university_id": getattr(user, "university_id", None),
+            "university_id": university_uuid,  # Will be UUID after migration
             "created_at": user.created_at,
             "updated_at": user.updated_at,
             "department": None,
@@ -297,10 +345,12 @@ class AuthService:
             try:
                 admin_client = getattr(db, "admin_client", None)
                 if admin_client:
+                    # Use integer ID for database query (after migration)
+                    user_id_for_query = user.id if isinstance(user.id, int) else int(user.id) if str(user.id).isdigit() else user.id
                     result = (
                         admin_client.table("teacher")
                         .select("department, specialization")
-                        .eq("user_id", str(user.id))
+                        .eq("user_id", user_id_for_query)
                         .limit(1)
                         .execute()
                     )
@@ -324,10 +374,12 @@ class AuthService:
             try:
                 admin_client = getattr(db, "admin_client", None)
                 if admin_client:
+                    # Use integer ID for database query (after migration)
+                    user_id_for_query = user.id if isinstance(user.id, int) else int(user.id) if str(user.id).isdigit() else user.id
                     result = (
                         admin_client.table("student")
                         .select("student_id, year_of_study")
-                        .eq("user_id", str(user.id))
+                        .eq("user_id", user_id_for_query)
                         .limit(1)
                         .execute()
                     )

@@ -1,59 +1,150 @@
 # Virtual environment
 venv/
 .venv/
+env/
+ENV/
 
 # Git
 .git/
 .gitignore
+.gitattributes
+.gitkeep
 
 # Test PDFs (large book files)
 test_pdfs/
 
 # Database files
 *.db
+*.sqlite
+*.sqlite3
 data_backup.sql
 schema_backup.sql
+backup_before_migration.sql
+backups/
 
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+dist/
+build/
 
 # IDE / Editor
 .vscode/
 .idea/
 *.swp
 *.swo
+*.sublime-*
+.project
+.pydevproject
+.settings/
 
 # Claude Code
 .claude/
+.cursor/
 
 # Logs
 logs/
 *.log
+*.log.*
 
 # Environment files
 .env
 .env.*
+*.env
 
 # Documentation / schemas (not needed at runtime)
 docs/
+*.md
 schema.txt
 schema_updated.txt
 README.md
+LICENSE
+CHANGELOG.md
+CONTRIBUTING.md
 
 # Tests
 tests/
+test_*.py
+*_test.py
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Scripts and utilities (not needed in container)
+scripts/
+*.bat
+*.sh
+*.ps1
+
+# Migration files (not needed at runtime)
+migrations/
+
+# Backup and temporary files
+backups/
+*.bak
+*.tmp
+*.temp
+*.old
+*.orig
+*.save
 
 # OS files
 Thumbs.db
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
 
 # Node (if any)
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
 
 # Docker
-Dockerfile
+Dockerfile*
 docker-compose*.yml
 .dockerignore
+.docker/
+
+# Project configuration (not needed at runtime)
+pyproject.toml
+setup.py
+setup.cfg
+MANIFEST.in
+.editorconfig
+.flake8
+.pylintrc
+.ruff.toml
+
+# Utility files
+price_estimation.py
+lecture_generation_prompt.txt
+
+# Jupyter Notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Coverage reports
+.coverage
+coverage.xml
+*.cover
+.hypothesis/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json

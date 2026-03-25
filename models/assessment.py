@@ -49,13 +49,14 @@ class QuestionType(str, Enum):
 class Assessment(SQLModel, table=True):
     """Assessment entity for quizzes, assignments, and exams."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
     title: str
     description: Optional[str] = None
     assessment_type: AssessmentType
-    course_id: str = Field(foreign_key="course.id")  # UUID
-    lecture_id: Optional[str] = Field(default=None, foreign_key="lecture.id")  # UUID
-    teacher_id: str = Field(foreign_key="teacher.id")  # UUID
+    course_id: int = Field(foreign_key="course.id")  # Integer FK for performance
+    lecture_id: Optional[int] = Field(default=None, foreign_key="lecture.id")  # Integer FK for performance
+    teacher_id: int = Field(foreign_key="teacher.id")  # Integer FK for performance
 
     # Assessment settings
     time_limit: Optional[int] = None  # in minutes
@@ -75,9 +76,9 @@ class Assessment(SQLModel, table=True):
     due_date: Optional[datetime] = None
 
     # Relationships
-    course: Optional["Course"] = Relationship()
-    lecture: Optional["Lecture"] = Relationship()
-    teacher: Optional["Teacher"] = Relationship()
+    course: "Course" = Relationship()
+    lecture: "Lecture" = Relationship()
+    teacher: "Teacher" = Relationship()
     questions: List["Question"] = Relationship(back_populates="assessment")
     submissions: List["AssessmentSubmission"] = Relationship(
         back_populates="assessment"
@@ -87,8 +88,9 @@ class Assessment(SQLModel, table=True):
 class Question(SQLModel, table=True):
     """Individual questions within assessments."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    assessment_id: str = Field(foreign_key="assessment.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    assessment_id: int = Field(foreign_key="assessment.id")  # Integer FK for performance
     question_text: str
     question_type: QuestionType
     points: float = Field(default=1.0)
@@ -104,15 +106,16 @@ class Question(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    assessment: Optional["Assessment"] = Relationship(back_populates="questions")
+    assessment: "Assessment" = Relationship(back_populates="questions")
 
 
 class AssessmentSubmission(SQLModel, table=True):
     """Student submissions for assessments."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    assessment_id: str = Field(foreign_key="assessment.id")  # UUID
-    student_id: str = Field(foreign_key="student.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    assessment_id: int = Field(foreign_key="assessment.id")  # Integer FK for performance
+    student_id: int = Field(foreign_key="student.id")  # Integer FK for performance
 
     # Submission data
     answers: str  # JSON object with question_id -> answer mapping
@@ -131,8 +134,8 @@ class AssessmentSubmission(SQLModel, table=True):
     graded_at: Optional[datetime] = None
 
     # Relationships
-    assessment: Optional["Assessment"] = Relationship(back_populates="submissions")
-    student: Optional["Student"] = Relationship()
+    assessment: "Assessment" = Relationship(back_populates="submissions")
+    student: "Student" = Relationship()
 
 
 class ResultViewRequestStatus(str, Enum):
@@ -153,10 +156,11 @@ class ResultViewRequest(SQLModel, table=True):
     """
     __tablename__ = "result_view_request"
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    assessment_id: str = Field(foreign_key="assessment.id")  # UUID - the graded quiz
-    student_id: str = Field(foreign_key="student.id")  # UUID - student requesting
-    teacher_id: str = Field(foreign_key="teacher.id")  # UUID - teacher who owns the quiz
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    assessment_id: int = Field(foreign_key="assessment.id")  # Integer FK - the graded quiz
+    student_id: int = Field(foreign_key="student.id")  # Integer FK - student requesting
+    teacher_id: int = Field(foreign_key="teacher.id")  # Integer FK - teacher who owns the quiz
     
     # Request details
     status: str = Field(default="PENDING")  # PENDING, APPROVED, REJECTED
@@ -168,6 +172,6 @@ class ResultViewRequest(SQLModel, table=True):
     responded_at: Optional[datetime] = None
     
     # Relationships
-    assessment: Optional["Assessment"] = Relationship()
-    student: Optional["Student"] = Relationship()
-    teacher: Optional["Teacher"] = Relationship()
+    assessment: "Assessment" = Relationship()
+    student: "Student" = Relationship()
+    teacher: "Teacher" = Relationship()

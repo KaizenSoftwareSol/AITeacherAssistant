@@ -30,7 +30,8 @@ class JobType(str, Enum):
 class JobQueue(SQLModel, table=True):
     """Job queue for async processing."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
     job_type: JobType
     status: JobStatus = Field(default=JobStatus.PENDING)
     priority: int = Field(default=0)  # Higher number = higher priority

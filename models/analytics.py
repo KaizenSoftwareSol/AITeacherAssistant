@@ -12,8 +12,9 @@ if TYPE_CHECKING:
 class LectureAnalytics(SQLModel, table=True):
     """Analytics for lecture performance and engagement."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    lecture_id: int = Field(foreign_key="lecture.id")  # Integer FK for performance
 
     # Engagement metrics
     total_views: int = Field(default=0)
@@ -36,15 +37,16 @@ class LectureAnalytics(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    lecture: Optional["Lecture"] = Relationship(back_populates="analytics")
+    lecture: "Lecture" = Relationship(back_populates="analytics")
 
 
 class StudentEngagement(SQLModel, table=True):
     """Student engagement tracking."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    student_id: str = Field(foreign_key="student.id")  # UUID
-    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    student_id: int = Field(foreign_key="student.id")  # Integer FK for performance
+    lecture_id: int = Field(foreign_key="lecture.id")  # Integer FK for performance
 
     # Engagement data
     watch_time: float = Field(default=0.0)  # in minutes
@@ -61,8 +63,9 @@ class StudentEngagement(SQLModel, table=True):
 class AIProcessingLog(SQLModel, table=True):
     """Logs for AI processing operations."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    job_id: Optional[str] = Field(default=None, foreign_key="jobqueue.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    job_id: Optional[int] = Field(default=None, foreign_key="job_queue.id")  # Integer FK for performance
     operation_type: str  # e.g., "lecture_generation", "rag_indexing"
 
     # Processing details

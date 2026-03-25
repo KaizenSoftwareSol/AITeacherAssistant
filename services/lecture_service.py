@@ -18,6 +18,7 @@ from settings import settings
 from supabase_config import BUCKETS, supabase
 from models.document import DocumentType
 from services.document_parser import DocumentParser
+from utils.id_converter import IDConverter
 
 
 class LectureService:
@@ -884,8 +885,8 @@ BEGIN THE LECTURE NOW:
     def get_next_lecture_number(
         db,
         topic: str,
-        course_id: str,
-        semester_id: str,
+        course_id,  # Can be int or str
+        semester_id,  # Can be int or str
     ) -> int:
         """
         Get the next lecture number for a given topic within a course and semester.
@@ -893,8 +894,8 @@ BEGIN THE LECTURE NOW:
         Args:
             db: Database instance
             topic: Topic name (e.g., "CLUSTERING", "PREDICTION", "REGRESSION")
-            course_id: Course ID
-            semester_id: Semester ID
+            course_id: Course ID (int or str)
+            semester_id: Semester ID (int or str)
             
         Returns:
             Next lecture number (starts from 1)
@@ -902,14 +903,18 @@ BEGIN THE LECTURE NOW:
         try:
             if not topic:
                 return None
+            
+            # Ensure course_id and semester_id are integers for database query
+            course_int_id = course_id if isinstance(course_id, int) else int(course_id)
+            semester_int_id = semester_id if isinstance(semester_id, int) else int(semester_id)
                 
             # Query existing lectures for this topic, course, and semester
             response = (
                 db.admin_client.table("lecture")
                 .select("lecture_number")
                 .eq("topic", topic)
-                .eq("course_id", course_id)
-                .eq("semester_id", semester_id)
+                .eq("course_id", course_int_id)
+                .eq("semester_id", semester_int_id)
                 .not_.is_("lecture_number", "null")
                 .order("lecture_number", desc=True)
                 .limit(1)
@@ -990,7 +995,90 @@ BEGIN THE LECTURE NOW:
                     )
 
                 # Verify document belongs to teacher
-                if document_data.get("teacher_id") != teacher_id:
+                # Both teacher_id and document_data.get("teacher_id") should be integers
+                # Ensure both are integers for comparison
+                doc_teacher_id = document_data.get("teacher_id")
+                
+                # Convert teacher_id to integer for comparison
+                # Handle both UUID strings and integer IDs
+                teacher_id_int = teacher_id
+                if isinstance(teacher_id, int):
+                    teacher_id_int = teacher_id
+                elif isinstance(teacher_id, str):
+                    if IDConverter.is_uuid(teacher_id):
+                        teacher_id_int = await IDConverter.uuid_to_int(db, "teacher", teacher_id)
+                        if not teacher_id_int:
+                            raise HTTPException(
+                                status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Teacher not found",
+                            )
+                    else:
+                        try:
+                            teacher_id_int = int(teacher_id)
+                        except ValueError:
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Invalid teacher_id format",
+                            )
+                else:
+                    # Try to convert to string first, then process
+                    teacher_id_str = str(teacher_id)
+                    if IDConverter.is_uuid(teacher_id_str):
+                        teacher_id_int = await IDConverter.uuid_to_int(db, "teacher", teacher_id_str)
+                        if not teacher_id_int:
+                            raise HTTPException(
+                                status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Teacher not found",
+                            )
+                    else:
+                        try:
+                            teacher_id_int = int(teacher_id_str)
+                        except ValueError:
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Invalid teacher_id format: {teacher_id}",
+                            )
+                
+                # doc_teacher_id from database should be an integer, but ensure it is
+                if doc_teacher_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Document {doc_id} has no teacher_id",
+                    )
+                
+                # Convert doc_teacher_id to integer - handle UUID strings
+                doc_teacher_id_int = doc_teacher_id
+                if isinstance(doc_teacher_id, str):
+                    if IDConverter.is_uuid(doc_teacher_id):
+                        doc_teacher_id_int = await IDConverter.uuid_to_int(db, "teacher", doc_teacher_id)
+                        if not doc_teacher_id_int:
+                            raise HTTPException(
+                                status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"Teacher not found for document {doc_id}",
+                            )
+                    else:
+                        try:
+                            doc_teacher_id_int = int(doc_teacher_id)
+                        except ValueError:
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Invalid teacher_id format in document {doc_id}: {doc_teacher_id}",
+                            )
+                elif not isinstance(doc_teacher_id, int):
+                    try:
+                        doc_teacher_id_int = int(doc_teacher_id)
+                    except (ValueError, TypeError):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid teacher_id format in document {doc_id}: {doc_teacher_id}",
+                        )
+                
+                if doc_teacher_id_int != teacher_id_int:
+                    logger.warning(
+                        f"Teacher ID mismatch for document {doc_id}: "
+                        f"document teacher_id={doc_teacher_id_int}, "
+                        f"requested teacher_id={teacher_id_int}"
+                    )
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail=f"Access denied to document: {doc_id}",
@@ -1213,33 +1301,204 @@ BEGIN THE LECTURE NOW:
             # 6. Create PDF from generated content
             pdf_bytes = LectureService.create_pdf(lecture_title, generated_content)
 
-            # 7. Save PDF to Supabase storage
+            # 7. Convert UUIDs to integer IDs for database (do this before storage path and lecture number)
+            # Initialize with None to ensure we always convert
+            course_int_id = None
+            semester_int_id = None
+            teacher_int_id = None
+            primary_document_int_id = None
+            
+            # Convert course_id - handle None, string (UUID or int string), or int
+            if course_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="course_id is required",
+                )
+            elif isinstance(course_id, int):
+                course_int_id = course_id
+            elif isinstance(course_id, str):
+                if IDConverter.is_uuid(course_id):
+                    course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+                    if not course_int_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Course not found",
+                        )
+                else:
+                    try:
+                        course_int_id = int(course_id)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid course_id format: {course_id}",
+                        )
+            else:
+                # Try to convert to string first, then process
+                course_id_str = str(course_id)
+                if IDConverter.is_uuid(course_id_str):
+                    course_int_id = await IDConverter.uuid_to_int(db, "course", course_id_str)
+                    if not course_int_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Course not found",
+                        )
+                else:
+                    try:
+                        course_int_id = int(course_id_str)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid course_id format: {course_id}",
+                        )
+            
+            # Convert semester_id - handle None, string (UUID or int string), or int
+            if semester_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="semester_id is required",
+                )
+            elif isinstance(semester_id, int):
+                semester_int_id = semester_id
+            elif isinstance(semester_id, str):
+                if IDConverter.is_uuid(semester_id):
+                    semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id)
+                    if not semester_int_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Semester not found",
+                        )
+                else:
+                    try:
+                        semester_int_id = int(semester_id)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid semester_id format: {semester_id}",
+                        )
+            else:
+                # Try to convert to string first, then process
+                semester_id_str = str(semester_id)
+                if IDConverter.is_uuid(semester_id_str):
+                    semester_int_id = await IDConverter.uuid_to_int(db, "semester", semester_id_str)
+                    if not semester_int_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Semester not found",
+                        )
+                else:
+                    try:
+                        semester_int_id = int(semester_id_str)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid semester_id format: {semester_id}",
+                        )
+            
+            # Convert teacher_id - handle None, string (UUID or int string), or int
+            if teacher_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="teacher_id is required",
+                )
+            elif isinstance(teacher_id, int):
+                teacher_int_id = teacher_id
+            elif isinstance(teacher_id, str):
+                if IDConverter.is_uuid(teacher_id):
+                    teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher_id)
+                    if not teacher_int_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Teacher not found",
+                        )
+                else:
+                    try:
+                        teacher_int_id = int(teacher_id)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid teacher_id format: {teacher_id}",
+                        )
+            else:
+                # Try to convert to string first, then process
+                teacher_id_str = str(teacher_id)
+                if IDConverter.is_uuid(teacher_id_str):
+                    teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher_id_str)
+                    if not teacher_int_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Teacher not found",
+                        )
+                else:
+                    try:
+                        teacher_int_id = int(teacher_id_str)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid teacher_id format: {teacher_id}",
+                        )
+            
+            # Convert primary document_id
+            primary_document_id = primary_document_ids[0] if primary_document_ids else None
+            if primary_document_id:
+                if isinstance(primary_document_id, str):
+                    if IDConverter.is_uuid(primary_document_id):
+                        primary_document_int_id = await IDConverter.uuid_to_int(db, "documents", primary_document_id)
+                    else:
+                        try:
+                            primary_document_int_id = int(primary_document_id)
+                        except ValueError:
+                            primary_document_int_id = None
+                else:
+                    primary_document_int_id = primary_document_id
+
+            # 8. Save PDF to Supabase storage
             # Use sanitized lecture title as filename
+            # Storage path can use UUID for course_id (it's just a string in the path)
             sanitized_title = LectureService.sanitize_filename(lecture_title)
             pdf_filename = f"{sanitized_title}.pdf"
+            
+            # Convert all IDs to strings for storage path (storage path accepts strings)
+            university_id_str = str(first_document_data["university_id"])
+            teacher_id_str = str(teacher_int_id)
+            course_id_str = str(course_int_id)
+            
             storage_path = await LectureService.save_lecture_pdf(
                 pdf_bytes,
-                first_document_data["university_id"],
-                teacher_id,
-                course_id,
+                university_id_str,
+                teacher_id_str,
+                course_id_str,
                 pdf_filename,
             )
 
-            # 8. Lecture plan is now generated separately via POST /{lecture_id}/generate-plan endpoint
+            # 9. Lecture plan is now generated separately via POST /{lecture_id}/generate-plan endpoint
             # This allows frontend to call lecture generation and plan generation independently
             lecture_plan = None
 
-            # 9. Calculate lecture number if topic is provided
+            # 10. Calculate lecture number if topic is provided (using integer IDs)
             lecture_number = None
             if topic:
                 lecture_number = LectureService.get_next_lecture_number(
-                    db, topic, course_id, semester_id
+                    db, topic, course_int_id, semester_int_id
                 )
                 logger.info(f"Assigned lecture number {lecture_number} for topic '{topic}'")
 
-            # 10. Create lecture record in database
-            # Store first document_id for backward compatibility and duplicate detection
-            primary_document_id = primary_document_ids[0] if primary_document_ids else None
+            # 11. Create lecture record in database
+            # Ensure all IDs are integers (defensive check)
+            if not isinstance(course_int_id, int):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Invalid course_id type: {type(course_int_id)}, value: {course_int_id}",
+                )
+            if not isinstance(semester_int_id, int):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Invalid semester_id type: {type(semester_int_id)}, value: {semester_int_id}",
+                )
+            if not isinstance(teacher_int_id, int):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Invalid teacher_id type: {type(teacher_int_id)}, value: {teacher_int_id}",
+                )
             
             lecture_data = {
                 "title": lecture_title,
@@ -1248,10 +1507,10 @@ BEGIN THE LECTURE NOW:
                 "content": generated_content,
                 "lecture_type": "AI_GENERATED",
                 "status": "GENERATED",
-                "course_id": course_id,
-                "semester_id": semester_id,
-                "teacher_id": teacher_id,
-                "document_id": primary_document_id,  # Store first document for backward compatibility
+                "course_id": course_int_id,  # Use integer ID
+                "semester_id": semester_int_id,  # Use integer ID
+                "teacher_id": teacher_int_id,  # Use integer ID
+                "document_id": primary_document_int_id,  # Use integer ID (can be None)
                 "lecture_plan": lecture_plan,
                 "topic": topic,
                 "lecture_number": lecture_number,
@@ -1262,9 +1521,26 @@ BEGIN THE LECTURE NOW:
             lecture_record = db.create_record("lecture", lecture_data)
             logger.info(f"Lecture record created: {lecture_record['id']}")
 
+            # Get integer lecture_id for lecture_content
+            # db.create_record returns UUID in 'id' field, but we need integer ID for foreign key
+            lecture_uuid = lecture_record.get("id") or lecture_record.get("uuid")
+            if not lecture_uuid:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to get lecture UUID from created record",
+                )
+            
+            # Convert UUID back to integer ID for foreign key
+            lecture_int_id_for_content = await IDConverter.uuid_to_int(db, "lecture", lecture_uuid)
+            if not lecture_int_id_for_content:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to convert lecture UUID to integer ID: {lecture_uuid}",
+                )
+
             # 11. Create lecture content record (PDF metadata)
             lecture_content_data = {
-                "lecture_id": lecture_record["id"],
+                "lecture_id": lecture_int_id_for_content,  # Use integer ID
                 "file_name": pdf_filename,
                 "file_type": "pdf",
                 "file_size": len(pdf_bytes),
@@ -1277,9 +1553,12 @@ BEGIN THE LECTURE NOW:
             content_record = db.create_record("lecture_content", lecture_content_data)
             logger.info(f"Lecture content record created: {content_record['id']}")
 
-            # 12. Return lecture information (include token management metadata)
+            # 12. Use UUID for response (already in lecture_record['id'] after db.create_record conversion)
+            lecture_id = lecture_record.get("id") or lecture_record.get("uuid")
+
+            # 13. Return lecture information (include token management metadata)
             result = {
-                "lecture_id": lecture_record["id"],
+                "lecture_id": lecture_id if isinstance(lecture_id, str) else str(lecture_id),
                 "title": lecture_title,
                 "description": lecture_description,
                 "status": "GENERATED",
@@ -1299,7 +1578,10 @@ BEGIN THE LECTURE NOW:
         except HTTPException:
             raise
         except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
             logger.error(f"Error in lecture generation workflow: {str(e)}")
+            logger.error(f"Traceback: {error_traceback}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate lecture: {str(e)}",
@@ -1372,13 +1654,13 @@ BEGIN THE LECTURE NOW:
         return fallback_title
 
     @staticmethod
-    def check_for_duplicate_lecture(
+    async def check_for_duplicate_lecture(
         db,
         teacher_id: str,
-        course_id: str,
-        semester_id: str,
+        course_id,  # Can be int or str (UUID)
+        semester_id,  # Can be int or str (UUID)
         title: str,
-        document_id: str = None,
+        document_id = None,  # Can be int or str (UUID)
         learning_outcomes: str = None,
         selected_chapters: list = None,
     ) -> dict:
@@ -1408,7 +1690,24 @@ BEGIN THE LECTURE NOW:
             logger.info(f"Checking for duplicate lecture - Title: {title}, Document ID: {document_id}")
 
             # Get teacher's university_id
-            teacher_data = db.get_record_by_id("teacher", teacher_id)
+            # teacher_id might be string (UUID or integer string) or integer, convert if needed
+            teacher_int_id = teacher_id
+            if isinstance(teacher_id, str):
+                if teacher_id.isdigit():
+                    # It's a string representation of an integer
+                    teacher_int_id = int(teacher_id)
+                else:
+                    # It's a UUID, convert to integer
+                    teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher_id)
+                    if not teacher_int_id:
+                        logger.warning(f"Teacher not found: {teacher_id}")
+                        return {
+                            "has_duplicate": False,
+                            "duplicate_lecture": None,
+                            "message": "No duplicate found",
+                        }
+            
+            teacher_data = db.get_record_by_id("teacher", teacher_int_id)
             if not teacher_data:
                 logger.warning(f"Teacher not found: {teacher_id}")
                 return {
@@ -1429,7 +1728,7 @@ BEGIN THE LECTURE NOW:
             # ========== Strategy 1: Check for title-based duplicates (storage path) ==========
             sanitized_title = LectureService.sanitize_filename(title)
             pdf_filename = f"{sanitized_title}.pdf"
-            expected_storage_path = f"university_{university_id}/teacher_{teacher_id}/course_{course_id}/generated_lectures/{pdf_filename}"
+            expected_storage_path = f"university_{university_id}/teacher_{teacher_int_id}/course_{course_id}/generated_lectures/{pdf_filename}"
 
             logger.info(f"Checking title-based duplicate - Expected storage path: {expected_storage_path}")
 
@@ -1458,23 +1757,87 @@ BEGIN THE LECTURE NOW:
             if not duplicate_lecture and document_id:
                 logger.info(f"Checking document-based duplicate - Document ID: {document_id}, Course ID: {course_id}, Semester ID: {semester_id}")
                 
+                # Convert IDs to integers for database query
+                doc_id_int = document_id
+                if isinstance(document_id, str):
+                    if IDConverter.is_uuid(document_id):
+                        doc_id_int = await IDConverter.uuid_to_int(db, "documents", document_id)
+                        if not doc_id_int:
+                            logger.warning(f"Document not found: {document_id}")
+                            doc_id_int = None
+                    else:
+                        try:
+                            doc_id_int = int(document_id)
+                        except ValueError:
+                            logger.warning(f"Invalid document_id format: {document_id}")
+                            doc_id_int = None
+                elif not isinstance(document_id, int):
+                    try:
+                        doc_id_int = int(document_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid document_id format: {document_id}")
+                        doc_id_int = None
+                
+                course_id_int = course_id
+                if isinstance(course_id, str):
+                    if IDConverter.is_uuid(course_id):
+                        course_id_int = await IDConverter.uuid_to_int(db, "course", course_id)
+                        if not course_id_int:
+                            logger.warning(f"Course not found: {course_id}")
+                            course_id_int = None
+                    else:
+                        try:
+                            course_id_int = int(course_id)
+                        except ValueError:
+                            logger.warning(f"Invalid course_id format: {course_id}")
+                            course_id_int = None
+                elif not isinstance(course_id, int):
+                    try:
+                        course_id_int = int(course_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid course_id format: {course_id}")
+                        course_id_int = None
+                
+                semester_id_int = semester_id
+                if isinstance(semester_id, str):
+                    if IDConverter.is_uuid(semester_id):
+                        semester_id_int = await IDConverter.uuid_to_int(db, "semester", semester_id)
+                        if not semester_id_int:
+                            logger.warning(f"Semester not found: {semester_id}")
+                            semester_id_int = None
+                    else:
+                        try:
+                            semester_id_int = int(semester_id)
+                        except ValueError:
+                            logger.warning(f"Invalid semester_id format: {semester_id}")
+                            semester_id_int = None
+                elif not isinstance(semester_id, int):
+                    try:
+                        semester_id_int = int(semester_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid semester_id format: {semester_id}")
+                        semester_id_int = None
+                
                 # Check if a lecture already exists with this document_id + course_id + semester_id combination
-                # Using admin_client to query with multiple filters
-                try:
-                    response = db.admin_client.table("lecture").select("*").eq(
-                        "document_id", document_id
-                    ).eq(
-                        "course_id", course_id
-                    ).eq(
-                        "semester_id", semester_id
-                    ).execute()
-                    
-                    if response.data and len(response.data) > 0:
-                        duplicate_lecture = response.data[0]
-                        duplicate_reason = "A lecture has already been generated from this document for this course and semester"
-                        logger.info(f"Found document-based duplicate. Lecture ID: {duplicate_lecture['id']}")
-                except Exception as query_error:
-                    logger.warning(f"Error querying for document-based duplicate: {query_error}")
+                # Using admin_client to query with multiple filters (only if all IDs are valid)
+                if doc_id_int and course_id_int and semester_id_int:
+                    try:
+                        response = db.admin_client.table("lecture").select("*").eq(
+                            "document_id", doc_id_int
+                        ).eq(
+                            "course_id", course_id_int
+                        ).eq(
+                            "semester_id", semester_id_int
+                        ).execute()
+                        
+                        if response.data and len(response.data) > 0:
+                            duplicate_lecture = response.data[0]
+                            duplicate_reason = "A lecture has already been generated from this document for this course and semester"
+                            logger.info(f"Found document-based duplicate. Lecture ID: {duplicate_lecture['id']}")
+                    except Exception as query_error:
+                        logger.warning(f"Error querying for document-based duplicate: {query_error}")
+                else:
+                    logger.warning(f"Skipping document-based duplicate check due to invalid IDs")
 
             # ========== If no duplicate found, return success ==========
             if not duplicate_lecture:
@@ -1490,15 +1853,20 @@ BEGIN THE LECTURE NOW:
             suggested_title = LectureService.generate_unique_versioned_title(
                 db=db,
                 base_title=title,
-                teacher_id=teacher_id,
+                teacher_id=teacher_int_id,
                 course_id=course_id,
                 university_id=university_id,
             )
             
             lecture_id = duplicate_lecture["id"]
+            # lecture_id from database is already an integer, so use it directly
+            lecture_int_id = lecture_id if isinstance(lecture_id, int) else lecture_id
+            
+            # Convert lecture integer ID to UUID for response
+            lecture_uuid = await IDConverter.int_to_uuid(db, "lecture", lecture_int_id)
             
             # Get lecture content for download URL
-            lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+            lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_int_id})
             
             download_url = None
             file_name = "lecture.pdf"
@@ -1518,7 +1886,7 @@ BEGIN THE LECTURE NOW:
                     logger.warning(f"Could not get download URL: {e}")
 
             duplicate_info = {
-                "lecture_id": duplicate_lecture["id"],
+                "lecture_id": lecture_uuid if lecture_uuid else str(lecture_int_id),
                 "title": duplicate_lecture["title"],
                 "description": duplicate_lecture.get("description"),
                 "learning_outcomes": duplicate_lecture.get("learning_outcomes"),
@@ -1551,7 +1919,7 @@ BEGIN THE LECTURE NOW:
             )
 
     @staticmethod
-    def get_lecture_download_url(
+    async def get_lecture_download_url(
         db,
         lecture_id: str,
         teacher_id: str | None = None,
@@ -1561,7 +1929,7 @@ BEGIN THE LECTURE NOW:
 
         Args:
             db: Database instance
-            lecture_id: Lecture ID
+            lecture_id: Lecture ID (UUID string or integer)
             teacher_id: Teacher ID (for authorization)
 
         Returns:
@@ -1570,8 +1938,27 @@ BEGIN THE LECTURE NOW:
         try:
             logger.info(f"Fetching download URL for lecture: {lecture_id}")
 
+            # Convert UUID to integer ID if needed
+            lecture_int_id = lecture_id
+            if isinstance(lecture_id, str):
+                if IDConverter.is_uuid(lecture_id):
+                    lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", lecture_id)
+                    if not lecture_int_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Lecture not found",
+                        )
+                else:
+                    try:
+                        lecture_int_id = int(lecture_id)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Invalid lecture_id format",
+                        )
+
             # 1. Fetch lecture record
-            lecture_data = db.get_record_by_id("lecture", lecture_id)
+            lecture_data = db.get_record_by_id("lecture", lecture_int_id)
             if not lecture_data:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -1579,15 +1966,27 @@ BEGIN THE LECTURE NOW:
                 )
 
             # Verify lecture belongs to teacher if teacher_id is provided
-            if teacher_id is not None and lecture_data.get("teacher_id") != teacher_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied to this lecture",
-                )
+            if teacher_id is not None:
+                # Convert teacher_id to integer if needed
+                teacher_int_id = teacher_id
+                if isinstance(teacher_id, str):
+                    if IDConverter.is_uuid(teacher_id):
+                        teacher_int_id = await IDConverter.uuid_to_int(db, "teacher", teacher_id)
+                    else:
+                        try:
+                            teacher_int_id = int(teacher_id)
+                        except ValueError:
+                            teacher_int_id = None
+                
+                if teacher_int_id and lecture_data.get("teacher_id") != teacher_int_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied to this lecture",
+                    )
 
-            # 2. Fetch lecture content records
+            # 2. Fetch lecture content records using integer ID
             lecture_contents = db.get_records(
-                "lecture_content", {"lecture_id": lecture_id}
+                "lecture_content", {"lecture_id": lecture_int_id}
             )
 
             if not lecture_contents:
@@ -1810,8 +2209,17 @@ BEGIN THE LECTURE NOW:
                 # Create new PDF
                 pdf_bytes = LectureService.create_pdf(final_title, final_content)
 
+                # Convert UUID to integer ID if needed for filter
+                lecture_int_id = lecture_id
+                if IDConverter.is_uuid(str(lecture_id)):
+                    lecture_int_id = await IDConverter.uuid_to_int(db, "lecture", str(lecture_id))
+                    if not lecture_int_id:
+                        lecture_int_id = lecture_id  # Fallback
+                elif isinstance(lecture_id, int):
+                    lecture_int_id = lecture_id
+
                 # Get storage info from existing lecture content
-                lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_id})
+                lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_int_id})
                 
                 if lecture_contents:
                     old_pdf_content = lecture_contents[0]

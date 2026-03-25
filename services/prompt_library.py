@@ -745,6 +745,46 @@ TEXT FROM PDF:
 
 # ----- LAW BOOKS -----
 
+ETHICS_FOR_LAWYERS_PROMPT = """Analyze this ETHICS FOR LAWYERS booklet's Table of Contents.
+
+This "Booklet on Ethics for Lawyers" uses:
+- Simple numbered chapters (Chapter 1, Chapter 2, etc.) or unnumbered sections
+- May have topics/sections within chapters
+- Typically 15-25 chapters or sections
+- Focus on legal ethics, professional conduct, rules of professional responsibility
+
+EXAMPLE STRUCTURE:
+Chapter 1: Introduction to Legal Ethics........1
+Chapter 2: Conflicts of Interest.............15
+Chapter 3: Client Confidentiality.............32
+OR
+1. Introduction to Legal Ethics..............1
+2. Conflicts of Interest.....................15
+3. Client Confidentiality....................32
+
+YOUR TASK:
+1. Extract ALL chapters/sections with page numbers
+2. If chapters have subsections, include them as children
+3. Calculate page_offset accurately
+4. Keep chapter titles concise (max 60 chars)
+
+Return ONLY valid JSON:
+{
+  "structure_type": "Chapters only",
+  "page_offset": 8,
+  "offset_explanation": "First chapter on book page 1 is on PDF page 9, offset = 8",
+  "structure": [
+    {"type": "chapter", "number": "1", "title": "Introduction to Legal Ethics", "book_page": 1, "children": []},
+    {"type": "chapter", "number": "2", "title": "Conflicts of Interest", "book_page": 15, "children": []},
+    {"type": "chapter", "number": "3", "title": "Client Confidentiality", "book_page": 32, "children": []}
+  ]
+}
+
+CRITICAL: Extract EVERY chapter. Do not skip any. Look for numbered items, chapter headings, or major topic divisions.
+
+TEXT FROM PDF:
+"""
+
 LAW_TEXTBOOK_CHAPTERS_PROMPT = """Analyze this LAW TEXTBOOK's Table of Contents.
 
 This law book uses a simple structure:
@@ -990,6 +1030,27 @@ def is_law_vsi(text: str, meta: Dict) -> bool:
     return "very short introduction" in text_lower and "law" in text_lower
 
 
+def is_ethics_for_lawyers(text: str, meta: Dict) -> bool:
+    """Booklet on Ethics for Lawyers"""
+    text_lower = text.lower()
+    filename_lower = meta.get("filename", "").lower()
+    
+    # Check filename first (most reliable)
+    if "booklet on ethics for lawyers" in filename_lower or "ethics for lawyers" in filename_lower:
+        return True
+    
+    # Check text content
+    patterns = [
+        "ethics for lawyers" in text_lower,
+        "booklet on ethics" in text_lower,
+        ("ethics" in text_lower and "lawyer" in text_lower and ("booklet" in text_lower or "guide" in text_lower)),
+        ("professional conduct" in text_lower and "legal" in text_lower and "ethics" in text_lower),
+        ("rules of professional responsibility" in text_lower),
+        ("legal ethics" in text_lower and meta.get("total_pages", 0) < 100),  # Booklet is typically shorter
+    ]
+    return sum(bool(p) for p in patterns) >= 2
+
+
 def is_law_textbook(text: str, meta: Dict) -> bool:
     """General law textbooks"""
     text_lower = text.lower()
@@ -1041,7 +1102,8 @@ BOOK_PATTERNS: List[Dict] = [
     # Technical books
     {"name": "Machine Learning/Technical", "fingerprint": is_machine_learning_book, "prompt": MACHINE_LEARNING_PROMPT, "description": "Parts > Chapters"},
 
-    # Law books
+    # Law books (specific first, then general)
+    {"name": "Ethics for Lawyers", "fingerprint": is_ethics_for_lawyers, "prompt": ETHICS_FOR_LAWYERS_PROMPT, "description": "Chapters only (ethics booklet)"},
     {"name": "Law VSI", "fingerprint": is_law_vsi, "prompt": LAW_VSI_PROMPT, "description": "Simple chapters"},
     {"name": "Law Textbook", "fingerprint": is_law_textbook, "prompt": LAW_TEXTBOOK_CHAPTERS_PROMPT, "description": "Chapters only"},
 ]

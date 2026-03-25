@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Union
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -12,27 +12,49 @@ from utils.db import get_db
 security = HTTPBearer()
 
 
-def _get_cached_user_by_id(db, user_id: str) -> dict | None:
-    """Get user by ID with caching."""
+def _get_cached_user_by_id(db, user_id: Union[int, str]) -> dict | None:
+    """Get user by ID with caching (handles both integer IDs and UUID strings)."""
+    # Determine if it's a UUID or integer ID
+    if isinstance(user_id, str):
+        # Check if it's a UUID (contains hyphens) or an integer string
+        if "-" in user_id or len(user_id) > 10:
+            # Likely a UUID - use UUID string as cache key
+            cache_key = f"user_by_uuid:{user_id}"
+        else:
+            # Try to parse as integer
+            try:
+                user_id = int(user_id)
+                cache_key = f"user_by_id:{user_id}"
+            except ValueError:
+                # Not a valid integer, treat as UUID
+                cache_key = f"user_by_uuid:{user_id}"
+    else:
+        # Integer ID
+        cache_key = f"user_by_id:{user_id}"
+    
     # Check cache first
-    cached_user = cache.get("users", "user_by_id", user_id)
+    cached_user = cache.get("users", cache_key)
     if cached_user is not None:
         return cached_user
     
-    # Fetch from database
+    # Fetch from database (db.get_user_by_id handles both UUIDs and integer IDs)
     user_data = db.get_user_by_id(user_id)
     
     # Cache the result (even None to prevent repeated lookups)
     if user_data:
-        cache.set("users", user_data, "user_by_id", user_id, ttl=60)
+        cache.set("users", user_data, cache_key, ttl=60)
     
     return user_data
 
 
-def _get_cached_teacher_profile(db, user_id: str) -> dict | None:
-    """Get teacher profile by user_id with caching."""
+def _get_cached_teacher_profile(db, user_id: Union[int, str]) -> dict | None:
+    """Get teacher profile by user_id with caching (uses integer ID)."""
+    # Convert to integer if needed
+    user_id_int = int(user_id) if isinstance(user_id, str) and user_id.isdigit() else user_id
+    cache_key = f"teacher_by_user:{user_id_int}"
+    
     # Check cache first
-    cached_teacher = cache.get("teachers", "teacher_by_user", user_id)
+    cached_teacher = cache.get("teachers", cache_key)
     if cached_teacher is not None:
         return cached_teacher if cached_teacher != "__NONE__" else None
     
@@ -41,17 +63,17 @@ def _get_cached_teacher_profile(db, user_id: str) -> dict | None:
         teacher_result = (
             db.admin_client.table("teacher")
             .select("*")
-            .eq("user_id", str(user_id))
+            .eq("user_id", user_id_int)
             .execute()
         )
         
         if teacher_result.data and len(teacher_result.data) > 0:
             teacher_data = teacher_result.data[0]
-            cache.set("teachers", teacher_data, "teacher_by_user", user_id, ttl=300)
+            cache.set("teachers", teacher_data, cache_key, ttl=300)
             return teacher_data
         else:
             # Cache the absence to avoid repeated lookups
-            cache.set("teachers", "__NONE__", "teacher_by_user", user_id, ttl=300)
+            cache.set("teachers", "__NONE__", cache_key, ttl=300)
             return None
     except Exception as e:
         print(f"Warning: Could not load teacher profile: {e}")
@@ -134,7 +156,7 @@ class AuthDependency:
 
             # Load teacher profile if user is a teacher or admin (cached)
             if user.role in [UserRole.TEACHER, UserRole.ADMIN]:
-                teacher_data = _get_cached_teacher_profile(db, str(user.id))
+                teacher_data = _get_cached_teacher_profile(db, user.id)
                 
                 if teacher_data:
                     teacher_dict = {

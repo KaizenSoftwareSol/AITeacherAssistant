@@ -36,7 +36,8 @@ class LectureType(str, Enum):
 class Lecture(SQLModel, table=True):
     """Lecture entity for both AI-generated and teacher-recorded lectures."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
     title: str
     description: Optional[str] = None
     learning_outcomes: Optional[str] = None  # Learning outcomes for students
@@ -50,10 +51,10 @@ class Lecture(SQLModel, table=True):
     has_embeddings: bool = Field(default=False)  # Whether embeddings exist for RAG
 
     # Foreign keys
-    course_id: str = Field(foreign_key="course.id")  # UUID
-    semester_id: str = Field(foreign_key="semester.id")  # UUID
-    teacher_id: str = Field(foreign_key="teacher.id")  # UUID
-    document_id: Optional[str] = Field(default=None, foreign_key="documents.id")  # UUID - source document
+    course_id: int = Field(foreign_key="course.id")  # Integer FK for performance
+    semester_id: int = Field(foreign_key="semester.id")  # Integer FK for performance
+    teacher_id: int = Field(foreign_key="teacher.id")  # Integer FK for performance
+    document_id: Optional[int] = Field(default=None, foreign_key="documents.id")  # Integer FK - source document
     
     # Topic and numbering
     topic: Optional[str] = None  # Topic name for grouping (e.g., "CLUSTERING", "PREDICTION", "REGRESSION")
@@ -65,9 +66,9 @@ class Lecture(SQLModel, table=True):
     delivered_at: Optional[datetime] = None
 
     # Relationships
-    course: Optional["Course"] = Relationship(back_populates="lectures")
-    semester: Optional["Semester"] = Relationship(back_populates="lectures")
-    teacher: Optional["Teacher"] = Relationship(back_populates="lectures")
+    course: "Course" = Relationship(back_populates="lectures")
+    semester: "Semester" = Relationship(back_populates="lectures")
+    teacher: "Teacher" = Relationship(back_populates="lectures")
     contents: List["LectureContent"] = Relationship(back_populates="lecture")
     conversations: List["AIConversation"] = Relationship(back_populates="lecture")
     analytics: List["LectureAnalytics"] = Relationship(back_populates="lecture")
@@ -78,8 +79,9 @@ class Lecture(SQLModel, table=True):
 class LectureContent(SQLModel, table=True):
     """File metadata for lecture materials stored in Supabase."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    lecture_id: str = Field(foreign_key="lecture.id")  # UUID
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    lecture_id: int = Field(foreign_key="lecture.id")  # Integer FK for performance
     file_name: str
     file_type: str  # pdf, pptx, docx, txt, etc.
     file_size: int  # in bytes
@@ -89,7 +91,7 @@ class LectureContent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    lecture: Optional["Lecture"] = Relationship(back_populates="contents")
+    lecture: "Lecture" = Relationship(back_populates="contents")
 
 
 # ==================== Request/Response Models ====================
@@ -187,7 +189,7 @@ class DuplicateLectureInfo(SQLModel):
     learning_outcomes: Optional[str] = None
     status: str
     created_at: str
-    download_url: str
+    download_url: Optional[str] = None  # May be None if PDF not available
     file_name: str
     file_size: int
     lecture_content: Optional[str] = None
@@ -196,11 +198,11 @@ class DuplicateLectureInfo(SQLModel):
 class DuplicateCheckRequest(SQLModel):
     """Request model for checking duplicate lectures."""
 
-    course_id: str
-    semester_id: str
+    course_id: str | int  # Can be UUID string or integer ID
+    semester_id: str | int  # Can be UUID string or integer ID
     title: str
-    document_id: Optional[str] = None  # UUID of source document (deprecated, use document_ids)
-    document_ids: Optional[List[str]] = None  # List of UUIDs of source documents (checks first document for duplicates)
+    document_id: Optional[str | int] = None  # UUID of source document (deprecated, use document_ids)
+    document_ids: Optional[List[str | int]] = None  # List of UUIDs or integer IDs of source documents (checks first document for duplicates)
     learning_outcomes: Optional[str] = None
     selected_chapters: Optional[List[str]] = None
 

@@ -34,9 +34,12 @@ class MessageRole(str, Enum):
 class AIConversation(SQLModel, table=True):
     """AI conversation sessions for Q&A and chat."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    user_id: str = Field(foreign_key="user.id")  # UUID
-    lecture_id: Optional[str] = Field(default=None, foreign_key="lecture.id")  # UUID
+    __tablename__ = "ai_conversation"
+
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    user_id: int = Field(foreign_key="users.id")  # Integer FK for performance
+    lecture_id: Optional[int] = Field(default=None, foreign_key="lecture.id")  # Integer FK for performance
     conversation_type: ConversationType
     session_id: str = Field(index=True)  # Unique session identifier
     title: Optional[str] = None
@@ -44,20 +47,23 @@ class AIConversation(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    user: Optional["User"] = Relationship(back_populates="ai_conversations")
-    lecture: Optional["Lecture"] = Relationship(back_populates="conversations")
+    user: "User" = Relationship(back_populates="ai_conversations")
+    lecture: "Lecture" = Relationship(back_populates="conversations")
     messages: List["ChatMessage"] = Relationship(back_populates="conversation")
 
 
 class ChatMessage(SQLModel, table=True):
     """Individual chat messages within conversations."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID
-    conversation_id: str = Field(foreign_key="aiconversation.id")  # UUID
+    __tablename__ = "chat_message"
+
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    conversation_id: int = Field(foreign_key="ai_conversation.id")  # Integer FK for performance
     role: MessageRole
     content: str
     message_metadata: Optional[str] = None  # JSON metadata (tokens used, etc.)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    conversation: Optional["AIConversation"] = Relationship(back_populates="messages")
+    conversation: "AIConversation" = Relationship(back_populates="messages")

@@ -46,13 +46,16 @@ class DocumentBase(SQLModel):
 class Document(DocumentBase, table=True):
     """Document model for database."""
 
-    id: Optional[str] = Field(default=None, primary_key=True)  # UUID string
-    teacher_id: str = Field(foreign_key="teacher.id")  # UUID string
-    university_id: str = Field(foreign_key="university.id")  # UUID string
+    __tablename__ = "documents"
+
+    id: Optional[int] = Field(default=None, primary_key=True)  # Integer PK for performance
+    uuid: Optional[str] = Field(default=None, unique=True, index=True)  # UUID for external APIs
+    teacher_id: int = Field(foreign_key="teacher.id")  # Integer FK for performance
+    university_id: int = Field(foreign_key="university.id")  # Integer FK for performance
 
     # Relationships
-    teacher: Optional["Teacher"] = Relationship(back_populates="documents")
-    university: Optional["University"] = Relationship(back_populates="documents")
+    teacher: "Teacher" = Relationship(back_populates="documents")
+    university: "University" = Relationship(back_populates="documents")
 
 
 class DocumentCreate(SQLModel):

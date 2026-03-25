@@ -10,6 +10,8 @@ from .course import Course, Semester
 from .module import Module, ModuleCourse
 from .document import (Document, DocumentCreate, DocumentRead, DocumentStatus,
                        DocumentType, DocumentUpdate)
+from .document_assignment import DocumentAssignment
+from .flashcard import Flashcard
 from .enrollment import Enrollment
 from .job_queue import JobQueue, JobStatus, JobType
 from .lecture import (Lecture, LectureContent, LectureDownloadResponse,

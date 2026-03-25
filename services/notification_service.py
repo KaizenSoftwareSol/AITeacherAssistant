@@ -58,10 +58,52 @@ class NotificationService:
             The created notification record
         """
         try:
+            from utils.id_converter import IDConverter
+            
             notification_id = str(uuid4())
+            
+            # Convert user_id from UUID to integer if needed
+            # Handle both UUID strings and integer strings/ints
+            user_int_id = user_id
+            if isinstance(user_id, str):
+                if IDConverter.is_uuid(user_id):
+                    user_int_id = await IDConverter.uuid_to_int(self.db, "users", user_id)
+                    if not user_int_id:
+                        logger.warning(f"Failed to convert user_id {user_id} to integer")
+                        raise ValueError(f"Invalid user_id: {user_id}")
+                else:
+                    # Try to parse as integer
+                    try:
+                        user_int_id = int(user_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"user_id {user_id} is not a valid UUID or integer")
+                        raise ValueError(f"Invalid user_id: {user_id}")
+            elif isinstance(user_id, int):
+                # Already an integer, use as-is
+                user_int_id = user_id
+            else:
+                raise ValueError(f"Invalid user_id type: {type(user_id)}")
+            
+            # Convert related_entity_id from UUID to integer if needed
+            related_entity_int_id = related_entity_id
+            if related_entity_id and IDConverter.is_uuid(related_entity_id):
+                # Determine the table name from related_entity_type
+                table_name_map = {
+                    "assessment": "assessment",
+                    "lecture": "lecture",
+                    "course": "course",
+                    "document": "documents",
+                    "result_request": "result_view_request",  # Map to correct table name
+                }
+                table_name = table_name_map.get(related_entity_type, related_entity_type)
+                related_entity_int_id = await IDConverter.uuid_to_int(self.db, table_name, related_entity_id)
+                if not related_entity_int_id:
+                    logger.warning(f"Failed to convert related_entity_id {related_entity_id} to integer")
+                    related_entity_int_id = None  # Set to None if conversion fails
+            
             notification_data = {
                 "id": notification_id,
-                "user_id": str(user_id),
+                "user_id": user_int_id,  # Use integer ID
                 "title": title,
                 "description": description,
                 "type": notification_type,
@@ -70,7 +112,7 @@ class NotificationService:
                 "is_archived": False,
                 "feature_type": feature_type,
                 "related_entity_type": related_entity_type,
-                "related_entity_id": str(related_entity_id) if related_entity_id else None,
+                "related_entity_id": related_entity_int_id,  # Use integer ID or None
                 "action_url": action_url,
                 "company_key": company_key,
                 "created_at": datetime.utcnow().isoformat(),
@@ -127,12 +169,54 @@ class NotificationService:
         Useful for broadcasting notifications to all enrolled students in a course.
         """
         try:
+            from utils.id_converter import IDConverter
+            
             notifications = []
             for user_id in user_ids:
                 notification_id = str(uuid4())
+                
+                # Convert user_id from UUID to integer if needed
+                # Handle both UUID strings and integer strings/ints
+                user_int_id = user_id
+                if isinstance(user_id, str):
+                    if IDConverter.is_uuid(user_id):
+                        user_int_id = await IDConverter.uuid_to_int(self.db, "users", user_id)
+                        if not user_int_id:
+                            logger.warning(f"Failed to convert user_id {user_id} to integer, skipping notification")
+                            continue
+                    else:
+                        # Try to parse as integer
+                        try:
+                            user_int_id = int(user_id)
+                        except (ValueError, TypeError):
+                            logger.warning(f"user_id {user_id} is not a valid UUID or integer, skipping notification")
+                            continue
+                elif isinstance(user_id, int):
+                    # Already an integer, use as-is
+                    user_int_id = user_id
+                else:
+                    logger.warning(f"Invalid user_id type {type(user_id)}, skipping notification")
+                    continue
+                
+                # Convert related_entity_id from UUID to integer if needed
+                related_entity_int_id = related_entity_id
+                if related_entity_id and IDConverter.is_uuid(related_entity_id):
+                    # Determine the table name from related_entity_type
+                    table_name_map = {
+                        "assessment": "assessment",
+                        "lecture": "lecture",
+                        "course": "course",
+                        "document": "documents",
+                    }
+                    table_name = table_name_map.get(related_entity_type, related_entity_type)
+                    related_entity_int_id = await IDConverter.uuid_to_int(self.db, table_name, related_entity_id)
+                    if not related_entity_int_id:
+                        logger.warning(f"Failed to convert related_entity_id {related_entity_id} to integer")
+                        related_entity_int_id = None  # Set to None if conversion fails
+                
                 notifications.append({
                     "id": notification_id,
-                    "user_id": str(user_id),
+                    "user_id": user_int_id,  # Use integer ID
                     "title": title,
                     "description": description,
                     "type": notification_type,
@@ -141,7 +225,7 @@ class NotificationService:
                     "is_archived": False,
                     "feature_type": feature_type,
                     "related_entity_type": related_entity_type,
-                    "related_entity_id": str(related_entity_id) if related_entity_id else None,
+                    "related_entity_id": related_entity_int_id,  # Use integer ID or None
                     "action_url": action_url,
                     "company_key": company_key,
                     "created_at": datetime.utcnow().isoformat(),
@@ -687,7 +771,7 @@ class NotificationService:
             description=f"{student_name} requested detailed results for '{quiz_title}'",
             notification_type=NotificationType.RESULT_REQUEST,
             severity=NotificationSeverity.WARNING,
-            related_entity_type="result_request",
+            related_entity_type="result_view_request",  # Use correct table name
             related_entity_id=request_id,
             action_url=f"/teacher/result-requests",
         )
@@ -725,6 +809,7 @@ class NotificationService:
         lecture_title: str,
         course_name: str,
         lecture_id: str,
+        course_id: Optional[str] = None,
         teacher_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Notify all enrolled students when a lecture is published."""
@@ -743,6 +828,7 @@ class NotificationService:
         try:
             from settings import settings
             from datetime import datetime
+            from utils.id_converter import IDConverter
             
             # Get user info for emails
             users_result = (
@@ -753,7 +839,18 @@ class NotificationService:
                 .execute()
             )
             
-            lecture_link = f"{settings.FRONTEND_URL}/student/lectures/{lecture_id}"
+            # Build lecture link with courseId query parameter
+            if course_id:
+                # Convert course_id to UUID if it's an integer
+                course_id_uuid = course_id
+                if not IDConverter.is_uuid(course_id):
+                    course_id_uuid = await IDConverter.int_to_uuid(self.db, "course", course_id)
+                    if not course_id_uuid:
+                        course_id_uuid = course_id  # Fallback to original
+                lecture_link = f"{settings.FRONTEND_URL}/student/lectures/{lecture_id}?courseId={course_id_uuid}"
+            else:
+                lecture_link = f"{settings.FRONTEND_URL}/student/lectures/{lecture_id}"
+            
             published_date = datetime.utcnow().strftime("%B %d, %Y")
             
             for user in users_result.data or []:
@@ -813,7 +910,7 @@ class NotificationService:
                 .execute()
             )
             
-            quiz_link = f"{settings.FRONTEND_URL}/student/assessments/{assessment_id}"
+            quiz_link = f"{settings.FRONTEND_URL}/student/assessments"
             
             for user in users_result.data or []:
                 user_email = user.get("email")
@@ -863,7 +960,7 @@ class NotificationService:
                 student_email = student_data.get("email")
                 student_name = f"{student_data.get('first_name', '')} {student_data.get('last_name', '')}".strip() or "Student"
                 if student_email:
-                    result_link = f"{settings.FRONTEND_URL}/student/assessments/{assessment_id}"
+                    result_link = f"{settings.FRONTEND_URL}/student/assessments"
                     
                     email_service.send_result_approved_notification(
                         to_email=student_email,

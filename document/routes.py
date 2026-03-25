@@ -13,6 +13,7 @@ from models.document import DocumentRead, DocumentType, DocumentUpdate
 from models.user import Teacher, User
 from services.document_service import DocumentService
 from utils.db import get_db
+from utils.id_converter import IDConverter
 
 
 class DocumentAssignment(BaseModel):
@@ -178,6 +179,11 @@ async def get_teacher_documents(
             doc_dict = doc.model_dump() if hasattr(doc, 'model_dump') else dict(doc)
             assignments = assignments_by_doc.get(doc.id, [])
             
+            # Convert integer ID to UUID for response
+            doc_uuid = await IDConverter.int_to_uuid(db, "documents", doc.id) if hasattr(doc, 'id') and isinstance(doc.id, int) else None
+            if doc_uuid:
+                doc_dict["id"] = doc_uuid
+            
             # Convert datetime objects to ISO strings if needed
             if isinstance(doc_dict.get("created_at"), datetime):
                 doc_dict["created_at"] = doc_dict["created_at"].isoformat()
@@ -242,7 +248,7 @@ async def get_document_chapters(
         logger.info(f"Fetching chapters for document {document_id}")
 
         # Get document
-        document = DocumentService.get_document_by_id(
+        document = await DocumentService.get_document_by_id(
             db=db, document_id=document_id, teacher_id=teacher.id
         )
 
@@ -307,12 +313,19 @@ async def get_document_assignments(
                 detail="Access denied to this document",
             )
 
+        # Convert UUID to integer ID if needed
+        document_int_id = document_id
+        if IDConverter.is_uuid(document_id):
+            document_int_id = await IDConverter.uuid_to_int(db, "documents", document_id)
+            if not document_int_id:
+                document_int_id = document_id  # Fallback
+
         # Get assignments
         try:
             assignments_result = (
                 db.admin_client.table("document_assignment")
                 .select("*, course!inner(id, name)")
-                .eq("document_id", document_id)
+                .eq("document_id", document_int_id)
                 .execute()
             )
 
@@ -366,7 +379,7 @@ async def get_document(
 
         logger.info(f"Fetching document {document_id} for teacher_id: {teacher.id}")
 
-        document = DocumentService.get_document_by_id(
+        document = await DocumentService.get_document_by_id(
             db=db, document_id=document_id, teacher_id=teacher.id
         )
 
@@ -412,7 +425,7 @@ async def update_document(
                 detail="Teacher profile not found",
             )
 
-        document = DocumentService.update_document(
+        document = await DocumentService.update_document(
             db=db,
             document_id=document_id,
             teacher_id=teacher.id,
@@ -514,14 +527,33 @@ async def create_document_assignment(
 
         logger.info(f"Creating assignment for document {document_id} to course {course_id}")
 
-        # Get document and verify ownership
-        document = db.get_record_by_id("documents", document_id)
+        # Convert UUIDs to integer IDs for database queries
+        document_int_id = document_id
+        course_int_id = course_id
+        if IDConverter.is_uuid(document_id):
+            document_int_id = await IDConverter.uuid_to_int(db, "documents", document_id)
+            if not document_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Document not found",
+                )
+        if IDConverter.is_uuid(course_id):
+            course_int_id = await IDConverter.uuid_to_int(db, "course", course_id)
+            if not course_int_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course not found",
+                )
+
+        # Get document and verify ownership (using integer ID)
+        document = db.get_record_by_id("documents", document_int_id)
         if not document:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Document not found",
             )
 
+        # Compare teacher_id (both should be integers when querying by integer ID)
         if document.get("teacher_id") != teacher.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -535,14 +567,15 @@ async def create_document_assignment(
                 detail="Document is not fully processed yet. Please wait for processing to complete.",
             )
 
-        # Verify course belongs to teacher's university
-        course = db.get_record_by_id("course", course_id)
+        # Verify course belongs to teacher's university (using integer ID)
+        course = db.get_record_by_id("course", course_int_id)
         if not course:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Course not found",
             )
 
+        # Compare university_id (both should be integers when querying by integer ID)
         if course.get("university_id") != teacher.university_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -554,8 +587,8 @@ async def create_document_assignment(
             existing_result = (
                 db.admin_client.table("document_assignment")
                 .select("*")
-                .eq("document_id", document_id)
-                .eq("course_id", course_id)
+                .eq("document_id", document_int_id)
+                .eq("course_id", course_int_id)
                 .execute()
             )
 
@@ -573,9 +606,9 @@ async def create_document_assignment(
         from datetime import datetime
 
         assignment_record = {
-            "id": str(uuid4()),
-            "document_id": document_id,
-            "course_id": course_id,
+            "uuid": str(uuid4()),  # Generate UUID for external API use
+            "document_id": document_int_id,  # Use integer ID for database
+            "course_id": course_int_id,  # Use integer ID for database
             "topic": topic,
             "created_at": datetime.utcnow().isoformat(),
         }
@@ -586,6 +619,20 @@ async def create_document_assignment(
                 .insert(assignment_record)
                 .execute()
             )
+            
+            # Get the created assignment with integer ID
+            created_assignment = result.data[0] if result.data else None
+            if not created_assignment:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to create assignment - no data returned",
+                )
+            
+            # Convert integer IDs to UUIDs for response
+            assignment_uuid = created_assignment.get("uuid") or assignment_record.get("uuid")
+            if not assignment_uuid and created_assignment.get("id"):
+                assignment_uuid = await IDConverter.int_to_uuid(db, "document_assignment", created_assignment["id"])
+            
         except Exception as insert_err:
             error_msg = str(insert_err)
             # Check if it's a table not found error
@@ -605,9 +652,9 @@ async def create_document_assignment(
         logger.info(f"Created assignment: document {document_id} -> course {course_id}")
 
         return {
-            "id": assignment_record["id"],
-            "document_id": document_id,
-            "course_id": course_id,
+            "id": assignment_uuid if assignment_uuid else str(created_assignment.get("id", "")),
+            "document_id": document_id,  # Already a UUID from request
+            "course_id": course_id,  # Already a UUID from request
             "course_name": course.get("name"),
             "topic": topic,
             "message": "Document assigned to course successfully",
