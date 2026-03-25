@@ -15,6 +15,8 @@ from routes_config import (admin_router, auth_router, course_router,
                            student_router, system_router, teacher_router,
                            user_router)
 from services.cache_service import cache, periodic_cache_cleanup
+from services.response_cache import setup_cache_middleware
+from services.performance_middleware import setup_performance_middleware
 from utils.db import create_db_and_tables
 
 
@@ -72,8 +74,8 @@ app.add_middleware(
 )
 
 # Add performance monitoring middleware
-from services.response_cache import setup_cache_middleware
 setup_cache_middleware(app)
+setup_performance_middleware(app)
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")

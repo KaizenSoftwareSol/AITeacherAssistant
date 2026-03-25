@@ -560,6 +560,17 @@ class NotificationService:
         Returns:
             Count of unread notifications
         """
+        from services.cache_service import cache
+        
+        cache_key = f"unread_count:{user_id}"
+        
+        # Try cache first
+        cached = cache.get("queries", cache_key)
+        if cached is not None:
+            logger.debug(f"Cache HIT: unread_count for {user_id}")
+            return cached
+        
+        # Query if not cached
         try:
             result = (
                 self.db.admin_client
@@ -571,7 +582,15 @@ class NotificationService:
                 .execute()
             )
             
-            return result.count or 0
+            count = result.count or 0
+            
+            # Cache for 10 seconds
+            try:
+                cache.set("queries", count, cache_key, ttl=10)
+            except Exception:
+                pass  # If cache fails, continue anyway
+            
+            return count
             
         except Exception as e:
             logger.error(f"Error getting unread count: {str(e)}")
