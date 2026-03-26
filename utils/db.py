@@ -1,6 +1,7 @@
 # utils/db.py
 
 import json
+import time
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -416,6 +417,82 @@ class SupabaseDB:
         except Exception as e:
             print(f"Error getting record from {table_name}: {e}")
             return None
+
+    def get_records_optimized(
+        self,
+        table_name: str,
+        columns: List[str] = None,
+        filters: Dict[str, Any] = None,
+        skip: int = 0,
+        limit: int = 100,
+        use_cache: bool = True,
+        order_by: str = None,  # Add ordering parameter
+        in_filters: Dict[str, List[Any]] = None,  # Add IN clause support
+    ) -> List[Dict[str, Any]]:
+        """Get records from any table with column selection for better performance."""
+        try:
+            # Build cache key from filters and columns
+            filter_str = json.dumps(filters, sort_keys=True) if filters else "none"
+            in_filter_str = json.dumps(in_filters, sort_keys=True) if in_filters else "none"
+            columns_str = ",".join(columns) if columns else "*"
+            order_str = order_by or ""
+            cache_key = f"{table_name}:opt:{columns_str}:{order_str}:{filter_str}:{in_filter_str}:{skip}:{limit}"
+            
+            # Check cache first
+            if use_cache:
+                cached_records = cache.get("queries", cache_key)
+                if cached_records is not None:
+                    print(f"✅ Cache HIT for {table_name}: {len(cached_records)} records")
+                    return cached_records
+                else:
+                    print(f"❌ Cache MISS for {table_name}, querying database...")
+            
+            # Build optimized query with specific columns
+            start_time = time.time()
+            query = self.get_admin_client().table(table_name).select(columns_str if columns else "*")
+
+            # Apply ordering if specified
+            if order_by:
+                query = query.order(order_by)
+
+            # Apply IN filters first (before regular filters)
+            if in_filters:
+                for key, values in in_filters.items():
+                    if values and isinstance(values, list):
+                        query = query.in_(key, values)
+
+            # Apply regular filters (convert values to strings for UUID support)
+            if filters:
+                for key, value in filters.items():
+                    if value is None:
+                        # Use .is_() for NULL checks
+                        query = query.is_(key, "null")
+                    elif isinstance(value, str) and value.startswith("*") and value.endswith("*"):
+                        # Handle search queries (contains)
+                        search_term = value[1:-1]  # Remove * from both ends
+                        query = query.like(key, f"%{search_term}%")
+                    else:
+                        # Convert to string for UUID support
+                        query = query.eq(key, str(value))
+
+            # Execute with smaller limit for universities to reduce load
+            actual_limit = min(limit, 100)  # Cap at 100 for better performance
+            result = query.range(skip, skip + actual_limit - 1).execute()
+            records = result.data
+            
+            query_time = (time.time() - start_time) * 1000
+            print(f"🔍 DB Query for {table_name}: {query_time:.0f}ms, {len(records)} records")
+            
+            # Cache result with longer TTL for universities
+            if use_cache:
+                cache_ttl = 600 if table_name == "university" else 300  # 10 minutes for universities
+                cache.set("queries", records, cache_key, ttl=cache_ttl)
+                print(f"💾 Cached {table_name}: TTL={cache_ttl}s")
+            
+            return records
+        except Exception as e:
+            print(f"❌ Error getting optimized records from {table_name}: {e}")
+            return []
 
     def get_records(
         self,

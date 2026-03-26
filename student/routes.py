@@ -2182,16 +2182,21 @@ async def get_test_quizzes(
                     submissions_by_assessment[aid] = []
                 submissions_by_assessment[aid].append(sub)
         
-        quizzes = []
-        for a in (assessments_result.data or []):
-            # Get question count
+        # Batch get question counts for all assessments
+        question_counts = {}
+        if assessment_ids:
             questions_result = (
                 db.admin_client.table("question")
-                .select("id")
-                .eq("assessment_id", a["id"])
+                .select("assessment_id")
+                .in_("assessment_id", assessment_ids)
                 .execute()
             )
-            
+            for q in (questions_result.data or []):
+                aid = q["assessment_id"]
+                question_counts[aid] = question_counts.get(aid, 0) + 1
+        
+        quizzes = []
+        for a in (assessments_result.data or []):
             # Check if overdue
             due_date = a.get("due_date")
             is_overdue = False
@@ -2227,7 +2232,7 @@ async def get_test_quizzes(
                 "due_date": due_date,
                 "is_overdue": is_overdue,
                 "show_leaderboard": a.get("show_leaderboard", True),
-                "questions_count": len(questions_result.data) if questions_result.data else 0,
+                "questions_count": question_counts.get(a["id"], 0),
                 "my_attempts": my_attempts,
                 "my_best_score": my_best_score,
                 "can_attempt": can_attempt,
