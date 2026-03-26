@@ -131,6 +131,9 @@ class AuthService:
     @staticmethod
     async def create_user(db, user_create: UserCreate) -> User:
         """Create a new user."""
+        # Normalize email to lowercase
+        user_create.email = user_create.email.lower()
+
         # Check if user already exists
         existing_user = db.get_user_by_email(user_create.email)
         if existing_user:
@@ -395,7 +398,7 @@ class AuthService:
     @staticmethod
     def authenticate_user(db, email: str, password: str) -> Optional[User]:
         """Authenticate a user with email and password."""
-        user_data = db.get_user_by_email(email)
+        user_data = db.get_user_by_email(email.lower())
         if not user_data:
             return None
 

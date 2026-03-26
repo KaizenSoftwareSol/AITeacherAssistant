@@ -148,7 +148,7 @@ class SupabaseDB:
                 self.get_admin_client()
                 .table("users")
                 .select("*")
-                .eq("email", email)
+                .eq("email", email.lower())
                 .execute()
             )
             user = result.data[0] if result.data else None
