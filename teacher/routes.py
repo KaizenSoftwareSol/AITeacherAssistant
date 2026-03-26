@@ -2287,8 +2287,8 @@ async def get_course_lectures_for_teacher(
                 "lecture_number": lec.get("lecture_number"),
                 "created_at": lec["created_at"],
                 "updated_at": lec.get("updated_at"),
-                "has_quiz": lec["id"] in assessment_by_lecture,
-                "has_flashcards": lec["id"] in flashcards_by_lecture,
+                "has_quiz": bool(assessment_result.data),
+                "has_flashcards": bool(flashcards_result.data),
             })
 
         # Group ALL lectures by status (not just current page)
