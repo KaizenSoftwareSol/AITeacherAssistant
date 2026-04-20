@@ -583,27 +583,41 @@ async def delete_lecture(
                 detail="Access denied to this lecture",
             )
 
-        # Step 1: Get assessments for this lecture (needed for cascading deletes)
-        assessments = db.get_records("assessment", {"lecture_id": lecture_int_id})
-        assessment_ids = [a["id"] for a in assessments]
+        # Step 1: Get assessments for this lecture — fetch raw integer IDs directly
+        # (db.get_records replaces id with uuid which breaks bigint FK queries)
+        assessments_raw = (
+            db.admin_client.table("assessment")
+            .select("id")
+            .eq("lecture_id", lecture_int_id)
+            .execute()
+        )
+        assessment_int_ids = [a["id"] for a in (assessments_raw.data or [])]
 
-        # Step 2: Delete deepest children first (assessment-related)
-        if assessment_ids:
-            # Delete questions for each assessment
-            for assessment_id in assessment_ids:
-                questions = db.get_records("question", {"assessment_id": assessment_id})
-                for question in questions:
-                    db.delete_record("question", question["id"])
-
-                # Delete assessment submissions
-                submissions = db.get_records(
-                    "assessment_submission", {"assessment_id": assessment_id}
+        # Step 2: Delete deepest children first (submissions then questions, then assessments)
+        if assessment_int_ids:
+            for assessment_int_id in assessment_int_ids:
+                # Delete submissions first (FK: assessment_submission.assessment_id → assessment.id)
+                submissions_raw = (
+                    db.admin_client.table("assessment_submission")
+                    .select("id")
+                    .eq("assessment_id", assessment_int_id)
+                    .execute()
                 )
-                for submission in submissions:
-                    db.delete_record("assessment_submission", submission["id"])
+                for sub in (submissions_raw.data or []):
+                    db.delete_record("assessment_submission", sub["id"])
+
+                # Delete questions
+                questions_raw = (
+                    db.admin_client.table("question")
+                    .select("id")
+                    .eq("assessment_id", assessment_int_id)
+                    .execute()
+                )
+                for q in (questions_raw.data or []):
+                    db.delete_record("question", q["id"])
 
             logger.info(
-                f"Deleted questions and submissions for {len(assessment_ids)} assessments"
+                f"Deleted questions and submissions for {len(assessment_int_ids)} assessments"
             )
 
         # Step 3: Delete all direct children of lecture
@@ -613,10 +627,10 @@ async def delete_lecture(
             db.delete_record("student_engagement", engagement["id"])
         logger.info(f"Deleted {len(engagements)} student engagement records")
 
-        # Delete assessments
-        for assessment_id in assessment_ids:
-            db.delete_record("assessment", assessment_id)
-        logger.info(f"Deleted {len(assessment_ids)} assessments")
+        # Delete assessments (safe now that submissions/questions are gone)
+        for assessment_int_id in assessment_int_ids:
+            db.delete_record("assessment", assessment_int_id)
+        logger.info(f"Deleted {len(assessment_int_ids)} assessments")
 
         # Delete AI conversations
         conversations = db.get_records("ai_conversation", {"lecture_id": lecture_int_id})
@@ -656,8 +670,8 @@ async def delete_lecture(
             db.delete_record("lecture_content", content["id"])
         logger.info(f"Deleted {len(lecture_contents)} lecture content records")
 
-        # Step 4: Finally, delete the lecture record itself
-        db.delete_record("lecture", lecture_id)
+        # Step 4: Finally, delete the lecture record itself (use integer ID)
+        db.delete_record("lecture", lecture_int_id)
 
         logger.info(
             f"Successfully deleted lecture {lecture_id} and all associated data"
@@ -757,11 +771,6 @@ async def get_lecture_download_link(
                 detail="Access denied to this lecture",
             )
 
-        # Get download URL
-        download_url = await LectureService.get_lecture_download_url(
-            db=db, lecture_id=lecture_id, teacher_id=requester_teacher_id
-        )
-
         # Convert UUID to integer ID if needed for filter
         lecture_int_id = lecture_id
         if IDConverter.is_uuid(lecture_id):
@@ -769,9 +778,25 @@ async def get_lecture_download_link(
             if not lecture_int_id:
                 lecture_int_id = lecture_id  # Fallback to original if conversion fails
 
-        # Get lecture content for file info
+        # Get lecture content records — find the PDF record specifically
         lecture_contents = db.get_records("lecture_content", {"lecture_id": lecture_int_id})
-        pdf_content = lecture_contents[0] if lecture_contents else None
+        pdf_content = next(
+            (c for c in lecture_contents if c.get("file_type") == "pdf"),
+            None,
+        )
+
+        # Get download URL (may not exist if PDF generation failed)
+        download_url = None
+        if pdf_content:
+            try:
+                download_url = await LectureService.get_lecture_download_url(
+                    db=db, lecture_id=lecture_id, teacher_id=requester_teacher_id
+                )
+            except HTTPException as e:
+                if e.status_code != status.HTTP_404_NOT_FOUND:
+                    raise
+                logger.warning(f"No PDF found for lecture {lecture_id}, returning content only")
+                pdf_content = None
 
         response = LectureDownloadResponse(
             lecture_id=lecture_id,
@@ -781,6 +806,7 @@ async def get_lecture_download_link(
             file_size=pdf_content["file_size"] if pdf_content else 0,
             created_at=lecture_data["created_at"],
             lecture_content=lecture_data.get("content"),
+            has_pdf=pdf_content is not None,
         )
 
         logger.info(f"Download link generated for lecture {lecture_id}")

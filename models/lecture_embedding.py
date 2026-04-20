@@ -181,6 +181,7 @@ class StudentLectureInfo(SQLModel):
     pdf_file_name: Optional[str] = None
     pdf_file_size: Optional[int] = None
     pdf_download_url: Optional[str] = None
+    published_at: Optional[str] = None
 
 
 class StudentCourseLecturesResponse(SQLModel):

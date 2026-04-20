@@ -1995,8 +1995,16 @@ BEGIN THE LECTURE NOW:
                     detail="Lecture PDF not found",
                 )
 
-            # Get the PDF file (should be only one)
-            pdf_content = lecture_contents[0]
+            # Get the PDF file — prefer file_type="pdf", fall back to first record
+            pdf_content = next(
+                (c for c in lecture_contents if c.get("file_type") == "pdf"),
+                lecture_contents[0],
+            )
+            if pdf_content.get("file_type") != "pdf":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lecture PDF not found",
+                )
             storage_path = pdf_content["storage_path"]
             storage_bucket = pdf_content["storage_bucket"]
 
