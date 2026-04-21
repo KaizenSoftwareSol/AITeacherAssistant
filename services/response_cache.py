@@ -34,6 +34,8 @@ class ResponseCacheMiddleware(BaseHTTPMiddleware):
         "/api/v1/auth",
         "/api/v1/healthz",
         "/api/v1/health",
+        "/api/v1/ready",
+        "/api/v1/metrics",
         "/api/v1/cache",
     }
     
