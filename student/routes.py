@@ -890,6 +890,7 @@ async def get_course_lectures(
                 pdf_file_name=pdf_file_name,
                 pdf_file_size=pdf_file_size,
                 pdf_download_url=pdf_download_url,
+                published_at=lecture_data.get("updated_at") or lecture_data.get("created_at"),
             )
             lectures.append(lecture_info)
         
@@ -3151,7 +3152,8 @@ async def get_my_quiz_results(
         question_results = []
         for q in (questions_result.data or []):
             question_id = q["id"]
-            student_answer = student_answers.get(question_id)
+            # Match by int id or string id (JSON keys are always strings)
+            student_answer = student_answers.get(question_id) or student_answers.get(str(question_id))
             correct_answer = q.get("correct_answer")
             is_correct = student_answer == correct_answer if student_answer else False
             

@@ -212,7 +212,7 @@ class LectureQueryHelper:
         
         query = (
             db.get_admin_client().table("lecture")
-            .select("id, title, description, summary, chapter, status, created_at, has_embeddings, topic, lecture_number, content")
+            .select("id, title, description, summary, chapter, status, created_at, updated_at, has_embeddings, topic, lecture_number, content")
             .eq("course_id", course_int_id)
         )
         

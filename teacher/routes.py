@@ -445,176 +445,6 @@ async def get_all_documents_with_assignments(
 # ==================== DIVIDED COURSE ENDPOINTS ====================
 
 
-@router.get("/courses/{course_id}/info")
-@cache_response(ttl=300, region="teachers", vary_by=["course_id"])
-@track_endpoint
-async def get_course_info(
-    current_user: Annotated[User, Depends(require_teacher)],
-    course_id: str,
-    db=Depends(get_db),
-):
-    """
-    Get basic course information only.
-    
-    Returns:
-    - course: Basic course info (id, name, code, description, curriculum)
-    """
-    try:
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
-        logger.info(f"Fetching course info for {course_id}, teacher {teacher.id}")
-
-        course = db.get_records_optimized(
-            "course",
-            columns=["id", "name", "code", "description", "curriculum_content", "created_at", "updated_at"],
-            filters={"id": course_id, "university_id": str(teacher.university_id)},
-            use_cache=True,
-        )
-
-        if not course:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Course not found",
-            )
-
-        return course[0] if course else None
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching course info: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error fetching course info",
-        )
-
-
-@router.get("/courses/{course_id}/lectures")
-@cache_response(ttl=120, region="teachers", vary_by=["course_id"])
-@track_endpoint
-async def get_course_lectures(
-    current_user: Annotated[User, Depends(require_teacher)],
-    course_id: str,
-    db=Depends(get_db),
-):
-    """
-    Get all lectures for a course with basic status info.
-    
-    Returns:
-    - lectures: List of lectures with quiz/flashcard/PDF status
-    """
-    try:
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
-        logger.info(f"Fetching course lectures for {course_id}, teacher {teacher.id}")
-
-        # Get lectures
-        lectures = db.get_records_optimized(
-            "lecture",
-            columns=["id", "title", "description", "status", "topic", "lecture_number", "summary", "created_at", "updated_at"],
-            filters={"course_id": course_id, "teacher_id": teacher.id},
-            use_cache=True,
-            order_by="lecture_number",
-        )
-
-        lecture_ids = [l["id"] for l in lectures]
-
-        # Batch get quiz status
-        quiz_by_lecture = {}
-        if lecture_ids:
-            quizzes = db.get_records_optimized(
-                "assessment",
-                columns=["id", "lecture_id", "title"],
-                in_filters={"lecture_id": lecture_ids},
-                use_cache=True,
-            )
-            quiz_by_lecture = {q["lecture_id"]: q for q in quizzes}
-
-        # Batch get flashcard counts
-        flashcard_counts = {}
-        if lecture_ids:
-            flashcards = db.get_records_optimized(
-                "flashcard",
-                columns=["id", "lecture_id"],
-                in_filters={"lecture_id": lecture_ids},
-                use_cache=True,
-            )
-            for f in flashcards:
-                flashcard_counts[f["lecture_id"]] = flashcard_counts.get(f["lecture_id"], 0) + 1
-
-        # Batch get PDF info
-        pdf_by_lecture = {}
-        if lecture_ids:
-            content = db.get_records_optimized(
-                "lecture_content",
-                columns=["lecture_id", "file_name", "file_size", "storage_bucket", "storage_path"],
-                in_filters={"lecture_id": lecture_ids},
-                use_cache=True,
-            )
-            pdf_by_lecture = {c["lecture_id"]: c for c in content}
-
-        # Build enriched lectures
-        enriched_lectures = []
-        for lec in lectures:
-            lid = lec["id"]
-            quiz_info = quiz_by_lecture.get(lid)
-            pdf_info = pdf_by_lecture.get(lid)
-            
-            # Generate PDF download URL if available
-            pdf_download_url = None
-            if pdf_info:
-                try:
-                    from supabase_config import supabase
-                    if pdf_info.get("storage_bucket") and pdf_info.get("storage_path"):
-                        bucket = supabase.get_storage_bucket(pdf_info["storage_bucket"])
-                        pdf_download_url = bucket.get_public_url(pdf_info["storage_path"])
-                except Exception:
-                    pass
-            
-            enriched_lectures.append({
-                "id": lid,
-                "lecture_id": lid,  # For frontend compatibility
-                "title": lec["title"],
-                "description": lec.get("description"),
-                "status": lec["status"],
-                "topic": lec.get("topic"),
-                "lecture_number": lec.get("lecture_number"),
-                "has_summary": bool(lec.get("summary")),
-                "summary_preview": (lec.get("summary", "")[:150] + "...") if lec.get("summary") and len(lec.get("summary", "")) > 150 else lec.get("summary"),
-                "has_quiz": quiz_info is not None,
-                "quiz_title": quiz_info["title"] if quiz_info else None,
-                "flashcard_count": flashcard_counts.get(lid, 0),
-                "has_flashcards": flashcard_counts.get(lid, 0) > 0,
-                "has_pdf": pdf_info is not None,
-                "pdf_file_name": pdf_info["file_name"] if pdf_info else None,
-                "pdf_file_size": pdf_info["file_size"] if pdf_info else None,
-                "pdf_download_url": pdf_download_url,
-                "created_at": lec["created_at"],
-                "updated_at": lec.get("updated_at"),
-            })
-
-        return {"lectures": enriched_lectures}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching course lectures: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error fetching course lectures",
-        )
-
-
 @router.get("/courses/{course_id}/students")
 @cache_response(ttl=180, region="teachers", vary_by=["course_id"])
 @track_endpoint
@@ -694,66 +524,6 @@ async def get_course_students(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error fetching course students",
-        )
-
-
-@router.get("/courses/{course_id}/documents")
-@cache_response(ttl=240, region="teachers", vary_by=["course_id"])
-@track_endpoint
-async def get_course_documents(
-    current_user: Annotated[User, Depends(require_teacher)],
-    course_id: str,
-    db=Depends(get_db),
-):
-    """
-    Get all documents assigned to a course.
-    
-    Returns:
-    - documents: List of assigned documents
-    """
-    try:
-        teacher = current_user.teacher_profile
-        if not teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Teacher profile not found",
-            )
-
-        logger.info(f"Fetching course documents for {course_id}, teacher {teacher.id}")
-
-        documents = []
-        try:
-            # Get document assignments
-            assignments = db.get_records_optimized(
-                "document_assignment",
-                columns=["document_id"],
-                filters={"course_id": course_id},
-                use_cache=True,
-            )
-            
-            doc_ids = [a["document_id"] for a in assignments]
-            if doc_ids:
-                docs = db.get_records_optimized(
-                    "documents",
-                    columns=["id", "title", "document_type", "status"],
-                    in_filters={"id": doc_ids},
-                    use_cache=True,
-                )
-                documents = docs
-
-        except Exception:
-            # Table might not exist yet
-            pass
-
-        return {"documents": documents}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching course documents: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error fetching course documents",
         )
 
 
@@ -3330,7 +3100,7 @@ async def get_all_teacher_assessments(
         # Get all GRADED TEST assessments (is_default=False means graded test, not practice quiz)
         assessments_result = (
             db.admin_client.table("assessment")
-            .select("id, lecture_id, title, description, time_limit, passing_score, max_attempts, created_at")
+            .select("id, lecture_id, title, description, time_limit, passing_score, max_attempts, is_published, created_at")
             .in_("lecture_id", lecture_ids)
             .eq("is_default", False)
             .execute()
@@ -3394,7 +3164,8 @@ async def get_all_teacher_assessments(
             course = lecture.get("course", {})
             stats = submission_stats.get(assessment["id"], {})
             
-            is_published = lecture.get("status") in ["PUBLISHED", "DELIVERED"]
+            # Use the assessment's own is_published flag (not the lecture's status)
+            is_published = bool(assessment.get("is_published", False))
             if is_published:
                 published_count += 1
             
@@ -4683,7 +4454,8 @@ async def get_detailed_submission(
         correct_count = 0
         
         for q in (questions_result.data or []):
-            student_answer = student_answers.get(q["id"], "")
+            # Match by int id or string id (JSON keys are always strings)
+            student_answer = student_answers.get(q["id"], "") or student_answers.get(str(q["id"]), "")
             correct_answer = q["correct_answer"]
             
             # Check if correct (case-insensitive)

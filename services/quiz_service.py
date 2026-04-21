@@ -166,13 +166,28 @@ For SHORT_ANSWER questions, omit the options field and provide a sample correct 
             question_results = []
             topic_performance = {}  # Track performance by topic
             
+            # Normalize student_answers keys: keep original + add int and str variants
+            # so that {"333": "True"} matches question id 333 regardless of type
+            normalized_answers = {}
+            for k, v in student_answers.items():
+                normalized_answers[str(k)] = v  # string key
+                try:
+                    normalized_answers[int(k)] = v  # int key
+                except (ValueError, TypeError):
+                    pass
+
             for question in questions:
-                # Use UUID for matching with student_answers (frontend sends UUIDs as keys)
-                # Fallback to integer ID if UUID not available
-                question_id_for_matching = question.get("uuid") or str(question.get("id", ""))
-                question_id = question.get("id")  # Keep integer ID for response
+                question_uuid = question.get("uuid") or ""
+                question_int_id = question.get("id", "")
+                question_id = question_int_id  # Keep integer ID for response
+
                 correct_answer = question["correct_answer"]
-                student_answer = student_answers.get(question_id_for_matching, "")
+                # Try all possible key forms: int id, string id, uuid
+                student_answer = (
+                    normalized_answers.get(question_int_id, "")
+                    or normalized_answers.get(str(question_int_id), "")
+                    or normalized_answers.get(str(question_uuid), "")
+                )
                 points = question.get("points", 1.0)
                 total_points += points
                 

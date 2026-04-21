@@ -173,11 +173,12 @@ class LectureDownloadResponse(SQLModel):
 
     lecture_id: str
     title: str
-    download_url: str
-    file_name: str
-    file_size: int
+    download_url: Optional[str] = None
+    file_name: str = "lecture.pdf"
+    file_size: int = 0
     created_at: str
     lecture_content: Optional[str] = None
+    has_pdf: bool = False
 
 
 class DuplicateLectureInfo(SQLModel):
