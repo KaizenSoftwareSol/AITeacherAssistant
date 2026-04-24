@@ -1,14 +1,23 @@
 # utils/db.py
 
 import json
+import os
 import time
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from supabase import Client, create_client
 
+from logger import logger
 from services.cache_service import cache, cached
 from settings import settings
+
+VERBOSE_DB_LOGS = os.getenv("VERBOSE_DB_LOGS", "false").lower() == "true"
+
+
+def _db_debug(message: str) -> None:
+    if VERBOSE_DB_LOGS:
+        logger.debug(message)
 
 
 class SupabaseDB:
@@ -26,16 +35,16 @@ class SupabaseDB:
                 self.client = create_client(
                     settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY
                 )
-                print("✓ Supabase client initialized successfully")
+                logger.info("Supabase client initialized successfully")
             except Exception as e:
-                print(f"⚠️  Warning: Could not initialize Supabase client: {e}")
-                print(
-                    "   Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables"
+                logger.warning(f"Could not initialize Supabase client: {e}")
+                logger.warning(
+                    "Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables"
                 )
         else:
-            print("⚠️  Warning: Supabase environment variables not set")
-            print(
-                "   Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables"
+            logger.warning("Supabase environment variables not set")
+            logger.warning(
+                "Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables"
             )
 
         if settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY:
@@ -43,16 +52,16 @@ class SupabaseDB:
                 self.admin_client = create_client(
                     settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY
                 )
-                print("✓ Supabase admin client initialized successfully")
+                logger.info("Supabase admin client initialized successfully")
             except Exception as e:
-                print(f"⚠️  Warning: Could not initialize Supabase admin client: {e}")
-                print(
-                    "   Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables"
+                logger.warning(f"Could not initialize Supabase admin client: {e}")
+                logger.warning(
+                    "Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables"
                 )
         else:
-            print("⚠️  Warning: Supabase admin environment variables not set")
-            print(
-                "   Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables"
+            logger.warning("Supabase admin environment variables not set")
+            logger.warning(
+                "Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables"
             )
 
     def get_client(self) -> Client:
@@ -442,10 +451,10 @@ class SupabaseDB:
             if use_cache:
                 cached_records = cache.get("queries", cache_key)
                 if cached_records is not None:
-                    print(f"✅ Cache HIT for {table_name}: {len(cached_records)} records")
+                    _db_debug(f"Cache HIT for {table_name}: {len(cached_records)} records")
                     return cached_records
                 else:
-                    print(f"❌ Cache MISS for {table_name}, querying database...")
+                    _db_debug(f"Cache MISS for {table_name}, querying database...")
             
             # Build optimized query with specific columns
             start_time = time.time()
@@ -481,17 +490,17 @@ class SupabaseDB:
             records = result.data
             
             query_time = (time.time() - start_time) * 1000
-            print(f"🔍 DB Query for {table_name}: {query_time:.0f}ms, {len(records)} records")
+            _db_debug(f"DB Query for {table_name}: {query_time:.0f}ms, {len(records)} records")
             
             # Cache result with longer TTL for universities
             if use_cache:
                 cache_ttl = 600 if table_name == "university" else 300  # 10 minutes for universities
                 cache.set("queries", records, cache_key, ttl=cache_ttl)
-                print(f"💾 Cached {table_name}: TTL={cache_ttl}s")
+                _db_debug(f"Cached {table_name}: TTL={cache_ttl}s")
             
             return records
         except Exception as e:
-            print(f"❌ Error getting optimized records from {table_name}: {e}")
+            logger.error(f"Error getting optimized records from {table_name}: {e}")
             return []
 
     def get_records(
@@ -702,19 +711,19 @@ db = SupabaseDB()
 async def create_db_and_tables():
     """Initialize database tables in Supabase."""
     if not db.admin_client:
-        print(
-            "⚠️  Warning: Supabase admin client not initialized. Cannot create tables."
+        logger.warning(
+            "Supabase admin client not initialized. Cannot create tables."
         )
-        print(
-            "   Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables and restart the application."
+        logger.warning(
+            "Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables and restart the application."
         )
         return
 
     # Note: Default admin user creation removed
     # Admins should be created through the System User onboarding process
     # or manually via the Supabase dashboard with a valid university_id
-    print("✓ Database initialization complete")
-    print("   Note: Use System User to create universities and admins, or create manually in Supabase")
+    logger.info("Database initialization complete")
+    logger.info("Use System User to create universities and admins, or create manually in Supabase")
 
 
 # Dependency for FastAPI

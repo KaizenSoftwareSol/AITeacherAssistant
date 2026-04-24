@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import PlainTextResponse
 
 from logger import logger
 from routes_config import (admin_router, auth_router, course_router,
@@ -15,8 +16,11 @@ from routes_config import (admin_router, auth_router, course_router,
                            student_router, system_router, teacher_router,
                            user_router)
 from services.cache_service import cache, periodic_cache_cleanup
+from services.http_metrics import http_metrics
 from services.response_cache import setup_cache_middleware
 from services.performance_middleware import setup_performance_middleware
+from services.request_id_middleware import setup_request_id_middleware
+from utils.db import db
 from utils.db import create_db_and_tables
 
 
@@ -76,6 +80,7 @@ app.add_middleware(
 # Add performance monitoring middleware
 setup_cache_middleware(app)
 setup_performance_middleware(app)
+setup_request_id_middleware(app)
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -106,6 +111,31 @@ def health():
     Public health check endpoint (no auth required).
     """
     return {"status": "ok", "service": "ai-teacher-api"}
+
+
+@router.get("/ready")
+def ready():
+    """
+    Readiness probe for load testing and orchestration.
+    """
+    checks = {
+        "supabase_client": db.client is not None,
+        "supabase_admin_client": db.admin_client is not None,
+        "cache_service": cache is not None,
+    }
+    ready_state = all(checks.values())
+    return {
+        "status": "ready" if ready_state else "not_ready",
+        "checks": checks,
+    }
+
+
+@router.get("/metrics", response_class=PlainTextResponse)
+def metrics():
+    """
+    Prometheus-compatible HTTP metrics endpoint.
+    """
+    return PlainTextResponse(http_metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @router.get("/cache/stats")

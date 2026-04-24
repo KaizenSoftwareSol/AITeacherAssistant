@@ -11,7 +11,9 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from logger import logger
+from services.http_metrics import http_metrics
 from services.query_logger import get_query_logger
+from services.request_context import get_request_id
 
 
 class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
@@ -29,6 +31,8 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
     EXCLUDED_PATHS = {
         "/api/v1/health",
         "/api/v1/healthz",
+        "/api/v1/ready",
+        "/api/v1/metrics",
         "/docs",
         "/openapi.json",
         "/favicon.ico",
@@ -46,6 +50,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
         should_log = not any(path.startswith(excluded) for excluded in self.EXCLUDED_PATHS)
         
         start_time = time.perf_counter()
+        http_metrics.begin_request()
         
         # Get query logger
         query_logger = get_query_logger()
@@ -55,21 +60,27 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
+            http_metrics.end_request(request.method, path, 500, duration_ms / 1000.0)
             if should_log:
+                rid = get_request_id() or "-"
                 logger.error(
-                    f"REQUEST_ERROR: {request.method} {path} | "
+                    f"REQUEST_ERROR: rid={rid} {request.method} {path} | "
                     f"Duration: {duration_ms:.0f}ms | Error: {str(e)}"
                 )
             raise
         
         duration_ms = (time.perf_counter() - start_time) * 1000
+        status_code = response.status_code
+        route = request.scope.get("route")
+        metric_path = getattr(route, "path", path)
+        http_metrics.end_request(request.method, metric_path, status_code, duration_ms / 1000.0)
         
         # Log performance metrics
         if should_log:
             self._log_performance(
                 method=request.method,
                 path=path,
-                status_code=response.status_code,
+                status_code=status_code,
                 duration_ms=duration_ms,
                 query_logger=query_logger,
             )
@@ -88,6 +99,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
         query_logger,
     ):
         """Log performance metrics for a request."""
+        rid = get_request_id() or "-"
         
         queries = query_logger.queries
         total_queries = len(queries)
@@ -96,7 +108,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
             # No database queries
             if duration_ms > self.SLOW_REQUEST_THRESHOLD:
                 logger.warning(
-                    f"SLOW_REQUEST_NO_DB: {method} {path} | "
+                    f"SLOW_REQUEST_NO_DB: rid={rid} {method} {path} | "
                     f"Duration: {duration_ms:.0f}ms | Status: {status_code} | "
                     f"Reason: Likely application logic or external API calls"
                 )
@@ -131,7 +143,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
         if status_code >= 400:
             # Error responses
             logger.warning(
-                f"REQUEST_ERROR: {method} {path} | "
+                f"REQUEST_ERROR: rid={rid} {method} {path} | "
                 f"Status: {status_code} | Duration: {duration_ms:.0f}ms | "
                 f"Queries: {total_queries} ({total_query_ms:.0f}ms) | "
                 f"{query_summary}"
@@ -140,7 +152,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
         elif duration_ms > self.VERY_SLOW_REQUEST_THRESHOLD:
             # Very slow requests (> 2 seconds)
             logger.warning(
-                f"VERY_SLOW_REQUEST: {method} {path} | "
+                f"VERY_SLOW_REQUEST: rid={rid} {method} {path} | "
                 f"Duration: {duration_ms:.0f}ms | "
                 f"DB Time: {total_query_ms:.0f}ms ({db_time_percent:.1f}%) | "
                 f"Other: {other_time_ms:.0f}ms | "
@@ -161,7 +173,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
         elif duration_ms > self.SLOW_REQUEST_THRESHOLD:
             # Slow requests (> 1 second)
             logger.warning(
-                f"SLOW_REQUEST: {method} {path} | "
+                f"SLOW_REQUEST: rid={rid} {method} {path} | "
                 f"Duration: {duration_ms:.0f}ms | "
                 f"DB Time: {total_query_ms:.0f}ms ({db_time_percent:.1f}%) | "
                 f"Queries: {total_queries} "
@@ -180,7 +192,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
         elif len(very_slow_queries) > 0 or len(errored_queries) > 0:
             # Request OK but has slow or errored queries
             logger.info(
-                f"REQUEST_WITH_ISSUES: {method} {path} | "
+                f"REQUEST_WITH_ISSUES: rid={rid} {method} {path} | "
                 f"Duration: {duration_ms:.0f}ms | "
                 f"Queries: {total_queries} "
                 f"({len(very_slow_queries)} very slow, {len(slow_queries)} slow) | "
@@ -190,7 +202,7 @@ class DetailedPerformanceMiddleware(BaseHTTPMiddleware):
         else:
             # Normal request
             logger.debug(
-                f"REQUEST: {method} {path} | "
+                f"REQUEST: rid={rid} {method} {path} | "
                 f"Duration: {duration_ms:.0f}ms | "
                 f"Queries: {total_queries} ({total_query_ms:.0f}ms) | "
                 f"{query_summary}"

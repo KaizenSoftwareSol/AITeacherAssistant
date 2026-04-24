@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from logger import logger
+from services.request_context import get_request_id
 
 
 class QueryLogger:
@@ -55,18 +56,21 @@ class QueryLogger:
         
         # Log immediately with appropriate level
         if error:
+            rid = get_request_id() or "-"
             logger.error(
-                f"DB_QUERY_ERROR: {operation} on {table} failed: {error} "
+                f"DB_QUERY_ERROR: rid={rid} {operation} on {table} failed: {error} "
                 f"(took {duration_ms:.2f}ms)"
             )
         elif duration_ms > 500:
+            rid = get_request_id() or "-"
             logger.warning(
-                f"DB_QUERY_SLOW: {operation} on {table} took {duration_ms:.2f}ms "
+                f"DB_QUERY_SLOW: rid={rid} {operation} on {table} took {duration_ms:.2f}ms "
                 f"(rows: {rows_count}) | Filters: {self._format_filters(filters)}"
             )
         elif duration_ms > 100:
+            rid = get_request_id() or "-"
             logger.info(
-                f"DB_QUERY: {operation} on {table} took {duration_ms:.2f}ms "
+                f"DB_QUERY: rid={rid} {operation} on {table} took {duration_ms:.2f}ms "
                 f"(rows: {rows_count})"
             )
         else:
