@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import PlainTextResponse
+from prometheus_client import CONTENT_TYPE_LATEST
 
 from logger import logger
 from routes_config import (admin_router, auth_router, course_router,
@@ -135,7 +136,7 @@ def metrics():
     """
     Prometheus-compatible HTTP metrics endpoint.
     """
-    return PlainTextResponse(http_metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
+    return PlainTextResponse(http_metrics.render_prometheus(), media_type=CONTENT_TYPE_LATEST)
 
 
 @router.get("/cache/stats")
