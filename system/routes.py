@@ -201,7 +201,7 @@ async def list_universities(
                         admin_counts[univ_uuid] += 1
                         admin_users_map[univ_uuid].append(
                             AdminSummary(
-                                user_id=admin["id"],
+                                user_id=str(admin["id"]),
                                 email=admin["email"],
                                 username=admin["username"],
                                 first_name=admin.get("first_name", ""),
@@ -315,7 +315,7 @@ async def get_university(
         for admin in admins_result.data or []:
             admin_users.append(
                 AdminSummary(
-                    user_id=admin["id"],
+                    user_id=str(admin["id"]),
                     email=admin["email"],
                     username=admin["username"],
                     first_name=admin.get("first_name", ""),
@@ -328,7 +328,7 @@ async def get_university(
             )
 
         return UniversityDetail(
-            id=university["id"],
+            id=str(university.get("uuid") or university.get("id") or university_id),
             name=university["name"],
             location=university.get("location"),
             type=university.get("type", "GENERAL"),
@@ -894,21 +894,24 @@ async def list_all_admins(
 
         university_int_ids = list(set(a.get("university_id") for a in admins_result.data if a.get("university_id")))
 
-        # Convert integer IDs to UUIDs for get_records_batch
-        university_uuids = []
+        # Convert integer IDs to UUIDs for API response mapping
         int_to_uuid_map = {}
         for univ_int_id in university_int_ids:
             if univ_int_id:
                 univ_uuid = await IDConverter.int_to_uuid(db, "university", univ_int_id)
                 if univ_uuid:
-                    university_uuids.append(univ_uuid)
                     int_to_uuid_map[univ_int_id] = univ_uuid
 
-        # Get university names
+        # Get university names by integer IDs (PK is bigint)
         university_names = {}
-        if university_uuids:
-            universities = db.get_records_batch("university", university_uuids)
-            for univ in universities.values():
+        if university_int_ids:
+            universities_result = (
+                db.admin_client.table("university")
+                .select("id, name")
+                .in_("id", university_int_ids)
+                .execute()
+            )
+            for univ in universities_result.data or []:
                 university_names[univ["id"]] = univ.get("name", "")
         
         all_admins_data = admins_result.data
@@ -919,8 +922,7 @@ async def list_all_admins(
             filtered = []
             for admin in all_admins_data:
                 univ_int_id = admin.get("university_id")
-                univ_uuid = int_to_uuid_map.get(univ_int_id, "")
-                univ_name = university_names.get(univ_uuid, "")
+                univ_name = university_names.get(univ_int_id, "")
                 if (
                     search_lower in (admin.get("first_name") or "").lower()
                     or search_lower in (admin.get("last_name") or "").lower()
@@ -956,13 +958,13 @@ async def list_all_admins(
             univ_uuid = int_to_uuid_map.get(univ_int_id, "") if univ_int_id else ""
             admin_summaries.append(
                 AdminSummary(
-                    user_id=admin["id"],
+                    user_id=str(admin["id"]),
                     email=admin["email"],
                     username=admin["username"],
                     first_name=admin.get("first_name", ""),
                     last_name=admin.get("last_name", ""),
                     university_id=univ_uuid,
-                    university_name=university_names.get(univ_uuid, ""),
+                    university_name=university_names.get(univ_int_id, ""),
                     is_active=admin.get("is_active", True),
                     created_at=str(admin.get("created_at", "")),
                 )
