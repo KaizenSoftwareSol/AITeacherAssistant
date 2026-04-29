@@ -12,6 +12,7 @@ teacher_router = APIRouter(tags=["Teacher Resources"])
 notification_router = APIRouter(tags=["Notifications"])
 admin_router = APIRouter(tags=["Admin Management"])
 system_router = APIRouter(tags=["System Management"])
+feedback_router = APIRouter(prefix="/feedback", tags=["Feedback"])
 
 
 import admin.routes
@@ -24,3 +25,4 @@ import student.routes
 import user.routes
 import teacher.routes
 import notification.routes
+import feedback.routes
