@@ -1,4 +1,6 @@
 from datetime import datetime
+import re
+import unicodedata
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -53,6 +55,13 @@ def _validate_feedback_status_for_response(status_value: FeedbackStatus) -> None
         )
 
 
+def _sanitize_filename(filename: str) -> str:
+    normalized = unicodedata.normalize("NFKD", filename)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_name).strip("._")
+    return safe or "upload.png"
+
+
 async def _upload_attachments(
     user_uuid: str,
     feedback_uuid: str,
@@ -82,7 +91,8 @@ async def _upload_attachments(
                 detail=f"Image {file.filename} exceeds 5MB limit",
             )
 
-        file_key = f"{uuid4()}-{file.filename.replace(' ', '_')}"
+        safe_filename = _sanitize_filename(file.filename)
+        file_key = f"{uuid4()}-{safe_filename}"
         path = f"feedback/{user_uuid}/{feedback_uuid}/{file_key}"
         supabase.upload_file(
             FEEDBACK_BUCKET,
@@ -102,6 +112,19 @@ async def _upload_attachments(
         )
 
     return uploaded
+
+
+def _get_next_feedback_id(db) -> int:
+    latest = (
+        db.admin_client.table("feedback")
+        .select("id")
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if latest.data and len(latest.data) > 0:
+        return int(latest.data[0]["id"]) + 1
+    return 1
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -128,6 +151,7 @@ async def create_feedback(
     attachments = await _upload_attachments(user_uuid=user_uuid, feedback_uuid=feedback_uuid, files=screenshots)
 
     record = {
+        "id": _get_next_feedback_id(db),
         "uuid": feedback_uuid,
         "user_id": int(current_user.id),
         "user_role": current_user.role.value,
