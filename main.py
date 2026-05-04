@@ -15,6 +15,7 @@ from logger import logger
 from routes_config import (admin_router, auth_router, course_router,
                            document_router, lecture_router, notification_router,
                            student_router, system_router, teacher_router,
+                           feedback_router,
                            user_router)
 from services.cache_service import cache, periodic_cache_cleanup
 from services.http_metrics import http_metrics
@@ -199,5 +200,6 @@ app.include_router(lecture_router, prefix="/lectures")
 app.include_router(student_router, prefix="/student")
 app.include_router(teacher_router, prefix="/teacher")
 app.include_router(notification_router, prefix="/notifications")
+app.include_router(feedback_router)
 app.include_router(admin_router, prefix="/admin")
 app.include_router(system_router, prefix="/system")
