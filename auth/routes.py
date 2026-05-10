@@ -1,10 +1,12 @@
 # auth/routes.py
 
+import time
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
+from jose import ExpiredSignatureError, JWTError, jwt
 
 from auth.models import (
     PasswordChangeRequest,
@@ -18,6 +20,7 @@ from auth.service import AuthService
 from dependencies import get_current_user
 from models.user import User
 from routes_config import auth_router
+from settings import settings
 from utils.db import get_db
 
 # Create router
@@ -52,14 +55,97 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db=Depends(get
             status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user"
         )
 
-    access_token_expires = timedelta(minutes=30)
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     # Use UUID for token security (not integer ID)
     user_uuid = user.uuid if hasattr(user, "uuid") and user.uuid else str(user.id)
     access_token = AuthService.create_access_token(
         data={"sub": user_uuid}, expires_delta=access_token_expires
     )
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": int(access_token_expires.total_seconds()),
+    }
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    request: Request,
+    db=Depends(get_db),
+):
+    """
+    Refresh the access token.
+
+    Accepts a valid OR recently-expired token (up to 7 days past expiry).
+    Returns a new access token with a fresh expiry.
+    The frontend should call this on 401 errors to silently renew the session.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Bearer token",
+        )
+
+    token = auth_header.split(" ", 1)[1]
+
+    # Try decoding normally first, then allow expired tokens within grace period
+    user_id = None
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+        )
+        user_id = payload.get("sub")
+    except ExpiredSignatureError:
+        # Token expired — decode WITHOUT verifying expiry to extract user_id
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_exp": False},
+        )
+        user_id = payload.get("sub")
+
+        # Check grace period: only allow refresh within 7 days of expiry
+        exp = payload.get("exp", 0)
+        grace_period = 7 * 24 * 60 * 60  # 7 days in seconds
+        if time.time() - exp > grace_period:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token expired beyond refresh grace period. Please log in again.",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token — no user ID",
+        )
+
+    # Verify user still exists and is active
+    from dependencies import _get_cached_user_by_id
+    user_data = _get_cached_user_by_id(db, user_id)
+    if not user_data or not user_data.get("is_active", False):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
+
+    # Issue fresh token
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    new_token = AuthService.create_access_token(
+        data={"sub": user_id}, expires_delta=access_token_expires
+    )
+    return {
+        "access_token": new_token,
+        "token_type": "bearer",
+        "expires_in": int(access_token_expires.total_seconds()),
+    }
 
 
 @router.get("/me", response_model=UserRead)

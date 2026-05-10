@@ -76,6 +76,7 @@ class Token(BaseModel):
 
     access_token: str
     token_type: str
+    expires_in: int  # Seconds until token expires
 
 
 class TokenData(BaseModel):
