@@ -2,10 +2,12 @@
 
 import secrets
 import string
+from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from admin.models import ActivityLogEntry, ActivityLogResponse
 from auth.models import UserCreate
 from auth.service import AuthService
 from dependencies import SystemUser
@@ -201,12 +203,12 @@ async def list_universities(
                         admin_counts[univ_uuid] += 1
                         admin_users_map[univ_uuid].append(
                             AdminSummary(
-                                user_id=admin["id"],
+                                user_id=str(admin["id"]),
                                 email=admin["email"],
                                 username=admin["username"],
                                 first_name=admin.get("first_name", ""),
                                 last_name=admin.get("last_name", ""),
-                                university_id=univ_uuid,
+                                university_id=str(univ_uuid),
                                 university_name="",  # Will be populated below
                                 is_active=admin.get("is_active", True),
                                 created_at=str(admin.get("created_at", "")),
@@ -315,12 +317,12 @@ async def get_university(
         for admin in admins_result.data or []:
             admin_users.append(
                 AdminSummary(
-                    user_id=admin["id"],
+                    user_id=str(admin["id"]),
                     email=admin["email"],
                     username=admin["username"],
                     first_name=admin.get("first_name", ""),
                     last_name=admin.get("last_name", ""),
-                    university_id=university_id,
+                    university_id=str(university_id),
                     university_name=university["name"],
                     is_active=admin.get("is_active", True),
                     created_at=str(admin.get("created_at", "")),
@@ -904,12 +906,19 @@ async def list_all_admins(
                     university_uuids.append(univ_uuid)
                     int_to_uuid_map[univ_int_id] = univ_uuid
 
-        # Get university names
+        # Get university names — query by integer IDs since id column is BIGINT
         university_names = {}
-        if university_uuids:
-            universities = db.get_records_batch("university", university_uuids)
-            for univ in universities.values():
-                university_names[univ["id"]] = univ.get("name", "")
+        if university_int_ids:
+            unis_result = (
+                db.admin_client.table("university")
+                .select("id, name")
+                .in_("id", list(university_int_ids))
+                .execute()
+            )
+            for univ in unis_result.data or []:
+                univ_uuid = int_to_uuid_map.get(univ["id"])
+                if univ_uuid:
+                    university_names[univ_uuid] = univ.get("name", "")
         
         all_admins_data = admins_result.data
         
@@ -956,12 +965,12 @@ async def list_all_admins(
             univ_uuid = int_to_uuid_map.get(univ_int_id, "") if univ_int_id else ""
             admin_summaries.append(
                 AdminSummary(
-                    user_id=admin["id"],
+                    user_id=str(admin["id"]),
                     email=admin["email"],
                     username=admin["username"],
                     first_name=admin.get("first_name", ""),
                     last_name=admin.get("last_name", ""),
-                    university_id=univ_uuid,
+                    university_id=str(univ_uuid),
                     university_name=university_names.get(univ_uuid, ""),
                     is_active=admin.get("is_active", True),
                     created_at=str(admin.get("created_at", "")),
@@ -1037,6 +1046,142 @@ async def delete_admin_user(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error deleting admin user",
+        ) from e
+
+
+_SYS_TEACHER_TYPES = frozenset({
+    "LOGIN", "GENERATE_LECTURE", "GENERATE_LEARNING_MATERIALS",
+    "DELETE_LECTURE", "PUBLISH_LECTURE", "GENERATE_ASSESSMENT", "DELETE_ASSESSMENT",
+})
+_SYS_STUDENT_TYPES = frozenset({
+    "STUDENT_LOGIN", "STUDENT_TAKE_ASSESSMENT", "STUDENT_TAKE_QUIZ",
+    "STUDENT_CHAT", "STUDENT_DOWNLOAD", "STUDENT_GENERATE_QUIZ",
+})
+
+
+@router.get("/activity-log", response_model=ActivityLogResponse)
+async def get_system_activity_log(
+    current_user: SystemUser,
+    db=Depends(get_db),
+    university_id: str = Query(..., description="University ID (UUID or integer string)"),
+    user_type: str = Query("teacher", description="teacher | student"),
+    teacher_id: Optional[int] = Query(None, description="Filter by teacher integer ID"),
+    activity_type: Optional[str] = Query(None, description="Filter by specific activity type"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """
+    Return paginated activity log for any university (system user only).
+    Accepts university_id as either a UUID string or integer string.
+    """
+    try:
+        # Resolve UUID to integer ID (teacher_activity_log stores integer university_id)
+        if IDConverter.is_uuid(university_id):
+            univ_int_id = await IDConverter.uuid_to_int(db, "university", university_id)
+            if not univ_int_id:
+                return ActivityLogResponse(
+                    items=[], total=0, page=page, page_size=page_size,
+                    total_pages=1, has_next=False, has_previous=False,
+                )
+        else:
+            try:
+                univ_int_id = int(university_id)
+            except ValueError:
+                return ActivityLogResponse(
+                    items=[], total=0, page=page, page_size=page_size,
+                    total_pages=1, has_next=False, has_previous=False,
+                )
+
+        is_student_view = user_type.lower() == "student"
+        allowed_types = _SYS_STUDENT_TYPES if is_student_view else _SYS_TEACHER_TYPES
+
+        base_q = (
+            db.get_admin_client()
+            .table("teacher_activity_log")
+            .select("*", count="exact")
+            .eq("university_id", univ_int_id)
+            .order("created_at", desc=True)
+        )
+
+        type_or = ",".join(f"activity_type.eq.{t}" for t in sorted(allowed_types))
+        query = base_q.or_(type_or)
+
+        if teacher_id and not is_student_view:
+            query = query.eq("teacher_id", teacher_id)
+
+        if activity_type:
+            at = activity_type.upper()
+            if at in allowed_types:
+                query = query.eq("activity_type", at)
+
+        offset = (page - 1) * page_size
+        query = query.range(offset, offset + page_size - 1)
+
+        result = query.execute()
+        rows = result.data or []
+        total = result.count or 0
+
+        logger.info(
+            f"[SystemActivityLog] university={univ_int_id} user_type={user_type} "
+            f"rows={len(rows)} total={total}"
+        )
+
+        # Enrich with user names
+        user_ids = list({r["user_id"] for r in rows if r.get("user_id")})
+        user_map: dict = {}
+        if user_ids:
+            users_result = (
+                db.get_admin_client()
+                .table("users")
+                .select("id, first_name, last_name, email")
+                .in_("id", user_ids)
+                .execute()
+            )
+            for u in users_result.data or []:
+                user_map[u["id"]] = u
+
+        items = []
+        for r in rows:
+            uid = r.get("user_id")
+            u = user_map.get(uid, {})
+            full_name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or None
+            email = u.get("email")
+
+            items.append(
+                ActivityLogEntry(
+                    id=r["id"],
+                    user_id=uid,
+                    university_id=r.get("university_id"),
+                    activity_type=r["activity_type"],
+                    lecture_id=r.get("lecture_id"),
+                    lecture_name=r.get("lecture_name"),
+                    metadata=r.get("metadata"),
+                    created_at=r["created_at"],
+                    teacher_id=r.get("teacher_id") if not is_student_view else None,
+                    teacher_name=full_name if not is_student_view else None,
+                    teacher_email=email if not is_student_view else None,
+                    student_id=r.get("student_id") if is_student_view else None,
+                    student_name=full_name if is_student_view else None,
+                    student_email=email if is_student_view else None,
+                )
+            )
+
+        total_pages = max(1, -(-total // page_size))
+        return ActivityLogResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_previous=page > 1,
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching system activity log: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching activity log",
         ) from e
 
 

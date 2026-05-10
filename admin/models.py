@@ -265,6 +265,41 @@ class AIChatUsageStats(BaseModel):
     usage_by_student: List[AIChatUsageSummary] = []
 
 
+class ActivityLogEntry(BaseModel):
+    """A single teacher or student activity log entry."""
+
+    id: int
+    # Teacher fields (populated for TEACHER activity types)
+    teacher_id: Optional[int] = None
+    teacher_name: Optional[str] = None
+    teacher_email: Optional[str] = None
+    # Student fields (populated for STUDENT_* activity types)
+    student_id: Optional[int] = None
+    student_name: Optional[str] = None
+    student_email: Optional[str] = None
+    # Common fields
+    user_id: Optional[int] = None
+    university_id: Optional[int] = None
+    activity_type: str
+    # Content reference — lecture for teacher events; assessment/lecture for student events
+    lecture_id: Optional[int] = None
+    lecture_name: Optional[str] = None
+    metadata: Optional[dict] = None
+    created_at: datetime
+
+
+class ActivityLogResponse(BaseModel):
+    """Paginated activity log (teacher or student)."""
+
+    items: List[ActivityLogEntry]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+
+
 # Update forward references
 TeacherSummary.model_rebuild()
 CourseSummary.model_rebuild()

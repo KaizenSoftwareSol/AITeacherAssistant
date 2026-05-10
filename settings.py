@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
     SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    # Direct Postgres connection string — get from Supabase dashboard under
+    # Project Settings > Database > Connection string > URI (use the "Session" mode URL).
+    # Required only for running migrations. Format:
+    #   postgresql://postgres:[password]@db.[project-ref].supabase.co:5432/postgres
+    SUPABASE_DB_URL: str = os.getenv("SUPABASE_DB_URL", "")
 
     # Authentication
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440 # 1 day

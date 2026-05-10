@@ -709,7 +709,7 @@ db = SupabaseDB()
 
 
 async def create_db_and_tables():
-    """Initialize database tables in Supabase."""
+    """Initialize database tables and run pending migrations."""
     if not db.admin_client:
         logger.warning(
             "Supabase admin client not initialized. Cannot create tables."
@@ -719,11 +719,21 @@ async def create_db_and_tables():
         )
         return
 
-    # Note: Default admin user creation removed
-    # Admins should be created through the System User onboarding process
-    # or manually via the Supabase dashboard with a valid university_id
+    # Run SQL migrations automatically if SUPABASE_DB_URL is configured
+    try:
+        from settings import settings as _settings
+        if _settings.SUPABASE_DB_URL:
+            from scripts.run_migrations import run_migrations
+            run_migrations()
+        else:
+            logger.info(
+                "SUPABASE_DB_URL not set — skipping automatic migrations. "
+                "Run `python scripts/run_migrations.py` manually to apply pending migrations."
+            )
+    except Exception as migration_exc:
+        logger.error(f"Migration runner error (non-fatal): {migration_exc}")
+
     logger.info("Database initialization complete")
-    logger.info("Use System User to create universities and admins, or create manually in Supabase")
 
 
 # Dependency for FastAPI
