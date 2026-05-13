@@ -17,6 +17,7 @@ from routes_config import (admin_router, auth_router, course_router,
                            student_router, system_router, teacher_router,
                            feedback_router,
                            user_router)
+from services.activity_log_middleware import ActivityLogMiddleware
 from services.cache_service import cache, periodic_cache_cleanup
 from services.http_metrics import http_metrics
 from services.response_cache import setup_cache_middleware
@@ -83,6 +84,9 @@ app.add_middleware(
 setup_cache_middleware(app)
 setup_performance_middleware(app)
 setup_request_id_middleware(app)
+
+# Activity logging middleware (fire-and-forget, never blocks responses)
+app.add_middleware(ActivityLogMiddleware)
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")

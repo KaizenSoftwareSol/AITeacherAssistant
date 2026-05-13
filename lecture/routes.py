@@ -676,6 +676,7 @@ async def delete_lecture(
         logger.info(
             f"Successfully deleted lecture {lecture_id} and all associated data"
         )
+
         return None
 
     except HTTPException:
@@ -1165,7 +1166,7 @@ async def generate_lecture_summary(
                 )
         
         db.update_record("lecture", lecture_int_id, {"summary": summary})
-        
+
         logger.info(f"Summary generated for lecture {lecture_id}")
 
         return {

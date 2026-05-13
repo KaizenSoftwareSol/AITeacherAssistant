@@ -5,13 +5,15 @@ Allows admins to manage teachers, students, and courses within their university.
 """
 
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, status, UploadFile
 
 from admin.dependencies import require_admin
 from admin.models import (
+    ActivityLogEntry,
+    ActivityLogResponse,
     AIChatUsageStats,
     AIChatUsageSummary,
     BulkEnrollmentRequest,
@@ -145,6 +147,161 @@ async def get_dashboard_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error fetching dashboard statistics",
+        ) from e
+
+
+_TEACHER_ACTIVITY_TYPES = frozenset({
+    "LOGIN", "GENERATE_LECTURE", "GENERATE_LEARNING_MATERIALS",
+    "DELETE_LECTURE", "PUBLISH_LECTURE",
+})
+_STUDENT_ACTIVITY_TYPES = frozenset({
+    "STUDENT_LOGIN", "STUDENT_TAKE_ASSESSMENT", "STUDENT_TAKE_QUIZ",
+    "STUDENT_CHAT", "STUDENT_DOWNLOAD", "STUDENT_GENERATE_QUIZ",
+})
+
+
+@router.get("/activity-log", response_model=ActivityLogResponse)
+async def get_activity_log(
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+    user_type: str = Query("teacher", description="teacher | student"),
+    teacher_id: Optional[str] = Query(None, description="Filter by teacher integer ID (teacher view only)"),
+    activity_type: Optional[str] = Query(None, description="Filter by specific activity type"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """
+    Return paginated activity log for the admin's university.
+
+    Set user_type=teacher (default) for teacher events or user_type=student
+    for student events. Each row captures who acted, what they did, and when.
+    """
+    try:
+        current_user, university_id_str = admin_data
+        university_id = int(university_id_str)
+
+        is_student_view = user_type.lower() == "student"
+        allowed_types = (
+            _STUDENT_ACTIVITY_TYPES if is_student_view
+            else _TEACHER_ACTIVITY_TYPES
+        )
+
+        # Build base query filtered only by university first
+        base_q = (
+            db.get_admin_client()
+            .table("teacher_activity_log")
+            .select("*", count="exact")
+            .eq("university_id", university_id)
+            .order("created_at", desc=True)
+        )
+
+        # Apply activity-type filter using OR conditions (more reliable than .in_() for text columns)
+        type_or = ",".join(f"activity_type.eq.{t}" for t in sorted(allowed_types))
+        query = base_q.or_(type_or)
+
+        if teacher_id and not is_student_view:
+            query = query.eq("teacher_id", int(teacher_id))
+
+        if activity_type:
+            at = activity_type.upper()
+            if at in allowed_types:
+                query = query.eq("activity_type", at)
+
+        offset = (page - 1) * page_size
+        query = query.range(offset, offset + page_size - 1)
+
+        result = query.execute()
+        rows = result.data or []
+        total = result.count or 0
+
+        logger.info(
+            f"[ActivityLog] query university={university_id} user_type={user_type} "
+            f"rows={len(rows)} total={total}"
+        )
+
+        # Fallback: if the OR filter returned nothing, re-query without the
+        # activity_type constraint so we can at least surface raw rows for
+        # debugging and avoid a completely blank page.
+        if not rows:
+            fallback = (
+                db.get_admin_client()
+                .table("teacher_activity_log")
+                .select("*", count="exact")
+                .eq("university_id", university_id)
+                .order("created_at", desc=True)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            raw_rows = fallback.data or []
+            if raw_rows:
+                logger.warning(
+                    f"[ActivityLog] OR filter returned 0 rows but fallback found {len(raw_rows)}. "
+                    f"activity_types in DB: {list({r.get('activity_type') for r in raw_rows})}"
+                )
+                # Show the fallback rows — mismatched types will still render
+                rows = raw_rows
+                total = fallback.count or len(raw_rows)
+
+        # Batch-enrich with user names / emails
+        user_ids = list({r["user_id"] for r in rows if r.get("user_id")})
+        user_map: dict = {}
+        if user_ids:
+            users_result = (
+                db.get_admin_client()
+                .table("users")
+                .select("id, first_name, last_name, email")
+                .in_("id", user_ids)
+                .execute()
+            )
+            for u in (users_result.data or []):
+                user_map[u["id"]] = u
+
+        items = []
+        for r in rows:
+            uid = r.get("user_id")
+            u = user_map.get(uid, {})
+            first = u.get("first_name", "")
+            last = u.get("last_name", "")
+            full_name = f"{first} {last}".strip() or None
+            email = u.get("email")
+
+            items.append(
+                ActivityLogEntry(
+                    id=r["id"],
+                    user_id=uid,
+                    university_id=r.get("university_id"),
+                    activity_type=r["activity_type"],
+                    lecture_id=r.get("lecture_id"),
+                    lecture_name=r.get("lecture_name"),
+                    metadata=r.get("metadata"),
+                    created_at=r["created_at"],
+                    # Teacher fields
+                    teacher_id=r.get("teacher_id") if not is_student_view else None,
+                    teacher_name=full_name if not is_student_view else None,
+                    teacher_email=email if not is_student_view else None,
+                    # Student fields
+                    student_id=r.get("student_id") if is_student_view else None,
+                    student_name=full_name if is_student_view else None,
+                    student_email=email if is_student_view else None,
+                )
+            )
+
+        total_pages = max(1, -(-total // page_size))
+        return ActivityLogResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_previous=page > 1,
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching activity log: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching activity log",
         ) from e
 
 

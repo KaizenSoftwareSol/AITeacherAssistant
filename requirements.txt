@@ -28,3 +28,5 @@ python-dotenv
 Pillow>=10.0.0
 # Optional: Redis for distributed caching (uses in-memory LRU if not installed)
 redis>=4.5.0
+streamlit>=1.35.0
+plotly>=5.20.0
