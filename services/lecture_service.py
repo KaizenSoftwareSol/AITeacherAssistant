@@ -1,17 +1,22 @@
 # services/lecture_service.py
 
+import base64
 import json
 import re
 from datetime import datetime
 from io import BytesIO
 
+import httpx
 from fastapi import HTTPException, status
 from openai import OpenAI
+from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from logger import logger
 from settings import settings
@@ -19,6 +24,119 @@ from supabase_config import BUCKETS, supabase
 from models.document import DocumentType
 from services.document_parser import DocumentParser
 from utils.id_converter import IDConverter
+
+# Register fonts: Tahoma for body text, Segoe UI Emoji for emoji glyphs
+_FONTS_REGISTERED = False
+_HAS_EMOJI_FONT = False
+def _register_pdf_fonts():
+    global _FONTS_REGISTERED, _HAS_EMOJI_FONT
+    if _FONTS_REGISTERED:
+        return
+    try:
+        # Tahoma — body text with broad Unicode coverage
+        pdfmetrics.registerFont(TTFont("Tahoma", "C:/Windows/Fonts/tahoma.ttf"))
+        pdfmetrics.registerFont(TTFont("TahomaBold", "C:/Windows/Fonts/tahomabd.ttf"))
+        _FONTS_REGISTERED = True
+    except Exception as e:
+        logger.warning(f"Could not register Tahoma fonts: {e}")
+
+    try:
+        # Segoe UI Emoji — full coverage of modern emojis (monochrome in ReportLab)
+        pdfmetrics.registerFont(TTFont("SegoeEmoji", "C:/Windows/Fonts/seguiemj.ttf"))
+        _HAS_EMOJI_FONT = True
+    except Exception as e:
+        logger.warning(f"Could not register Segoe UI Emoji: {e}")
+
+
+# Emoji Unicode ranges (commonly used in lectures)
+_EMOJI_RANGES = [
+    (0x2190, 0x21FF),    # Arrows
+    (0x2300, 0x23FF),    # Misc Technical
+    (0x2460, 0x24FF),    # Enclosed Alphanumerics
+    (0x2500, 0x257F),    # Box Drawing
+    (0x2580, 0x259F),    # Block Elements
+    (0x25A0, 0x25FF),    # Geometric Shapes
+    (0x2600, 0x26FF),    # Miscellaneous Symbols
+    (0x2700, 0x27BF),    # Dingbats
+    (0x2900, 0x297F),    # Supplemental Arrows-B
+    (0x2B00, 0x2BFF),    # Misc Symbols and Arrows
+    (0x1F300, 0x1F5FF),  # Misc Symbols and Pictographs
+    (0x1F600, 0x1F64F),  # Emoticons
+    (0x1F680, 0x1F6FF),  # Transport and Map
+    (0x1F700, 0x1F77F),  # Alchemical Symbols
+    (0x1F900, 0x1F9FF),  # Supplemental Symbols and Pictographs
+    (0x1FA70, 0x1FAFF),  # Symbols and Pictographs Extended-A
+]
+
+
+def _is_emoji_char(ch: str) -> bool:
+    """Check if a character is in an emoji range."""
+    code = ord(ch)
+    return any(lo <= code <= hi for lo, hi in _EMOJI_RANGES)
+
+
+def _wrap_emojis_with_font(text: str) -> str:
+    """
+    Wrap emoji characters in <font name='SegoeEmoji'> tags so ReportLab renders them.
+    Variation selectors (U+FE0F) are kept attached to the preceding emoji.
+    """
+    if not _HAS_EMOJI_FONT or not text:
+        return text
+
+    result = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if _is_emoji_char(ch):
+            # Collect the emoji + any trailing variation selector
+            emoji_seq = ch
+            j = i + 1
+            while j < len(text) and 0xFE00 <= ord(text[j]) <= 0xFE0F:
+                emoji_seq += text[j]
+                j += 1
+            result.append(f'<font name="SegoeEmoji">{emoji_seq}</font>')
+            i = j
+        else:
+            result.append(ch)
+            i += 1
+    return "".join(result)
+
+
+def _escape_xml(text: str) -> str:
+    """Escape XML special chars for ReportLab Paragraph."""
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _markdown_inline_to_html(text: str) -> str:
+    """
+    Convert inline markdown (bold, italic, code) to ReportLab-compatible HTML,
+    escape XML special chars, and wrap emoji glyphs in the emoji font.
+    """
+    if not text:
+        return ""
+    # Wrap emojis in font tags FIRST (before XML escape adds entities)
+    text = _wrap_emojis_with_font(text)
+    # Escape XML special chars (but preserve our font/b/i tags)
+    # Strategy: split on our tags, escape only the text parts
+    parts = re.split(r"(<font name=\"SegoeEmoji\">.*?</font>)", text)
+    escaped_parts = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:  # Inside font tag — keep as-is
+            escaped_parts.append(part)
+        else:
+            escaped_parts.append(_escape_xml(part))
+    text = "".join(escaped_parts)
+    # Bold: **text** or __text__
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+    # Italic: *text* or _text_ (must not match bold markers)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", text)
+    # Inline code: `code`
+    text = re.sub(r"`([^`]+)`", r'<font name="Courier" size="10">\1</font>', text)
+    return text
 
 
 class LectureService:
@@ -531,6 +649,54 @@ The lecture should be written **as if the teacher is speaking to the class**, gu
 - **Self-explanatory** - Concepts should be explained fully without requiring external references
 - **Clearly understandable** - Use accessible language appropriate for undergraduate students
 - **Rich in examples and analogies** - Use concrete examples and meaningful analogies to help students grasp abstract concepts
+- **Visually engaging** - Use emojis, tables, and flowcharts where they enhance understanding (see VISUAL FORMATTING below)
+
+**VISUAL FORMATTING (USE WHERE IT IMPROVES CLARITY):**
+
+1. **EMOJIS** — Use sparingly to add visual cues. Suggested usage:
+   - 🎯 Learning objectives, key goals
+   - 📌 Important points to remember
+   - 💡 Key insights, "aha" moments, tips
+   - ⚠️ Warnings, common mistakes, things to watch out for
+   - 📊 Data/statistics being introduced
+   - 🔬 Experiments, scientific procedures
+   - ❓ Thought-provoking questions ("Ask yourself" sections)
+   - ✅ Correct examples, confirmed facts
+   - 🧠 Brainstorming/thinking activities
+   - 📝 Summary/recap sections
+   Use 1 emoji per relevant header or callout — DO NOT overuse them.
+
+2. **MARKDOWN TABLES** — Use when comparing items, listing properties, showing classifications, or organizing structured data. Format:
+   ```
+   | Column 1 | Column 2 | Column 3 |
+   |----------|----------|----------|
+   | Value A  | Value B  | Value C  |
+   | Value D  | Value E  | Value F  |
+   ```
+   Tables MUST be in this exact markdown format with pipe separators and a header divider row.
+
+3. **MERMAID FLOWCHARTS** — Use for processes, decision trees, hierarchies, cycles, or system overviews. Wrap in fenced code blocks with `mermaid` language tag:
+   ```mermaid
+   flowchart TD
+       A[Start] --> B{{Decision}}
+       B -->|Yes| C[Action 1]
+       B -->|No| D[Action 2]
+       C --> E[End]
+       D --> E
+   ```
+   Use mermaid syntax: `flowchart TD` (top-down), `flowchart LR` (left-right), `graph`, etc. Keep diagrams simple — 5-10 nodes max for readability.
+   **CRITICAL mermaid rules to avoid render errors:**
+   - Keep node labels SHORT and SIMPLE (2-5 words max).
+   - DO NOT use parentheses `()`, brackets `[]`, braces `{{}}`, ampersands `&`, slashes `/`, semicolons `;`, or quotes inside node labels — these break mermaid rendering.
+   - If you must include special characters, wrap the entire label in double quotes: `A["Label with (special) chars"]`
+   - Avoid line breaks inside labels.
+   - Each line must be a complete edge or node definition.
+
+**WHEN TO USE VISUALS:**
+- Insert **at least 1-2 tables** if the topic involves comparisons, classifications, properties, or structured data
+- Insert **at least 1 flowchart** if the topic involves processes, cycles, mechanisms, or step-by-step procedures
+- Use emojis at section headers and key callouts throughout
+- Place visuals AFTER the relevant explanation, not before
 
 **IMPORTANT: This lecture should be designed for approximately 45 minutes of delivery time.** The content should be substantial, detailed, and comprehensive enough to fill this duration when spoken at a natural teaching pace.
 
@@ -702,20 +868,215 @@ BEGIN THE LECTURE NOW:
         return text
 
     @staticmethod
+    def _sanitize_mermaid(mermaid_code: str) -> str:
+        """
+        Auto-fix common mermaid rendering issues by wrapping problematic node labels in quotes.
+
+        Mermaid breaks on `()`, `&`, `;`, `/` inside `[label]`, `{label}`, or `(label)`.
+        We detect such labels and wrap their inner text in double quotes.
+        """
+        problem_chars = re.compile(r'[()&;/]')
+
+        def fix_label(match):
+            opener = match.group(1)  # [, {, or (
+            label = match.group(2)
+            closer = match.group(3)
+            # Already quoted? Skip
+            if label.startswith('"') and label.endswith('"'):
+                return match.group(0)
+            # Has problematic chars? Wrap in quotes
+            if problem_chars.search(label):
+                # Escape any existing double quotes
+                safe_label = label.replace('"', "'")
+                return f'{opener}"{safe_label}"{closer}'
+            return match.group(0)
+
+        # Match node labels: A[label], B{label}, C(label), C((label)), C{{label}}
+        # We handle the simple cases: [...], {...}, (...)
+        # Use non-greedy to handle multiple nodes on same line
+        for pattern in [
+            r'(\[)([^\[\]\n"]+?)(\])',
+            r'(\{)([^\{\}\n"]+?)(\})',
+            r'(\()([^\(\)\n"]+?)(\))',
+        ]:
+            mermaid_code = re.sub(pattern, fix_label, mermaid_code)
+
+        return mermaid_code
+
+    @staticmethod
+    def _fetch_mermaid_image(mermaid_code: str) -> bytes | None:
+        """
+        Convert a mermaid diagram to PNG bytes using mermaid.ink public API.
+
+        Tries the original code first; if it fails with 400, sanitizes the code
+        (wraps labels with special chars in quotes) and retries.
+        """
+        def _try_fetch(code: str) -> tuple[int, bytes | None]:
+            try:
+                encoded = base64.urlsafe_b64encode(code.encode("utf-8")).decode("ascii")
+                url = f"https://mermaid.ink/img/{encoded}?type=png&bgColor=FFFFFF"
+                response = httpx.get(url, timeout=20)
+                return response.status_code, response.content if response.status_code == 200 else None
+            except Exception as e:
+                logger.warning(f"Mermaid fetch error: {e}")
+                return 0, None
+
+        status_code, content = _try_fetch(mermaid_code)
+        if content:
+            return content
+
+        # Retry with sanitization if first attempt failed with a client error
+        if status_code in (400, 422):
+            sanitized = LectureService._sanitize_mermaid(mermaid_code)
+            if sanitized != mermaid_code:
+                logger.info("Retrying mermaid render with sanitized labels")
+                status_code, content = _try_fetch(sanitized)
+                if content:
+                    return content
+
+        logger.warning(f"Mermaid render failed: status={status_code}")
+        return None
+
+    @staticmethod
+    def _parse_markdown_table(table_text: str) -> list[list[str]] | None:
+        """
+        Parse a markdown table into a list of rows.
+
+        Returns None if the text isn't a valid markdown table.
+        """
+        lines = [l.strip() for l in table_text.strip().split("\n") if l.strip()]
+        if len(lines) < 2:
+            return None
+
+        # Validate: must have header and divider with pipes
+        if "|" not in lines[0] or "|" not in lines[1]:
+            return None
+        # Divider line should be like |---|---|
+        if not re.match(r"^\|?\s*[-:]+(\s*\|\s*[-:]+)+\s*\|?\s*$", lines[1]):
+            return None
+
+        rows = []
+        for i, line in enumerate(lines):
+            if i == 1:  # Skip divider
+                continue
+            # Strip leading/trailing pipes, then split
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            rows.append(cells)
+        return rows if rows else None
+
+    @staticmethod
+    def _build_reportlab_table(rows: list[list[str]], font_regular: str, font_bold: str) -> Table:
+        """Build a styled ReportLab Table from parsed rows."""
+        # Wrap each cell in a Paragraph for proper text wrapping
+        cell_style = ParagraphStyle(
+            "TableCell",
+            fontName=font_regular,
+            fontSize=9,
+            leading=11,
+            textColor=colors.HexColor("#333333"),
+        )
+        header_style = ParagraphStyle(
+            "TableHeader",
+            fontName=font_bold,
+            fontSize=10,
+            leading=12,
+            textColor=colors.white,
+            alignment=TA_CENTER,
+        )
+        wrapped_rows = []
+        for i, row in enumerate(rows):
+            style = header_style if i == 0 else cell_style
+            wrapped_rows.append([
+                Paragraph(_markdown_inline_to_html(cell), style) for cell in row
+            ])
+
+        # Compute column widths to fit page
+        page_width = 6.5 * inch  # letter width minus margins
+        col_count = max(len(r) for r in rows)
+        col_width = page_width / col_count
+
+        table = Table(wrapped_rows, colWidths=[col_width] * col_count, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#bdc3c7")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f7fa")]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        return table
+
+    @staticmethod
+    def _split_content_into_blocks(content: str) -> list[dict]:
+        """
+        Split lecture content into typed blocks: text, table, mermaid.
+
+        Returns a list of {"type": "text|table|mermaid", "content": str} dicts.
+        """
+        blocks = []
+        # Pattern for fenced code blocks (mermaid) and tables
+        # Mermaid: ```mermaid\n...\n```
+        mermaid_pattern = re.compile(r"```mermaid\s*\n(.*?)\n```", re.DOTALL)
+        # Table: lines starting with | and containing a divider row
+        table_pattern = re.compile(
+            r"(^\|.+\|\s*$\n^\|?\s*[-:]+(\s*\|\s*[-:]+)+\s*\|?\s*$\n(?:^\|.+\|\s*$\n?)+)",
+            re.MULTILINE,
+        )
+
+        # Find all special blocks with their positions
+        special_blocks = []
+        for m in mermaid_pattern.finditer(content):
+            special_blocks.append((m.start(), m.end(), "mermaid", m.group(1).strip()))
+        for m in table_pattern.finditer(content):
+            special_blocks.append((m.start(), m.end(), "table", m.group(1).strip()))
+
+        # Sort by start position
+        special_blocks.sort(key=lambda x: x[0])
+
+        # Walk through content, alternating text and special blocks
+        cursor = 0
+        for start, end, btype, text in special_blocks:
+            if start > cursor:
+                text_chunk = content[cursor:start].strip()
+                if text_chunk:
+                    blocks.append({"type": "text", "content": text_chunk})
+            blocks.append({"type": btype, "content": text})
+            cursor = end
+
+        if cursor < len(content):
+            remaining = content[cursor:].strip()
+            if remaining:
+                blocks.append({"type": "text", "content": remaining})
+
+        if not blocks:
+            blocks.append({"type": "text", "content": content})
+        return blocks
+
+    @staticmethod
     def create_pdf(title: str, content: str) -> bytes:
         """
-        Create a PDF from lecture content.
+        Create a PDF from lecture content with support for tables,
+        mermaid flowcharts, and emojis.
 
         Args:
             title: Lecture title
-            content: Lecture content
+            content: Lecture content (markdown-style)
 
         Returns:
             PDF file as bytes
         """
         try:
             logger.info("Creating PDF from lecture content")
-            
+
+            # Register Tahoma fonts for emoji support
+            _register_pdf_fonts()
+            font_regular = "Tahoma" if _FONTS_REGISTERED else "Helvetica"
+            font_bold = "TahomaBold" if _FONTS_REGISTERED else "Helvetica-Bold"
+
             # Normalize text to prevent black box rendering of special characters
             title = LectureService._normalize_text_for_pdf(title)
             content = LectureService._normalize_text_for_pdf(content)
@@ -733,85 +1094,145 @@ BEGIN THE LECTURE NOW:
                 bottomMargin=18,
             )
 
-            # Container for the 'Flowable' objects
             elements = []
-
-            # Define styles
             styles = getSampleStyleSheet()
 
-            # Custom styles
             title_style = ParagraphStyle(
                 "CustomTitle",
                 parent=styles["Heading1"],
                 fontSize=24,
-                textColor="#1a1a1a",
+                textColor=colors.HexColor("#1a1a1a"),
                 spaceAfter=30,
                 alignment=TA_CENTER,
-                fontName="Helvetica-Bold",
+                fontName=font_bold,
             )
-
             heading_style = ParagraphStyle(
                 "CustomHeading",
                 parent=styles["Heading2"],
                 fontSize=16,
-                textColor="#2c3e50",
+                textColor=colors.HexColor("#2c3e50"),
                 spaceAfter=12,
                 spaceBefore=12,
-                fontName="Helvetica-Bold",
+                fontName=font_bold,
             )
-
+            subheading_style = ParagraphStyle(
+                "CustomSubheading",
+                parent=styles["Heading3"],
+                fontSize=13,
+                textColor=colors.HexColor("#34495e"),
+                spaceAfter=8,
+                spaceBefore=10,
+                fontName=font_bold,
+            )
             body_style = ParagraphStyle(
                 "CustomBody",
                 parent=styles["BodyText"],
                 fontSize=11,
-                textColor="#333333",
+                textColor=colors.HexColor("#333333"),
                 alignment=TA_JUSTIFY,
                 spaceAfter=12,
-                leading=14,
+                leading=15,
+                fontName=font_regular,
             )
 
-            # Add title
-            elements.append(Paragraph(title, title_style))
+            # Title
+            elements.append(Paragraph(_markdown_inline_to_html(title), title_style))
             elements.append(Spacer(1, 0.2 * inch))
 
-            # Add generation timestamp
             timestamp = datetime.utcnow().strftime("%B %d, %Y")
-            timestamp_text = f"<i>Generated on {timestamp}</i>"
-            elements.append(Paragraph(timestamp_text, styles["Italic"]))
+            elements.append(Paragraph(f"<i>Generated on {timestamp}</i>", styles["Italic"]))
             elements.append(Spacer(1, 0.3 * inch))
 
-            # Process content - split by paragraphs and format
-            paragraphs = content.split("\n\n")
+            # Split content into typed blocks
+            blocks = LectureService._split_content_into_blocks(content)
 
-            for para in paragraphs:
-                if not para.strip():
-                    continue
+            for block in blocks:
+                btype = block["type"]
+                btext = block["content"]
 
-                # Check if it's a heading (simple heuristic: short lines or starts with #)
-                if para.strip().startswith("#"):
-                    # Remove markdown heading markers
-                    heading_text = para.strip().lstrip("#").strip()
-                    elements.append(Paragraph(heading_text, heading_style))
-                elif len(para.strip()) < 100 and para.strip().endswith(":"):
-                    # Likely a section heading
-                    elements.append(Paragraph(para.strip(), heading_style))
-                else:
-                    # Regular paragraph
-                    # Escape special XML characters and preserve formatting
-                    safe_para = (
-                        para.replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
-                        .replace("\n", "<br/>")
-                    )
-                    elements.append(Paragraph(safe_para, body_style))
+                if btype == "mermaid":
+                    img_bytes = LectureService._fetch_mermaid_image(btext)
+                    if img_bytes:
+                        try:
+                            img = Image(BytesIO(img_bytes))
+                            # Scale to fit BOTH page width and height (with margin headroom)
+                            max_width = 6.0 * inch
+                            max_height = 8.0 * inch  # Leave room for margins on letter (11" tall)
+                            iw, ih = img.imageWidth, img.imageHeight
 
-                elements.append(Spacer(1, 0.1 * inch))
+                            # Compute scale ratios for width and height; pick the smaller (most restrictive)
+                            width_ratio = max_width / iw if iw > max_width else 1.0
+                            height_ratio = max_height / ih if ih > max_height else 1.0
+                            scale = min(width_ratio, height_ratio)
 
-            # Build PDF
+                            if scale < 1.0:
+                                img.drawWidth = iw * scale
+                                img.drawHeight = ih * scale
+                            else:
+                                img.drawWidth = iw
+                                img.drawHeight = ih
+
+                            elements.append(Spacer(1, 0.15 * inch))
+                            elements.append(img)
+                            elements.append(Spacer(1, 0.15 * inch))
+                        except Exception as e:
+                            logger.warning(f"Could not embed mermaid image: {e}")
+                            # Fallback: render as code block
+                            elements.append(Paragraph(
+                                f"<font name='Courier' size='9'>[Diagram]<br/>{_escape_xml(btext).replace(chr(10), '<br/>')}</font>",
+                                body_style,
+                            ))
+                    else:
+                        # Fallback: show mermaid source
+                        elements.append(Paragraph(
+                            f"<font name='Courier' size='9'>[Diagram]<br/>{_escape_xml(btext).replace(chr(10), '<br/>')}</font>",
+                            body_style,
+                        ))
+
+                elif btype == "table":
+                    rows = LectureService._parse_markdown_table(btext)
+                    if rows:
+                        elements.append(Spacer(1, 0.1 * inch))
+                        elements.append(LectureService._build_reportlab_table(rows, font_regular, font_bold))
+                        elements.append(Spacer(1, 0.15 * inch))
+                    else:
+                        elements.append(Paragraph(_escape_xml(btext), body_style))
+
+                else:  # text
+                    paragraphs = btext.split("\n\n")
+                    for para in paragraphs:
+                        para = para.strip()
+                        if not para:
+                            continue
+
+                        # Markdown headings
+                        if para.startswith("###"):
+                            elements.append(Paragraph(
+                                _markdown_inline_to_html(para.lstrip("#").strip()),
+                                subheading_style,
+                            ))
+                        elif para.startswith("##"):
+                            elements.append(Paragraph(
+                                _markdown_inline_to_html(para.lstrip("#").strip()),
+                                heading_style,
+                            ))
+                        elif para.startswith("#"):
+                            elements.append(Paragraph(
+                                _markdown_inline_to_html(para.lstrip("#").strip()),
+                                heading_style,
+                            ))
+                        elif len(para) < 100 and para.endswith(":") and "\n" not in para:
+                            elements.append(Paragraph(
+                                _markdown_inline_to_html(para),
+                                heading_style,
+                            ))
+                        else:
+                            html_para = _markdown_inline_to_html(para).replace("\n", "<br/>")
+                            elements.append(Paragraph(html_para, body_style))
+
+                        elements.append(Spacer(1, 0.05 * inch))
+
             doc.build(elements)
-
-            # Get PDF bytes
             pdf_bytes = buffer.getvalue()
             buffer.close()
 
@@ -1995,16 +2416,8 @@ BEGIN THE LECTURE NOW:
                     detail="Lecture PDF not found",
                 )
 
-            # Get the PDF file — prefer file_type="pdf", fall back to first record
-            pdf_content = next(
-                (c for c in lecture_contents if c.get("file_type") == "pdf"),
-                lecture_contents[0],
-            )
-            if pdf_content.get("file_type") != "pdf":
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Lecture PDF not found",
-                )
+            # Get the PDF file (should be only one)
+            pdf_content = lecture_contents[0]
             storage_path = pdf_content["storage_path"]
             storage_bucket = pdf_content["storage_bucket"]
 
