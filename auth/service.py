@@ -1,5 +1,6 @@
 # auth/service.py
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -18,7 +19,7 @@ except ImportError:
     pass  # Models may not be needed for user creation
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=10)
 
 
 class AuthService:
@@ -28,6 +29,22 @@ class AuthService:
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         """Verify a password against its hash."""
         return pwd_context.verify(plain_password, hashed_password)
+
+    @staticmethod
+    async def verify_password_async(plain_password: str, hashed_password: str) -> bool:
+        """Verify a password without blocking the event loop."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, pwd_context.verify, plain_password, hashed_password)
+
+    @staticmethod
+    async def authenticate_user_async(db, email: str, password: str) -> Optional["User"]:
+        """Authenticate a user without blocking the event loop during bcrypt."""
+        user_data = db.get_user_by_email(email.lower())
+        if not user_data:
+            return None
+        if not await AuthService.verify_password_async(password, user_data.get("hashed_password", "")):
+            return None
+        return User(**user_data)
 
     @staticmethod
     def get_password_hash(password: str) -> str:

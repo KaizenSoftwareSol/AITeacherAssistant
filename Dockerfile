@@ -44,6 +44,6 @@ USER appuser
 EXPOSE 8005
 
 # Run the application (Render sets PORT dynamically)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8005}"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8005} --workers ${WORKERS:-4}"]
 
 
