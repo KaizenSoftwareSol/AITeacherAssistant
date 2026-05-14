@@ -102,7 +102,6 @@ class NotificationService:
                     related_entity_int_id = None  # Set to None if conversion fails
             
             notification_data = {
-                "id": notification_id,
                 "user_id": user_int_id,  # Use integer ID
                 "title": title,
                 "description": description,
@@ -215,7 +214,6 @@ class NotificationService:
                         related_entity_int_id = None  # Set to None if conversion fails
                 
                 notifications.append({
-                    "id": notification_id,
                     "user_id": user_int_id,  # Use integer ID
                     "title": title,
                     "description": description,

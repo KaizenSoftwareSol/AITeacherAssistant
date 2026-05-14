@@ -229,7 +229,6 @@ async def enroll_by_token(
         
         # Create new enrollment
         enrollment_data = {
-            "id": str(uuid4()),
             "student_id": str(student.id),
             "course_id": course_int_id,
             "semester_id": semester_int_id,
@@ -393,7 +392,7 @@ async def enroll_in_course(
             else:
                 semester_int_id = semester_id
         else:
-            # Get the most recent semester for this course
+            # 1. Try course-level semester (legacy)
             semester_result = (
                 db.admin_client.table("semester")
                 .select("*")
@@ -402,19 +401,33 @@ async def enroll_in_course(
                 .limit(1)
                 .execute()
             )
-            
-            if semester_result.data and len(semester_result.data) > 0:
+
+            if semester_result.data:
                 semester_id = semester_result.data[0]["id"]
-                semester_int_id = semester_id  # From database, should be integer already
+                semester_int_id = semester_id
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No active semester found for this course. Please contact your instructor.",
+                # 2. Fall back to the most recent university-level semester
+                uni_semester_result = (
+                    db.admin_client.table("semester")
+                    .select("*")
+                    .eq("university_id", student.university_id)
+                    .is_("course_id", "null")
+                    .order("start_date", desc=True)
+                    .limit(1)
+                    .execute()
                 )
+
+                if uni_semester_result.data:
+                    semester_id = uni_semester_result.data[0]["id"]
+                    semester_int_id = semester_id
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="No active semester found for this course. Please contact your instructor.",
+                    )
         
         # Create enrollment
         enrollment_data = {
-            "id": str(uuid4()),
             "student_id": str(student.id),
             "course_id": course_int_id,
             "semester_id": semester_int_id,

@@ -4,7 +4,7 @@ Course management routes for teachers.
 Optimized with caching for improved performance.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import random
 import string
 from typing import Annotated
@@ -27,9 +27,9 @@ class CourseCreateRequest(BaseModel):
     code: str | None = Field(default=None, min_length=4, max_length=10)
     description: str | None = None
     curriculum_content: str | None = None
-    # Note: Semesters are now managed at university level by admins
-    # They are no longer created during course creation
-    # Use the admin API endpoints to create semesters separately
+    semester_name: str | None = None
+    semester_start_date: str | None = None
+    semester_end_date: str | None = None
 
     @field_validator("code")
     @classmethod
@@ -408,7 +408,44 @@ async def create_course(
 
         course_data = course_result.data[0]
         semester_data = None
-        
+
+        # Create or reuse a university-level semester if the teacher provided one
+        if request.semester_name:
+            try:
+                sem_name = request.semester_name.strip()
+                existing_sem = (
+                    db.admin_client.table("semester")
+                    .select("*")
+                    .eq("university_id", university_id)
+                    .eq("name", sem_name)
+                    .is_("course_id", "null")
+                    .limit(1)
+                    .execute()
+                )
+                if existing_sem.data:
+                    semester_data = existing_sem.data[0]
+                else:
+                    start = request.semester_start_date or datetime.utcnow().date().isoformat()
+                    end = request.semester_end_date or (
+                        (datetime.utcnow() + timedelta(days=120)).date().isoformat()
+                    )
+                    new_sem = (
+                        db.admin_client.table("semester")
+                        .insert({
+                            "name": sem_name,
+                            "university_id": university_id,
+                            "start_date": start,
+                            "end_date": end,
+                            "created_at": datetime.utcnow().isoformat(),
+                            "updated_at": datetime.utcnow().isoformat(),
+                        })
+                        .execute()
+                    )
+                    if new_sem.data:
+                        semester_data = new_sem.data[0]
+            except Exception as sem_err:
+                logger.warning(f"Failed to create semester during course creation: {sem_err}")
+
         # Invalidate courses cache
         if created_by_teacher_id:
             # Invalidate cache for the teacher who created it

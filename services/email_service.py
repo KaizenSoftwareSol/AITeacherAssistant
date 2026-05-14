@@ -271,7 +271,31 @@ class EmailService:
         
         subject = "Activate Your AITA Platform Account"
         return self._send_email(to_email, subject, html_content, to_name)
-    
+
+    def send_password_reset_email(
+        self,
+        to_email: str,
+        reset_link: str,
+        to_name: Optional[str] = None
+    ) -> bool:
+        """
+        Send a password reset email using the activation template.
+
+        The student clicks the link and sets a new password via /activate-account.
+        """
+        replacements = {
+            "ACTIVATION_LINK": reset_link,
+        }
+
+        html_content = self._render_template("03_account_activation.html", replacements)
+
+        if not html_content:
+            logger.error("Failed to render password reset email template")
+            return False
+
+        subject = "Reset Your AITA Platform Password"
+        return self._send_email(to_email, subject, html_content, to_name)
+
     def send_enrollment_confirmation(
         self,
         to_email: str,

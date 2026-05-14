@@ -3645,18 +3645,22 @@ async def delete_teacher(
                 detail="User is not a teacher",
             )
 
-        # Verify user belongs to admin's university
-        if user_data.get("university_id") != university_id:
+        # Verify user belongs to admin's university (compare as strings — university_id
+        # from require_admin is always a string, DB value may be int or str)
+        if str(user_data.get("university_id")) != str(university_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only delete teachers from your own university",
             )
 
+        # Resolve integer PK from the looked-up user (user_id from the route is a UUID)
+        int_user_id = user_data.get("id")
+
         # Verify teacher profile exists and belongs to this university
         teacher_result = (
             db.admin_client.table("teacher")
             .select("id, university_id")
-            .eq("user_id", user_id)
+            .eq("user_id", int_user_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -3668,8 +3672,7 @@ async def delete_teacher(
                 detail="Teacher profile not found",
             )
 
-        # Delete the user (this will cascade delete the teacher profile)
-        success = db.delete_user(user_id)
+        success = db.delete_user(int_user_id)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3721,18 +3724,22 @@ async def delete_student(
                 detail="User is not a student",
             )
 
-        # Verify user belongs to admin's university
-        if user_data.get("university_id") != university_id:
+        # Verify user belongs to admin's university (compare as strings — university_id
+        # from require_admin is always a string, DB value may be int or str)
+        if str(user_data.get("university_id")) != str(university_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only delete students from your own university",
             )
 
+        # Resolve integer PK from the looked-up user (user_id from the route is a UUID)
+        int_user_id = user_data.get("id")
+
         # Verify student profile exists and belongs to this university
         student_result = (
             db.admin_client.table("student")
             .select("id, university_id, student_id")
-            .eq("user_id", user_id)
+            .eq("user_id", int_user_id)
             .eq("university_id", university_id)
             .limit(1)
             .execute()
@@ -3746,8 +3753,7 @@ async def delete_student(
 
         student_info = student_result.data[0]
 
-        # Delete the user (this will cascade delete the student profile and enrollments)
-        success = db.delete_user(user_id)
+        success = db.delete_user(int_user_id)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3772,6 +3778,90 @@ async def delete_student(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error deleting student",
+        ) from e
+
+
+@router.post("/students/{user_id}/resend-activation")
+async def resend_student_activation(
+    user_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """Resend activation email to a student so they can set up their account."""
+    _, university_id = admin_data
+
+    try:
+        user_data = db.get_user_by_id(user_id, use_cache=False)
+        if not user_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        if user_data.get("role") != UserRole.STUDENT.value:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User is not a student")
+        if str(user_data.get("university_id")) != str(university_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only manage students from your own university")
+
+        int_user_id = user_data.get("id")
+        activation_token = AuthService.create_activation_token(str(int_user_id))
+        activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+
+        email = user_data.get("email")
+        name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or None
+
+        sent = email_service.send_activation_email(email, activation_link, name)
+        if not sent:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to send activation email")
+
+        logger.info(f"Admin resent activation email to student {user_id} ({email})")
+        return {"message": "Activation email sent successfully", "email": email}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resending activation for student {user_id}: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send activation email",
+        ) from e
+
+
+@router.post("/students/{user_id}/reset-password")
+async def reset_student_password(
+    user_id: str,
+    admin_data: Annotated[tuple[User, str], Depends(require_admin)],
+    db=Depends(get_db),
+):
+    """Send a password reset link to a student via email."""
+    _, university_id = admin_data
+
+    try:
+        user_data = db.get_user_by_id(user_id, use_cache=False)
+        if not user_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        if user_data.get("role") != UserRole.STUDENT.value:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User is not a student")
+        if str(user_data.get("university_id")) != str(university_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only manage students from your own university")
+
+        int_user_id = user_data.get("id")
+        activation_token = AuthService.create_activation_token(str(int_user_id))
+        activation_link = f"{settings.FRONTEND_URL}/activate-account?token={activation_token}"
+
+        email = user_data.get("email")
+        name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or None
+
+        sent = email_service.send_password_reset_email(email, activation_link, name)
+        if not sent:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to send password reset email")
+
+        logger.info(f"Admin sent password reset email to student {user_id} ({email})")
+        return {"message": "Password reset email sent successfully", "email": email}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending password reset for student {user_id}: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send password reset email",
         ) from e
 
 
