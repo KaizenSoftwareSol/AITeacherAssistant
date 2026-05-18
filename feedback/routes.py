@@ -3,6 +3,8 @@ import re
 import unicodedata
 from uuid import uuid4
 
+from typing import Annotated, List, Optional
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from dependencies import AnyUser, SystemUser
@@ -26,7 +28,7 @@ from utils.db import get_db
 router = APIRouter()
 system_feedback_router = APIRouter()
 
-FEEDBACK_BUCKET = "feedback-attachments"
+FEEDBACK_BUCKET = "USER_UPLOADS"
 MAX_ATTACHMENTS = 3
 MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
@@ -94,12 +96,19 @@ async def _upload_attachments(
         safe_filename = _sanitize_filename(file.filename)
         file_key = f"{uuid4()}-{safe_filename}"
         path = f"feedback/{user_uuid}/{feedback_uuid}/{file_key}"
-        supabase.upload_file(
-            FEEDBACK_BUCKET,
-            path,
-            file_data,
-            {"content-type": file.content_type, "upsert": "false"},
-        )
+        try:
+            supabase.upload_file(
+                FEEDBACK_BUCKET,
+                path,
+                file_data,
+                {"content-type": file.content_type, "upsert": "false"},
+            )
+        except Exception as upload_err:
+            logger.error(f"Failed to upload attachment {file.filename}: {upload_err}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"File upload failed. Check that the '{FEEDBACK_BUCKET}' bucket exists in Supabase Storage.",
+            )
         public_url = f"{settings.SUPABASE_URL}/storage/v1/object/public/{FEEDBACK_BUCKET}/{path}"
         uploaded.append(
             {
@@ -134,7 +143,7 @@ async def create_feedback(
     difficulty_level: FeedbackDifficultyLevel = Form(...),
     title: str = Form(...),
     description: str = Form(...),
-    screenshots: list[UploadFile] = File(default=[]),
+    screenshots: Optional[List[UploadFile]] = File(default=None),
     db=Depends(get_db),
 ):
     _ensure_feedback_user(current_user.role)
@@ -148,7 +157,8 @@ async def create_feedback(
 
     feedback_uuid = str(uuid4())
     user_uuid = str(current_user.uuid or current_user.id)
-    attachments = await _upload_attachments(user_uuid=user_uuid, feedback_uuid=feedback_uuid, files=screenshots)
+    files_to_upload: List[UploadFile] = screenshots if screenshots is not None else []
+    attachments = await _upload_attachments(user_uuid=user_uuid, feedback_uuid=feedback_uuid, files=files_to_upload)
 
     record = {
         "id": _get_next_feedback_id(db),

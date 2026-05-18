@@ -1,12 +1,14 @@
-FROM python:3.10.11-slim
+FROM python:3.10-slim-bookworm
 
 # Environment configuration
+# PORT is intentionally NOT set here so that:
+#   - Render can inject its own PORT at runtime
+#   - Local Docker uses the CMD default of 8005
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=off \
     PIP_DISABLE_PIP_VERSION_CHECK=on \
-    PIP_DEFAULT_TIMEOUT=100 \
-    PORT=8000
+    PIP_DEFAULT_TIMEOUT=100
 
 # Set working directory
 WORKDIR /app

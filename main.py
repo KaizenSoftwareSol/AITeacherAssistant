@@ -1,6 +1,7 @@
 # main.py
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -58,7 +59,21 @@ async def lifespan(app: FastAPI):
     logger.info("Application shutdown complete")
 
 
-allowed_origins = ["*"]
+# Build allowed origins list.
+# allow_credentials=True is incompatible with the "*" wildcard per the CORS spec,
+# so we always list origins explicitly. Add FRONTEND_URL and any extra origins
+# via the ALLOWED_ORIGINS env var (comma-separated).
+_base_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+]
+_extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_frontend_url = os.getenv("FRONTEND_URL", "").strip()
+if _frontend_url:
+    _extra.append(_frontend_url)
+
+allowed_origins = list(dict.fromkeys(_base_origins + _extra))  # deduplicated, order preserved
 
 
 app = FastAPI(
