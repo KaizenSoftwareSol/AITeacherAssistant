@@ -666,14 +666,14 @@ The lecture should be written **as if the teacher is speaking to the class**, gu
    - 📝 Summary/recap sections
    Use 1 emoji per relevant header or callout — DO NOT overuse them.
 
-2. **MARKDOWN TABLES** — Use when comparing items, listing properties, showing classifications, or organizing structured data. Format:
-   ```
+2. **MARKDOWN TABLES** — Use when comparing items, listing properties, showing classifications, or organizing structured data. Output the table DIRECTLY in your response — do NOT wrap it in backtick code fences. Format:
+
    | Column 1 | Column 2 | Column 3 |
    |----------|----------|----------|
    | Value A  | Value B  | Value C  |
    | Value D  | Value E  | Value F  |
-   ```
-   Tables MUST be in this exact markdown format with pipe separators and a header divider row.
+
+   Tables MUST be in this exact markdown format with pipe separators and a header divider row. Never wrap a table in ``` backticks.
 
 3. **MERMAID FLOWCHARTS** — Use for processes, decision trees, hierarchies, cycles, or system overviews. Wrap in fenced code blocks with `mermaid` language tag:
    ```mermaid
